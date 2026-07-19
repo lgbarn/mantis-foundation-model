@@ -19,7 +19,7 @@ from mantis_v2.pipeline import (
     probe,
     train,
 )
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -71,6 +71,33 @@ def test_validation_sampling_is_deterministic_and_stream_stratified() -> None:
 def test_validation_state_recovers_resume_patience() -> None:
     history = [{"validation": {"total": loss}} for loss in (5.0, 4.0, 4.2, 4.3, 4.4)]
     assert _validation_state(history) == (4.0, 3)
+
+
+def test_non_finite_validation_loss_reports_validation_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_config(ROOT / "configs" / "smoke.toml")
+    loader = DataLoader(
+        [
+            {
+                "context": torch.zeros(5, config.model.input_length),
+                "candle_target": torch.zeros(5, len(config.target.horizons)),
+                "leg_target": torch.zeros(2),
+            }
+        ],
+        batch_size=1,
+    )
+
+    def non_finite_loss(*args: Any, **kwargs: Any) -> dict[str, torch.Tensor]:
+        del args, kwargs
+        value = torch.tensor(float("nan"))
+        return {"total": value, "candle": value, "leg": value}
+
+    monkeypatch.setattr(pipeline_module, "nextleg_loss", non_finite_loss)
+    with pytest.raises(PipelineError, match="non-finite validation loss"):
+        pipeline_module._run_epoch(
+            torch.nn.Identity(), loader, config, torch.device("cpu"), None, 1
+        )
 
 
 def test_terminal_epoch_is_checkpointed_and_collision_is_rejected(tmp_path: Path) -> None:

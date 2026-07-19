@@ -232,7 +232,8 @@ def _run_epoch(
                 config.target,
             )
             if not torch.isfinite(losses["total"]):
-                raise PipelineError("non-finite training loss")
+                phase = "training" if training else "validation"
+                raise PipelineError(f"non-finite {phase} loss")
             if optimizer is not None:
                 losses["total"].backward()  # type: ignore[no-untyped-call]
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)

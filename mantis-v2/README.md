@@ -27,7 +27,7 @@ NextLeg pivots are detected per stream. A sample is legal only when its complete
 
 ## Objective
 
-Each batch contains context-normalized OHLCV shaped `[B, 5, L]`, linearly resized to the MantisV2 native length of 512. Each channel is encoded independently and the five embeddings are concatenated.
+Each batch contains context-normalized OHLCV shaped `[B, 5, L]`, linearly resized to the MantisV2 native length of 512. Each channel is encoded independently and the five embeddings are concatenated. Context-only statistics standardize both context and future values; both are clamped to `[-10, 10]` before the future-minus-current candle target is calculated. This bounds every candle target to `[-20, 20]`, including near-constant price windows.
 
 The model jointly predicts:
 
@@ -68,7 +68,7 @@ Training stops after eight epochs without validation-total improvement. `metrics
 Outputs live under the configured external `artifact_root`:
 
 ```text
-/Volumes/Storage/trading-research/artifacts/mantis-foundation-model/mantisv2-nextleg-mps/
+/Volumes/Storage/trading-research/artifacts/mantis-foundation-model/mantisv2-nextleg-mps-target-clamp-v2/
 |-- checkpoints/latest.pt
 |-- checkpoints/best.pt
 |-- metrics.json
@@ -83,6 +83,8 @@ Outputs live under the configured external `artifact_root`:
 Native checkpoints include model and optimizer state, epoch, global step, Python, NumPy, CPU Torch, CUDA, and MPS RNG state, config digest, full dataset content identity, training-source content digest, Git state, dependency-lock digest, and pinned upstream identities. Resume fails closed if any load-bearing identity changes, including uncommitted source content. Each epoch uses a pending checkpoint that is promoted only after metric history is durable, so an interrupted two-file update falls back to the prior valid epoch.
 
 `run.name` creates the final directory below `run.artifact_root`. A non-resume production run refuses to replace an existing named run unless `run.allow_overwrite` is explicitly enabled. Resume uses `latest.pt`; evaluation and export use validation-selected `best.pt`. The smoke and guarded probe configs enable overwrite only for disposable verification artifacts.
+
+The earlier `mantisv2-nextleg-mps` run is preserved as a superseded diagnostic artifact. It completed 12 epochs before investigation found that unclamped future normalization could amplify a one-tick move in a constant-price window into a target of 15,625. Because correcting the target changes both source and config provenance, that checkpoint is intentionally not resumable by the corrected production config.
 
 The existing `Futures-Foundation-Model/checkpoints/mantis_ssl_ctr_seq2seq.pt` is a legacy Mantis checkpoint with `tokgen_unit`/`vit_unit` keys. It is not compatible with the MantisV2 architecture and is deliberately not loaded.
 

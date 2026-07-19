@@ -254,7 +254,11 @@ class NextLegDataset(Dataset[dict[str, torch.Tensor]]):
 
         horizons = np.asarray(self.target.horizons, dtype=np.int64)
         future = stream.values[anchor.confirmation + horizons].T
-        future_normalized = (future - mean) / std
+        future_normalized = np.clip(
+            (future - mean) / std,
+            -self.target.normalization_clamp,
+            self.target.normalization_clamp,
+        )
         candle_target = future_normalized - normalized[:, -1:]
         leg_target = np.log1p(np.asarray([anchor.first_leg, anchor.second_leg], dtype=np.float32))
         return {

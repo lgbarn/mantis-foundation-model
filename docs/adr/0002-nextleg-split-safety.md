@@ -16,7 +16,8 @@ NextLeg predicts two consecutive leg durations plus shorter candle horizons. The
 - Keep `target_reserve` and candle batch lookahead as separate configuration concepts.
 - Enforce `target_reserve >= max(context_lengths) + 2 * leg_cap` during config loading.
 - Normalize future targets with context-only statistics; future values never influence input normalization.
+- Clamp both context and future standardized values to the configured symmetric range before calculating future-minus-current candle targets. With clamp `c`, every candle target is bounded to `[-2c, 2c]` even when a context channel has near-zero variance.
 
 ## Consequences
 
-Some boundary samples are discarded. This is intentional: the smaller sample count is preferable to label leakage. Tests exercise two-leg reservation, per-stream construction, and causal normalization.
+Some boundary samples are discarded. This is intentional: the smaller sample count is preferable to label leakage. Tests exercise two-leg reservation, per-stream construction, causal normalization, and bounded targets for near-constant context channels.

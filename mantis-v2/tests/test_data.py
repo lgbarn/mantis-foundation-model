@@ -9,7 +9,9 @@ import torch
 from mantis_v2 import data as data_module
 from mantis_v2.config import load_config
 from mantis_v2.data import (
+    Anchor,
     NextLegDataset,
+    Stream,
     alternating_pivots,
     build_anchors,
     split_bounds,
@@ -60,6 +62,29 @@ def test_context_normalization_is_causal_and_has_fixed_shape() -> None:
     changed = NextLegDataset([changed_stream], anchors, config.data, config.model, config.target)[0]
     torch.testing.assert_close(changed["context"], item["context"])
     assert not torch.allclose(changed["candle_target"], item["candle_target"])
+
+
+def test_future_target_is_clamped_when_context_variance_is_near_zero() -> None:
+    config = load_config(ROOT / "configs" / "smoke.toml")
+    rows = 80
+    values = np.tile(
+        np.asarray([107.625, 107.625, 107.625, 107.625, 1_000.0], dtype=np.float32),
+        (rows, 1),
+    )
+    confirmation = 63
+    values[confirmation + 5, 2] = np.float32(107.640625)
+    stream = Stream(
+        name="ZN_1min",
+        timestamps=np.datetime64("2024-04-29T00:00:00", "ns")
+        + np.arange(rows).astype("timedelta64[m]"),
+        values=values,
+    )
+    anchor = Anchor(stream_index=0, confirmation=confirmation, first_leg=4, second_leg=5)
+
+    item = NextLegDataset([stream], [anchor], config.data, config.model, config.target)[0]
+
+    assert item["candle_target"].abs().max().item() <= 2 * config.target.normalization_clamp
+    assert item["candle_target"][2, 0].item() == config.target.normalization_clamp
 
 
 def test_anchor_detection_runs_independently_per_stream(
