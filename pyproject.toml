@@ -38,5 +38,5 @@ packages = ["mantis_v2"]
 mypy_path = "mantis-v2/src"
 
 [[tool.mypy.overrides]]
-module = ["mantis.*", "pandas.*", "safetensors.*"]
+module = ["mantis.*", "pandas.*", "pyarrow.*", "safetensors.*", "sklearn.*"]
 ignore_missing_imports = true

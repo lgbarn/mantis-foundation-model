@@ -87,6 +87,28 @@ just gate</code></pre>
 <p>The completed <code>mantisv2-nextleg-mps-target-clamp-v2</code> artifact is immutable under source commit <code>cc30dcd0a0034140cde0f2ed3b9f35db7f9f3361</code>. It completed evaluation, safetensors parity, and a separate artifact audit before the mandatory gate was introduced. Exact source provenance intentionally prevents later code from reopening that native checkpoint; future training runs use the gate in this guide.</p>
 <div class="callout warn"><strong>Superseded run:</strong> <code>mantisv2-nextleg-mps/</code> is preserved for diagnosis only. Its 12 completed epochs used unclamped future normalization; a valid one-tick ZN move in a constant-price window produced a target of 15,625. The corrected target changes source and config provenance, so production restarts from the pinned official MantisV2 weights rather than resuming those checkpoints.</div>
 
+<h2>Downstream Supertrend and Topstep 100K workflow</h2>
+<p>The validated NextLeg export feeds a separate classifier and account-evaluation pipeline. The production config is <code>mantis-v2/configs/supertrend-topstep-100k.toml</code>. All data locations, model locations, strategy parameters, walk-forward windows, thresholds, contract multipliers, and account rules are TOML values. Repeated <code>--set section.key=value</code> flags provide recorded scalar overrides without source edits.</p>
+<pre><code>just downstream-prepare
+just downstream-embed
+just downstream-walk-forward
+just downstream-simulate</code></pre>
+<p><code>just downstream-run</code> runs the same dependency order. For long production runs, prefer the individual stages so completed, content-addressed Parquet and NumPy outputs remain independently inspectable. A partial stage fails closed; use a new run name or an explicitly reviewed overwrite-enabled recovery config.</p>
+<table>
+<thead><tr><th>Stage</th><th>Contract</th><th>Output</th></tr></thead>
+<tbody>
+<tr><td>Prepare</td><td>Every eligible pre-holdout closed 3m Supertrend-state bar; causal completed 1m/3m/15m contexts; next-open, stop-first labels.</td><td>Per-symbol candidate Parquet plus source hashes. No holdout labels are materialized.</td></tr>
+<tr><td>Embed</td><td>Parity-verified NextLeg encoder, matching context normalization, bounded MPS batches.</td><td>Float16 <code>.npy</code> shards and paired metadata Parquet.</td></tr>
+<tr><td>Walk-forward</td><td>24/3/3 month folds, event-span purge, context embargo, train-only scaler/head, validation-only numeric threshold.</td><td>Portable <code>.npz</code> heads, full test predictions, class-balanced log loss and Brier, plus unweighted scores, ROC AUC, and PR AUC.</td></tr>
+<tr><td>Simulate</td><td>Flat-only, no pyramiding, accepted-trade cooldown, current Topstep 100K Combine state machine.</td><td>Trades Parquet and account-result manifest.</td></tr>
+</tbody>
+</table>
+<div class="callout"><strong>Trade frequency:</strong> Supertrend flips are not the candidate trigger. Every eligible 3m close is scored in the current trend direction. The 20-bar cooldown starts only after a probability-qualified trade is accepted.</div>
+<p>Labels force-close any still-open position on the final completed bar before 3:10 PM CT. This is decided from the session calendar when labels are built; the simulator never uses a future realized exit to decide whether to accept an entry.</p>
+<p><code>just downstream-smoke</code> is CPU-only and part of <code>just gate</code>. It exercises Parquet and NumPy serialization, train-only logistic fitting, finite metric validation, portable head output, Topstep replay, and the complete four-manifest hash chain without reading production data.</p>
+<p>The 100K baseline starts at $100,000, targets $6,000, trails a $3,000 Maximum Loss Limit from highest end-of-day equity until the floor locks at $100,000, enforces a strict 50% best-day consistency test and 10-mini maximum, and requires at least two trading days. The base Combine has no mandatory Daily Loss Limit. The separate <code>supertrend-topstep-100k-dll.toml</code> profile enables the optional $2,000 soft daily halt.</p>
+<div class="callout warn"><strong>Holdout:</strong> Normal preparation never writes 2026 labels or embeddings. The dedicated holdout command requires both <code>evaluation.allow_holdout=true</code> and the matching <code>--unlock</code> argument. Only then does it generate holdout candidates and embeddings and reuse the final validation-owned head and numeric threshold; it does not tune on holdout.</div>
+
 <h2>Open production decisions</h2>
 <p>No paid tracking service is configured. Metrics are durable local JSON on the external drive. Hugging Face publication remains blocked pending license resolution. Model quality thresholds and one-time holdout governance remain explicit pre-declared operator decisions; they must not be selected after observing a candidate result.</p>
 </body>

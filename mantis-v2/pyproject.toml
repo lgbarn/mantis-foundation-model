@@ -8,7 +8,9 @@ dependencies = [
   "mantis-tsfm==1.0.0",
   "numpy>=1.26,<3",
   "pandas>=2.2,<3",
+  "pyarrow>=25,<26",
   "safetensors>=0.4,<0.5",
+  "scikit-learn>=1.9,<2",
   "torch>=2.4,<3",
 ]
 

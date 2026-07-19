@@ -103,3 +103,71 @@ The existing `Futures-Foundation-Model/checkpoints/mantis_ssl_ctr_seq2seq.pt` is
 - No experiment-tracking service is enabled. Metrics and provenance are local JSON artifacts.
 - The normal evaluator refuses holdout access. A release-specific config and review are required before a one-time 2026 holdout evaluation.
 - Full data hashing reads all 36 CSVs before training. This is intentional and binds checkpoints to exact input content.
+
+## Supertrend and Topstep 100K downstream pipeline
+
+The default downstream config is `configs/supertrend-topstep-100k.toml`. It
+uses `ES`, `NQ`, `RTY`, `YM`, `GC`, `CL`, and `ZB` at 1m, 3m, and 15m. A
+candidate is emitted for every eligible closed 3m bar and is directed by the
+current Supertrend(10, 3.0) state; flips are not required. Entry is the next 3m
+open, the stop is 0.5 ATR(20), the primary target is 3R, the horizon is 120
+bars, same-bar ties stop out, and round-trip cost is 0.03R. Any still-open trade
+is force-closed on the final completed bar before 3:10 PM CT; the simulator
+never selects trades based on their future realized exit time.
+
+Run one stage at a time for bounded failure recovery and inspection:
+
+```bash
+just downstream-prepare
+just downstream-embed
+just downstream-walk-forward
+just downstream-simulate
+```
+
+Or run the normal chain:
+
+```bash
+just downstream-run
+```
+
+All locations and parameters live in TOML. A command can record a one-off
+scalar override without changing code, for example:
+
+```bash
+uv run mantis-v2 downstream-simulate \
+  --config mantis-v2/configs/supertrend-topstep-100k.toml \
+  --set topstep.contracts=2
+```
+
+Prepared candidates and predictions are Parquet. MantisV2 embeddings are
+bounded float16 `.npy` shards with paired Parquet metadata. Each stage verifies
+the prior stage's hashes and emits a manifest. The foundation export path and
+trusted safetensors SHA-256 are both explicit config values. The logistic head stores scaler
+and coefficient arrays in `.npz`, never pickle.
+
+`just downstream-smoke` runs a deterministic CPU-only component smoke and
+writes all four stage manifests. It is part of `just gate`. Production stages
+fail closed on partial output; resume with a new run name, or explicitly use an
+overwrite-enabled recovery config after inspecting the partial directory.
+
+Walk-forward defaults to 24 training months, 3 validation months, 3 test
+months, and a 3-month stride. Label event spans are purged and the 1m/3m/15m
+context is embargoed at partition boundaries. Standardization and logistic
+training use train only. Validation selects and persists the numeric top-50%
+probability threshold; test uses that exact value. Class-balanced log loss and
+Brier score are primary, while unweighted scores, ROC AUC, and PR AUC are
+diagnostic.
+
+The simulator defaults to the current Topstep 100K Combine baseline: $100,000
+start, $6,000 target, $3,000 end-of-day trailing Maximum Loss Limit locked at
+$100,000, strict 50% consistency, 10-mini maximum, and at least two trading
+days. The base profile has no Daily Loss Limit. Use
+`configs/supertrend-topstep-100k-dll.toml` only for the optional $2,000 soft
+daily-halt variant. Express Funded and Live Funded rules are not mixed into the
+Combine simulator.
+
+Normal preparation does not materialize 2026 labels or embeddings. The sealed
+`downstream-holdout` command requires a reviewed config
+with `evaluation.allow_holdout=true` and the matching explicit `--unlock`
+value. Only then does it generate 2026 candidates and embeddings and apply the
+final validation-owned head and threshold once.

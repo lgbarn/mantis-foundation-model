@@ -13,6 +13,32 @@ from typing import Any
 from mantis_v2.checkpoint import CheckpointError
 from mantis_v2.config import ConfigError, PipelineConfig, load_config
 from mantis_v2.data import DataContractError, inspect_streams
+from mantis_v2.downstream_config import DownstreamConfig, load_downstream_config
+from mantis_v2.downstream_pipeline import (
+    DownstreamPipelineError,
+)
+from mantis_v2.downstream_pipeline import (
+    embed as downstream_embed,
+)
+from mantis_v2.downstream_pipeline import (
+    evaluate_holdout as downstream_holdout,
+)
+from mantis_v2.downstream_pipeline import (
+    prepare as downstream_prepare,
+)
+from mantis_v2.downstream_pipeline import (
+    run as downstream_run,
+)
+from mantis_v2.downstream_pipeline import (
+    simulate as downstream_simulate,
+)
+from mantis_v2.downstream_pipeline import (
+    smoke as downstream_smoke,
+)
+from mantis_v2.downstream_pipeline import (
+    walk_forward as downstream_walk_forward,
+)
+from mantis_v2.embedding import EmbeddingContractError
 from mantis_v2.model import ModelContractError
 from mantis_v2.pipeline import (
     PipelineError,
@@ -26,6 +52,19 @@ from mantis_v2.pipeline import (
     verify_upstream,
 )
 from mantis_v2.runtime import RuntimeContractError
+from mantis_v2.strategy import StrategyContractError
+from mantis_v2.topstep import TopstepContractError
+from mantis_v2.walk_forward import WalkForwardContractError
+
+_DOWNSTREAM_COMMANDS = {
+    "downstream-prepare",
+    "downstream-embed",
+    "downstream-walk-forward",
+    "downstream-simulate",
+    "downstream-run",
+    "downstream-holdout",
+    "downstream-smoke",
+}
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -40,9 +79,20 @@ def _parser() -> argparse.ArgumentParser:
         "smoke",
         "probe",
         "verify-upstream",
+        *_DOWNSTREAM_COMMANDS,
     ):
         child = subparsers.add_parser(command)
         child.add_argument("--config", required=True, type=Path)
+        if command in _DOWNSTREAM_COMMANDS:
+            child.add_argument(
+                "--set",
+                action="append",
+                default=[],
+                metavar="SECTION.KEY=VALUE",
+                help="recorded TOML scalar override; repeat as needed",
+            )
+        if command == "downstream-holdout":
+            child.add_argument("--unlock", required=True)
     return parser
 
 
@@ -69,8 +119,25 @@ def main() -> None:
         "verify-upstream": verify_upstream,
     }
     try:
-        config = load_config(args.config)
-        result = commands[args.command](config)
+        if args.command in _DOWNSTREAM_COMMANDS:
+            downstream_config: DownstreamConfig = load_downstream_config(
+                args.config, tuple(args.set)
+            )
+            downstream_commands: dict[str, Callable[[DownstreamConfig], dict[str, Any]]] = {
+                "downstream-prepare": downstream_prepare,
+                "downstream-embed": downstream_embed,
+                "downstream-walk-forward": downstream_walk_forward,
+                "downstream-simulate": downstream_simulate,
+                "downstream-run": downstream_run,
+                "downstream-smoke": downstream_smoke,
+            }
+            if args.command == "downstream-holdout":
+                result = downstream_holdout(downstream_config, args.unlock)
+            else:
+                result = downstream_commands[args.command](downstream_config)
+        else:
+            config = load_config(args.config)
+            result = commands[args.command](config)
     except (
         CheckpointError,
         ConfigError,
@@ -78,6 +145,11 @@ def main() -> None:
         ModelContractError,
         PipelineError,
         RuntimeContractError,
+        DownstreamPipelineError,
+        EmbeddingContractError,
+        StrategyContractError,
+        TopstepContractError,
+        WalkForwardContractError,
     ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc

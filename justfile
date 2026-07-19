@@ -21,7 +21,7 @@ typecheck:
 test:
     uv run pytest
 
-gate: format-check lint typecheck test smoke
+gate: format-check lint typecheck test smoke downstream-smoke
 
 inspect-data config="mantis-v2/configs/nextleg.toml":
     uv run mantis-v2 inspect-data --config {{config}}
@@ -46,3 +46,24 @@ export config="mantis-v2/configs/nextleg.toml":
 
 validated-export config="mantis-v2/configs/nextleg.toml":
     uv run mantis-v2 validated-export --config {{config}}
+
+downstream-prepare config="mantis-v2/configs/supertrend-topstep-100k.toml":
+    uv run mantis-v2 downstream-prepare --config {{config}}
+
+downstream-embed config="mantis-v2/configs/supertrend-topstep-100k.toml":
+    uv run mantis-v2 downstream-embed --config {{config}}
+
+downstream-walk-forward config="mantis-v2/configs/supertrend-topstep-100k.toml":
+    uv run mantis-v2 downstream-walk-forward --config {{config}}
+
+downstream-simulate config="mantis-v2/configs/supertrend-topstep-100k.toml":
+    uv run mantis-v2 downstream-simulate --config {{config}}
+
+downstream-run config="mantis-v2/configs/supertrend-topstep-100k.toml":
+    uv run mantis-v2 downstream-run --config {{config}}
+
+downstream-smoke:
+    uv run mantis-v2 downstream-smoke --config mantis-v2/configs/downstream-smoke.toml
+
+downstream-holdout config="mantis-v2/configs/supertrend-topstep-100k.toml" unlock="":
+    uv run mantis-v2 downstream-holdout --config {{config}} --unlock {{unlock}}

@@ -4,7 +4,7 @@ This repository builds and trains Mantis-family time-series foundation models. M
 
 ## Status
 
-The MantisV2 NextLeg pipeline is implemented and locally verified. The full 36-stream corpus passes its data contract with 1,967,568 train anchors, 224,519 validation anchors, and 294,781 isolated 2026 holdout anchors. See `mantis-v2/README.md` for the model-specific workflow, `docs/training-guide.html` for the operator guide, and `AGENTS.md` for repository rules.
+The MantisV2 NextLeg foundation pipeline and the config-driven 1m/3m/15m Supertrend downstream pipeline are implemented. The downstream workflow uses every eligible closed 3-minute state bar, purged walk-forward logistic probes, and a separate Topstep 100K Combine simulator. See `mantis-v2/README.md` for commands, `docs/training-guide.html` for the operator guide, and `AGENTS.md` for repository rules.
 
 ## Quick start
 
@@ -22,4 +22,10 @@ Production training is intentionally separate from smoke verification:
 just train mantis-v2/configs/nextleg.toml
 ```
 
-`just gate` includes the complete synthetic smoke workflow. `just probe-mps` performs one real-data training batch and one validation batch with the pinned pretrained MantisV2 model. Production uses Apple MPS and writes checkpoints to the external drive. It never copies raw market data into this repository.
+After the validated NextLeg export exists, run the downstream pipeline:
+
+```bash
+just downstream-run mantis-v2/configs/supertrend-topstep-100k.toml
+```
+
+`just gate` includes the complete synthetic foundation smoke workflow and downstream unit contracts. `just probe-mps` performs one real-data training batch and one validation batch with the pinned pretrained MantisV2 model. Production uses Apple MPS and writes checkpoints, Parquet tables, embedding shards, predictions, and simulation results to the external drive. It never copies raw market data into this repository.
