@@ -22,6 +22,7 @@ from mantis_v2.pipeline import (
     probe,
     smoke,
     train,
+    validated_export,
     verify_upstream,
 )
 from mantis_v2.runtime import RuntimeContractError
@@ -35,6 +36,7 @@ def _parser() -> argparse.ArgumentParser:
         "train",
         "evaluate",
         "export",
+        "validated-export",
         "smoke",
         "probe",
         "verify-upstream",
@@ -61,6 +63,7 @@ def main() -> None:
         "train": train,
         "evaluate": evaluate,
         "export": export,
+        "validated-export": validated_export,
         "smoke": smoke,
         "probe": probe,
         "verify-upstream": verify_upstream,

@@ -63,9 +63,9 @@ just gate</code></pre>
 <div class="callout warn"><strong>Legacy checkpoint:</strong> <code>mantis_ssl_ctr_seq2seq.pt</code> belongs to the original Mantis architecture and cannot warm-start MantisV2. The production run begins from the pinned official MantisV2 weights.</div>
 
 <h2>6. Evaluate and export</h2>
-<pre><code>just evaluate mantis-v2/configs/nextleg.toml
-just export mantis-v2/configs/nextleg.toml</code></pre>
-<p>Evaluation uses validation only. The normal command refuses a configuration that enables holdout access. Export writes local safetensors and a manifest containing the complete configuration and provenance, then reloads the file and compares candle and leg outputs within configured tolerances.</p>
+<pre><code>just validated-export mantis-v2/configs/nextleg.toml</code></pre>
+<p>This is the normal release path. It evaluates validation-selected <code>best.pt</code>, records finite metrics plus the checkpoint SHA-256, epoch, global step, completion time, and full provenance, then invokes export. The export function independently fails closed if evaluation is absent or stale, if the checkpoint is not the minimum-loss epoch in durable history, or if config, data, source, lock, or upstream identities differ. It copies the exact validated evaluation into the export bundle and records its SHA-256 in the manifest. Only after the gate passes does it write safetensors, verify every tensor exactly, reload the model, and compare candle and leg outputs within configured tolerances.</p>
+<p>The separate <code>just evaluate</code> and <code>just export</code> commands remain available for diagnosis, but direct export cannot bypass the same gate. Normal evaluation uses validation only and refuses a configuration that enables holdout access.</p>
 
 <h2>Safety contracts</h2>
 <table>
@@ -76,15 +76,18 @@ just export mantis-v2/configs/nextleg.toml</code></pre>
 <tr><td>Future normalization</td><td>Mean and standard deviation come only from the causal context. Context and future standardized values are both clamped to [-10, 10] before differencing, bounding candle targets to [-20, 20].</td></tr>
 <tr><td>Model drift</td><td>Hub revision and safetensors SHA-256 are immutable configuration fields.</td></tr>
 <tr><td>Stale resume</td><td>Config, dataset, lock, source, and upstream identities must all match.</td></tr>
+<tr><td>Unvalidated export</td><td>Evaluation must match the exact best-checkpoint hash, metadata, provenance, and validation-selection history.</td></tr>
 <tr><td>Holdout reuse</td><td>2026 data is excluded from normal training, validation, and evaluation.</td></tr>
 </tbody>
 </table>
 
 <h2>Artifacts</h2>
 <p>Corrected production files are written under <code>/Volumes/Storage/trading-research/artifacts/mantis-foundation-model/mantisv2-nextleg-mps-target-clamp-v2/</code>. The external drive must remain mounted for training and resume. Native checkpoints are for training state; the exported safetensors file is for deployment interoperability.</p>
+<p>Training artifacts do not belong in the source Git repository. Keep native pickle checkpoints, optimizer state, validated safetensors, manifests, and evaluations on controlled artifact storage. The upstream license declarations currently conflict, so derived weights must not be uploaded to Hugging Face or otherwise redistributed until the license is resolved. Upload is deliberately absent from this pipeline.</p>
+<p>The completed <code>mantisv2-nextleg-mps-target-clamp-v2</code> artifact is immutable under source commit <code>cc30dcd0a0034140cde0f2ed3b9f35db7f9f3361</code>. It completed evaluation, safetensors parity, and a separate artifact audit before the mandatory gate was introduced. Exact source provenance intentionally prevents later code from reopening that native checkpoint; future training runs use the gate in this guide.</p>
 <div class="callout warn"><strong>Superseded run:</strong> <code>mantisv2-nextleg-mps/</code> is preserved for diagnosis only. Its 12 completed epochs used unclamped future normalization; a valid one-tick ZN move in a constant-price window produced a target of 15,625. The corrected target changes source and config provenance, so production restarts from the pinned official MantisV2 weights rather than resuming those checkpoints.</div>
 
 <h2>Open production decisions</h2>
-<p>No paid tracking service is configured. Metrics are durable local JSON on the external drive. Long-term retention, release criteria, and one-time holdout governance remain explicit operator decisions.</p>
+<p>No paid tracking service is configured. Metrics are durable local JSON on the external drive. Hugging Face publication remains blocked pending license resolution. Model quality thresholds and one-time holdout governance remain explicit pre-declared operator decisions; they must not be selected after observing a candidate result.</p>
 </body>
 </html>

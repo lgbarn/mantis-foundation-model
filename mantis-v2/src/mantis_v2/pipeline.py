@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
+import tempfile
 from collections.abc import Sized
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -16,12 +20,35 @@ from mantis_v2.checkpoint import load_checkpoint, save_checkpoint
 from mantis_v2.config import PipelineConfig
 from mantis_v2.data import Anchor, NextLegDataset, build_anchors, load_streams
 from mantis_v2.model import MantisV2Adapter, NextLegModel, download_verified_weights, nextleg_loss
-from mantis_v2.provenance import Provenance, build_provenance
+from mantis_v2.provenance import Provenance, build_provenance, sha256_file
 from mantis_v2.runtime import seed_everything, select_device
 
 
 class PipelineError(RuntimeError):
     """Raised when a training stage cannot satisfy its contract."""
+
+
+@dataclass(frozen=True)
+class _LoadedTrained:
+    model: NextLegModel
+    provenance: Provenance
+    device: torch.device
+    validation_dataset: NextLegDataset
+    checkpoint_path: Path
+    checkpoint_epoch: int
+    global_step: int
+    checkpoint_sha256: str
+
+
+_PROVENANCE_IDENTITY_KEYS = (
+    "config_digest",
+    "dataset_digest",
+    "source_digest",
+    "lock_digest",
+    "upstream_source_revision",
+    "upstream_hub_revision",
+    "upstream_weights_sha256",
+)
 
 
 def repository_root() -> Path:
@@ -367,7 +394,7 @@ def train(config: PipelineConfig) -> dict[str, Any]:
 
 def _load_trained(
     config: PipelineConfig,
-) -> tuple[NextLegModel, Provenance, torch.device, NextLegDataset]:
+) -> _LoadedTrained:
     seed_everything(config.run.seed)
     device = select_device(config.run)
     train_dataset, validation_dataset = _datasets(config)
@@ -378,8 +405,37 @@ def _load_trained(
     checkpoint_path = artifact_root(config) / "checkpoints" / "best.pt"
     if not checkpoint_path.is_file():
         raise PipelineError(f"checkpoint not found: {checkpoint_path}")
-    load_checkpoint(checkpoint_path, model, optimizer, provenance)
-    return model, provenance, device, validation_dataset
+    digest = hashlib.sha256()
+    snapshot_path: Path | None = None
+    try:
+        with (
+            checkpoint_path.open("rb") as source,
+            tempfile.NamedTemporaryFile(
+                mode="wb",
+                prefix=".best-snapshot-",
+                suffix=".pt",
+                dir=checkpoint_path.parent,
+                delete=False,
+            ) as snapshot,
+        ):
+            snapshot_path = Path(snapshot.name)
+            for block in iter(lambda: source.read(4 * 1024 * 1024), b""):
+                digest.update(block)
+                snapshot.write(block)
+        next_epoch, global_step = load_checkpoint(snapshot_path, model, optimizer, provenance)
+    finally:
+        if snapshot_path is not None:
+            snapshot_path.unlink(missing_ok=True)
+    return _LoadedTrained(
+        model=model,
+        provenance=provenance,
+        device=device,
+        validation_dataset=validation_dataset,
+        checkpoint_path=checkpoint_path,
+        checkpoint_epoch=next_epoch - 1,
+        global_step=global_step,
+        checkpoint_sha256=digest.hexdigest(),
+    )
 
 
 def evaluate(config: PipelineConfig) -> dict[str, Any]:
@@ -387,42 +443,148 @@ def evaluate(config: PipelineConfig) -> dict[str, Any]:
         raise PipelineError(
             "holdout evaluation is intentionally not automated; create an explicit release config"
         )
-    model, provenance, device, validation_dataset = _load_trained(config)
+    return _evaluate_loaded(config, _load_trained(config))
+
+
+def _evaluate_loaded(config: PipelineConfig, loaded: _LoadedTrained) -> dict[str, Any]:
     metrics, batches = _run_epoch(
-        model,
-        _loader(validation_dataset, config, shuffle=False),
+        loaded.model,
+        _loader(loaded.validation_dataset, config, shuffle=False),
         config,
-        device,
+        loaded.device,
         None,
         config.training.validation_max_steps,
     )
+    if sha256_file(loaded.checkpoint_path) != loaded.checkpoint_sha256:
+        raise PipelineError("best checkpoint changed during evaluation; run evaluate again")
     result = {
+        "schema_version": 1,
+        "created_at": datetime.now(UTC).isoformat(),
+        "passed": True,
         "split": "validation",
-        "anchors": len(validation_dataset),
+        "anchors": len(loaded.validation_dataset),
         "batches": batches,
         "metrics": metrics,
-        "config_digest": provenance.config_digest,
-        "dataset_digest": provenance.dataset_digest,
+        "checkpoint": {
+            "path": str(loaded.checkpoint_path),
+            "sha256": loaded.checkpoint_sha256,
+            "epoch": loaded.checkpoint_epoch,
+            "global_step": loaded.global_step,
+        },
+        "provenance": loaded.provenance.to_dict(),
+        "config_digest": loaded.provenance.config_digest,
+        "dataset_digest": loaded.provenance.dataset_digest,
     }
     _write_json(artifact_root(config) / "evaluation.json", result)
     return result
 
 
+def _validated_evaluation(
+    config: PipelineConfig,
+    loaded: _LoadedTrained,
+) -> dict[str, Any]:
+    root = artifact_root(config)
+    evaluation_path = root / "evaluation.json"
+    try:
+        evaluation = json.loads(evaluation_path.read_text())
+    except FileNotFoundError as exc:
+        raise PipelineError("run evaluate before export: evaluation.json is missing") from exc
+    except json.JSONDecodeError as exc:
+        raise PipelineError("run evaluate before export: evaluation.json is invalid") from exc
+    if not isinstance(evaluation, dict) or evaluation.get("schema_version") != 1:
+        raise PipelineError("run evaluate before export: unsupported evaluation schema")
+    if not isinstance(evaluation.get("created_at"), str) or not evaluation["created_at"]:
+        raise PipelineError("run evaluate before export: completion time is missing")
+    if evaluation.get("passed") is not True or evaluation.get("split") != "validation":
+        raise PipelineError("run evaluate before export: validation did not pass")
+    if evaluation.get("anchors") != len(loaded.validation_dataset):
+        raise PipelineError("run evaluate before export: validation corpus changed")
+    if not isinstance(evaluation.get("batches"), int) or evaluation["batches"] <= 0:
+        raise PipelineError("run evaluate before export: evaluation has no completed batches")
+    metrics = evaluation.get("metrics")
+    if not isinstance(metrics, dict) or any(
+        not isinstance(metrics.get(key), int | float) or not math.isfinite(float(metrics[key]))
+        for key in ("total", "candle", "leg")
+    ):
+        raise PipelineError("run evaluate before export: evaluation metrics are incomplete")
+
+    checkpoint = evaluation.get("checkpoint")
+    if not isinstance(checkpoint, dict):
+        raise PipelineError("run evaluate before export: checkpoint identity is missing")
+    if checkpoint.get("sha256") != loaded.checkpoint_sha256:
+        raise PipelineError("best checkpoint changed after evaluation; run evaluate before export")
+    if (
+        checkpoint.get("epoch") != loaded.checkpoint_epoch
+        or checkpoint.get("global_step") != loaded.global_step
+    ):
+        raise PipelineError(
+            "best checkpoint metadata changed after evaluation; run evaluate before export"
+        )
+
+    recorded_provenance = evaluation.get("provenance")
+    expected_provenance = loaded.provenance.to_dict()
+    for key in _PROVENANCE_IDENTITY_KEYS:
+        if (
+            not isinstance(recorded_provenance, dict)
+            or recorded_provenance.get(key) != (expected_provenance[key])
+        ):
+            raise PipelineError(
+                f"evaluation provenance mismatch: {key}; run evaluate before export"
+            )
+
+    metrics_path = root / "metrics.json"
+    try:
+        history = json.loads(metrics_path.read_text())
+        selected = history[loaded.checkpoint_epoch]
+        best_epoch = min(
+            range(len(history)),
+            key=lambda epoch: float(history[epoch]["validation"]["total"]),
+        )
+    except (
+        FileNotFoundError,
+        json.JSONDecodeError,
+        IndexError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise PipelineError("run evaluate before export: metrics history is invalid") from exc
+    if (
+        not isinstance(selected, dict)
+        or selected.get("epoch") != loaded.checkpoint_epoch
+        or selected.get("global_step") != loaded.global_step
+        or best_epoch != loaded.checkpoint_epoch
+    ):
+        raise PipelineError("best checkpoint does not match validation selection history")
+    return evaluation
+
+
 def export(config: PipelineConfig) -> dict[str, Any]:
-    model, provenance, device, validation_dataset = _load_trained(config)
-    model.eval()
+    return _export_loaded(config, _load_trained(config))
+
+
+def _export_loaded(config: PipelineConfig, loaded: _LoadedTrained) -> dict[str, Any]:
+    evaluation = _validated_evaluation(config, loaded)
+    loaded.model.eval()
     export_root = artifact_root(config) / "export"
     export_root.mkdir(parents=True, exist_ok=True)
+    bundled_evaluation_path = export_root / "evaluation.json"
+    _write_json(bundled_evaluation_path, evaluation)
     weights_path = export_root / "model.safetensors"
-    state = {key: value.detach().cpu().contiguous() for key, value in model.state_dict().items()}
+    state = {
+        key: value.detach().cpu().contiguous() for key, value in loaded.model.state_dict().items()
+    }
     save_file(state, weights_path)
     loaded_state = load_file(weights_path)
-    reloaded = _model(config, device)
+    for key, tensor in state.items():
+        if key not in loaded_state or not torch.equal(tensor, loaded_state[key]):
+            raise PipelineError(f"export tensor parity failed for {key}")
+    reloaded = _model(config, loaded.device)
     reloaded.load_state_dict(loaded_state, strict=True)
     reloaded.eval()
-    fixture = validation_dataset[0]["context"].unsqueeze(0).to(device)
+    fixture = loaded.validation_dataset[0]["context"].unsqueeze(0).to(loaded.device)
     with torch.inference_mode():
-        native = model(fixture)
+        native = loaded.model(fixture)
         restored = reloaded(fixture)
     for key in ("candle", "leg"):
         if not torch.allclose(
@@ -435,8 +597,17 @@ def export(config: PipelineConfig) -> dict[str, Any]:
     manifest = {
         "format": config.export.format,
         "weights": str(weights_path),
+        "weights_sha256": sha256_file(weights_path),
         "config": asdict(config),
-        "provenance": provenance.to_dict(),
+        "provenance": loaded.provenance.to_dict(),
+        "validation_gate": {
+            "verified": True,
+            "evaluation": str(bundled_evaluation_path),
+            "evaluation_sha256": sha256_file(bundled_evaluation_path),
+            "checkpoint_sha256": loaded.checkpoint_sha256,
+            "checkpoint_epoch": loaded.checkpoint_epoch,
+            "global_step": loaded.global_step,
+        },
         "parity": {
             "atol": config.export.verify_atol,
             "rtol": config.export.verify_rtol,
@@ -447,13 +618,28 @@ def export(config: PipelineConfig) -> dict[str, Any]:
     return manifest
 
 
+def validated_export(config: PipelineConfig) -> dict[str, Any]:
+    """Evaluate the selected checkpoint and export it only after the gate passes."""
+    if config.evaluation.allow_holdout:
+        raise PipelineError(
+            "holdout evaluation is intentionally not automated; create an explicit release config"
+        )
+    loaded = _load_trained(config)
+    evaluation = _evaluate_loaded(config, loaded)
+    manifest = _export_loaded(config, loaded)
+    return {"evaluation": evaluation, "export": manifest}
+
+
 def smoke(config: PipelineConfig) -> dict[str, Any]:
     if config.data.root != "synthetic" or config.training.max_steps_per_epoch == 0:
         raise PipelineError("smoke requires synthetic data and a bounded max_steps_per_epoch")
     trained = train(config)
-    evaluated = evaluate(config)
-    exported = export(config)
-    return {"train": trained, "evaluate": evaluated, "export": exported["parity"]}
+    released = validated_export(config)
+    return {
+        "train": trained,
+        "evaluate": released["evaluation"],
+        "export": released["export"]["parity"],
+    }
 
 
 def probe(config: PipelineConfig) -> dict[str, Any]:

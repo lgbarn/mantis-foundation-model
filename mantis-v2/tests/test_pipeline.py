@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -16,8 +17,11 @@ from mantis_v2.pipeline import (
     _loader,
     _stratified_validation_indices,
     _validation_state,
+    evaluate,
+    export,
     probe,
     train,
+    validated_export,
 )
 from torch.utils.data import DataLoader, Dataset
 
@@ -120,6 +124,157 @@ def test_terminal_epoch_is_checkpointed_and_collision_is_rejected(tmp_path: Path
     )
     with pytest.raises(PipelineError, match="run artifacts already exist"):
         _assert_run_writable(protected, checkpoint.parents[1])
+
+
+def _trained_smoke_config(tmp_path: Path, name: str) -> Any:
+    base = load_config(ROOT / "configs" / "smoke.toml")
+    config = replace(
+        base,
+        run=replace(base.run, name=name, artifact_root=tmp_path, allow_overwrite=True),
+        training=replace(base.training, max_steps_per_epoch=1, validation_max_steps=1),
+    )
+    train(config)
+    return config
+
+
+def test_export_requires_completed_evaluation(tmp_path: Path) -> None:
+    config = _trained_smoke_config(tmp_path, "missing-evaluation")
+
+    with pytest.raises(PipelineError, match="run evaluate before export"):
+        export(config)
+
+    assert not (tmp_path / "missing-evaluation" / "export").exists()
+
+
+def test_evaluation_authorizes_export_of_exact_best_checkpoint(tmp_path: Path) -> None:
+    config = _trained_smoke_config(tmp_path, "validated-export")
+
+    evaluation = evaluate(config)
+    manifest = export(config)
+
+    assert evaluation["schema_version"] == 1
+    assert evaluation["passed"] is True
+    assert evaluation["checkpoint"]["sha256"]
+    assert evaluation["checkpoint"]["epoch"] == 0
+    assert evaluation["checkpoint"]["global_step"] == 1
+    assert manifest["validation_gate"]["verified"] is True
+    assert manifest["validation_gate"]["checkpoint_sha256"] == evaluation["checkpoint"]["sha256"]
+    bundled_evaluation = Path(manifest["validation_gate"]["evaluation"])
+    assert bundled_evaluation == tmp_path / "validated-export" / "export" / "evaluation.json"
+    assert json.loads(bundled_evaluation.read_text()) == json.loads(
+        json.dumps(evaluation, default=str)
+    )
+    assert manifest["validation_gate"]["evaluation_sha256"] == pipeline_module.sha256_file(
+        bundled_evaluation
+    )
+    assert manifest["weights_sha256"]
+
+
+def test_export_rejects_evaluation_for_replaced_best_checkpoint(tmp_path: Path) -> None:
+    config = _trained_smoke_config(tmp_path, "stale-evaluation")
+    evaluate(config)
+    checkpoint_path = tmp_path / "stale-evaluation" / "checkpoints" / "best.pt"
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    first_tensor = next(iter(checkpoint["model"].values()))
+    first_tensor.view(-1)[0] += 1
+    torch.save(checkpoint, checkpoint_path)
+
+    with pytest.raises(PipelineError, match="best checkpoint changed after evaluation"):
+        export(config)
+
+    assert not (tmp_path / "stale-evaluation" / "export").exists()
+
+
+def test_export_rejects_each_stale_evaluation_provenance_identity(tmp_path: Path) -> None:
+    config = _trained_smoke_config(tmp_path, "stale-provenance")
+    original = evaluate(config)
+    evaluation_path = tmp_path / "stale-provenance" / "evaluation.json"
+    for key in pipeline_module._PROVENANCE_IDENTITY_KEYS:
+        stale = copy.deepcopy(original)
+        stale["provenance"][key] = "tampered"
+        evaluation_path.write_text(json.dumps(stale))
+
+        with pytest.raises(PipelineError, match=f"evaluation provenance mismatch: {key}"):
+            export(config)
+
+    assert not (tmp_path / "stale-provenance" / "export").exists()
+
+
+def test_export_rejects_checkpoint_that_is_not_metric_history_best(tmp_path: Path) -> None:
+    config = _trained_smoke_config(tmp_path, "stale-selection")
+    evaluate(config)
+    metrics_path = tmp_path / "stale-selection" / "metrics.json"
+    history = json.loads(metrics_path.read_text())
+    history.append(
+        {
+            "epoch": 1,
+            "global_step": 2,
+            "validation": {"total": history[0]["validation"]["total"] - 1},
+        }
+    )
+    metrics_path.write_text(json.dumps(history))
+
+    with pytest.raises(PipelineError, match="does not match validation selection history"):
+        export(config)
+
+    assert not (tmp_path / "stale-selection" / "export").exists()
+
+
+def test_evaluation_rejects_checkpoint_replaced_during_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _trained_smoke_config(tmp_path, "evaluation-race")
+    checkpoint_path = tmp_path / "evaluation-race" / "checkpoints" / "best.pt"
+    original_run_epoch = pipeline_module._run_epoch
+
+    def replace_after_evaluation(*args: Any, **kwargs: Any) -> tuple[dict[str, float], int]:
+        result = original_run_epoch(*args, **kwargs)
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        first_tensor = next(iter(checkpoint["model"].values()))
+        first_tensor.view(-1)[0] += 1
+        torch.save(checkpoint, checkpoint_path)
+        return result
+
+    monkeypatch.setattr(pipeline_module, "_run_epoch", replace_after_evaluation)
+    with pytest.raises(PipelineError, match="best checkpoint changed during evaluation"):
+        evaluate(config)
+
+    assert not (tmp_path / "evaluation-race" / "evaluation.json").exists()
+
+
+def test_validated_export_reuses_one_loaded_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_config(ROOT / "configs" / "smoke.toml")
+    loaded = object()
+    calls: list[str] = []
+
+    def load_once(_: Any) -> Any:
+        calls.append("load")
+        return loaded
+
+    def evaluate_loaded(_: Any, candidate: Any) -> dict[str, Any]:
+        assert candidate is loaded
+        calls.append("evaluate")
+        return {"passed": True}
+
+    def export_loaded(_: Any, candidate: Any) -> dict[str, Any]:
+        assert candidate is loaded
+        calls.append("export")
+        return {"parity": {"verified": True}}
+
+    monkeypatch.setattr(pipeline_module, "_load_trained", load_once)
+    monkeypatch.setattr(pipeline_module, "_evaluate_loaded", evaluate_loaded)
+    monkeypatch.setattr(pipeline_module, "_export_loaded", export_loaded)
+
+    result = validated_export(config)
+
+    assert calls == ["load", "evaluate", "export"]
+    assert result == {
+        "evaluation": {"passed": True},
+        "export": {"parity": {"verified": True}},
+    }
 
 
 @pytest.mark.parametrize(

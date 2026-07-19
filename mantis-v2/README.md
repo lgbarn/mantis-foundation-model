@@ -47,11 +47,12 @@ just verify-upstream
 just inspect-data
 just probe-mps
 just train mantis-v2/configs/nextleg.toml
-just evaluate mantis-v2/configs/nextleg.toml
-just export mantis-v2/configs/nextleg.toml
+just validated-export mantis-v2/configs/nextleg.toml
 ```
 
-`gate` includes deterministic synthetic smoke training, evaluation, checkpoint, and export parity. `verify-upstream` downloads or reuses the pinned official weights, checks their digest, constructs the real upstream MantisV2 on CPU, and verifies its embedding contract. `inspect-data` validates all configured files and computes legal anchor counts. `probe-mps` is guarded to exactly one real-data train batch and one validation batch of 36, so every configured stream is represented once. Production training starts from the pinned official MantisV2 weights and runs on Apple MPS.
+`gate` includes deterministic synthetic smoke training, evaluation, checkpoint, and export parity. `verify-upstream` downloads or reuses the pinned official weights, checks their digest, constructs the real upstream MantisV2 on CPU, and verifies its embedding contract. `inspect-data` validates all configured files and computes legal anchor counts. `probe-mps` is guarded to exactly one real-data train batch and one validation batch of 36, so every configured stream is represented once. `validated-export` is the normal release path: it evaluates the validation-selected checkpoint and then exports only if the evaluation gate passes. Production training starts from the pinned official MantisV2 weights and runs on Apple MPS.
+
+For diagnosis, `just evaluate <config>` and `just export <config>` expose the individual stages. Direct export still enforces the same evaluation gate.
 
 ## Training recipe
 
@@ -76,13 +77,20 @@ Outputs live under the configured external `artifact_root`:
 |-- train-result.json
 |-- evaluation.json
 `-- export/
+    |-- evaluation.json
     |-- model.safetensors
     `-- manifest.json
 ```
 
 Native checkpoints include model and optimizer state, epoch, global step, Python, NumPy, CPU Torch, CUDA, and MPS RNG state, config digest, full dataset content identity, training-source content digest, Git state, dependency-lock digest, and pinned upstream identities. Resume fails closed if any load-bearing identity changes, including uncommitted source content. Each epoch uses a pending checkpoint that is promoted only after metric history is durable, so an interrupted two-file update falls back to the prior valid epoch.
 
-`run.name` creates the final directory below `run.artifact_root`. A non-resume production run refuses to replace an existing named run unless `run.allow_overwrite` is explicitly enabled. Resume uses `latest.pt`; evaluation and export use validation-selected `best.pt`. The smoke and guarded probe configs enable overwrite only for disposable verification artifacts.
+`run.name` creates the final directory below `run.artifact_root`. A non-resume production run refuses to replace an existing named run unless `run.allow_overwrite` is explicitly enabled. Resume uses `latest.pt`; evaluation and export use validation-selected `best.pt`. Export fails closed unless `evaluation.json` records finite validation metrics and is bound to the exact `best.pt` SHA-256, epoch, global step, config, dataset, source, dependency lock, and upstream model identities. It also confirms that the checkpoint is the minimum-loss epoch in durable metric history before writing safetensors. The exact validated evaluation is copied into the export bundle and its SHA-256 is recorded in the manifest. The smoke and guarded probe configs enable overwrite only for disposable verification artifacts.
+
+## Release storage
+
+Large training artifacts are not committed to the source Git repository. Native checkpoints and complete run state remain on the external drive. Safetensors is the deployment format; pickle-based native checkpoints remain private training state. The upstream license declarations currently conflict, so derived weights must not be uploaded to Hugging Face or otherwise redistributed until the license is resolved. Publishing remains an explicit operator action and is not performed by training or export.
+
+The completed `mantisv2-nextleg-mps-target-clamp-v2` artifact is immutable under source commit `cc30dcd0a0034140cde0f2ed3b9f35db7f9f3361`. It completed evaluation, export parity, and a separate artifact audit before this gate was added. Its exact source-provenance contract deliberately prevents later source from reopening the native checkpoint. Future training runs use the mandatory gate described above.
 
 The earlier `mantisv2-nextleg-mps` run is preserved as a superseded diagnostic artifact. It completed 12 epochs before investigation found that unclamped future normalization could amplify a one-tick move in a constant-price window into a target of 15,625. Because correcting the target changes both source and config provenance, that checkpoint is intentionally not resumable by the corrected production config.
 

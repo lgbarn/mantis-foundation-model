@@ -43,3 +43,6 @@ evaluate config="mantis-v2/configs/nextleg.toml":
 
 export config="mantis-v2/configs/nextleg.toml":
     uv run mantis-v2 export --config {{config}}
+
+validated-export config="mantis-v2/configs/nextleg.toml":
+    uv run mantis-v2 validated-export --config {{config}}
