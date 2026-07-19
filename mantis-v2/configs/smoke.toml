@@ -1,0 +1,57 @@
+[run]
+name = "smoke"
+seed = 7
+artifact_root = "artifacts/mantis-v2"
+device = "auto"
+require_accelerator = false
+allow_overwrite = true
+
+[data]
+root = "synthetic"
+symbols = ["SYNTH"]
+intervals = ["1min"]
+timestamp_column = "datetime"
+feature_columns = ["open", "high", "low", "close", "volume"]
+holdout_start = "2026-01-01T00:00:00+00:00"
+validation_fraction = 0.10
+context_lengths = [64]
+target_reserve = 192
+
+[model]
+source_repository = "vfeofanov/mantis"
+source_revision = "0c94f8ceb9f1d1421dd292ed917090df8c31605b"
+hub_model = "paris-noah/MantisV2"
+hub_revision = "99fe0f548960e272fbfa4b82fd9b5b5956779dfd"
+weights_sha256 = "49d46d9a49cccdc87c46f4e0088fa52c0a6ef7eb4c13de5cc9815426b7b17ab1"
+input_length = 512
+channel_strategy = "independent_concat"
+mode = "scratch"
+
+[training]
+epochs = 1
+batch_size = 4
+learning_rate = 0.001
+weight_decay = 0.0
+num_workers = 0
+checkpoint_every = 5
+resume = false
+max_steps_per_epoch = 2
+
+[target]
+kind = "nextleg"
+horizons = [5]
+leg_cap = 64
+leg_k = 2
+normalization_clamp = 10.0
+candle_loss_weight = 1.0
+leg_loss_weight = 1.0
+minimum_train_anchors = 8
+minimum_validation_anchors = 2
+
+[evaluation]
+allow_holdout = false
+
+[export]
+format = "safetensors"
+verify_atol = 0.00001
+verify_rtol = 0.0001

@@ -1,0 +1,29 @@
+.DS_Store
+.env
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.coverage
+htmlcov/
+
+# Local planning and runtime state
+.scratch/
+artifacts/
+checkpoints/
+data/
+reports/
+*.pt
+*.pth
+*.onnx
+*.safetensors
+
+# Large or generated datasets
+*.csv
+*.dbn
+*.dbn.zst
+*.npz
+*.parquet
