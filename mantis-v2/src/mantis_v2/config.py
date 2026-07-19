@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import tomllib
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -64,6 +65,21 @@ class TrainingConfig:
     checkpoint_every: int
     resume: bool
     max_steps_per_epoch: int
+    validation_max_steps: int
+    warmup_epochs: int
+    early_stopping_patience: int
+
+    def learning_rate_for_epoch(self, epoch: int) -> float:
+        """Return the upstream-style linear-warmup and cosine-decay rate."""
+        if not 0 <= epoch < self.epochs:
+            raise ValueError(f"epoch must be in [0, {self.epochs})")
+        if self.warmup_epochs and epoch < self.warmup_epochs:
+            return self.learning_rate * (epoch + 1) / self.warmup_epochs
+        decay_epochs = self.epochs - self.warmup_epochs
+        if decay_epochs <= 1:
+            return self.learning_rate
+        progress = (epoch - self.warmup_epochs) / (decay_epochs - 1)
+        return self.learning_rate * 0.5 * (1.0 + math.cos(math.pi * progress))
 
 
 @dataclass(frozen=True)
@@ -242,6 +258,9 @@ def load_config(path: str | Path) -> PipelineConfig:
             "checkpoint_every",
             "resume",
             "max_steps_per_epoch",
+            "validation_max_steps",
+            "warmup_epochs",
+            "early_stopping_patience",
         },
     )
     target = _section(
@@ -324,6 +343,21 @@ def load_config(path: str | Path) -> PipelineConfig:
                 "training.max_steps_per_epoch",
                 allow_zero=True,
             ),
+            validation_max_steps=_positive(
+                training["validation_max_steps"],
+                "training.validation_max_steps",
+                allow_zero=True,
+            ),
+            warmup_epochs=_positive(
+                training["warmup_epochs"],
+                "training.warmup_epochs",
+                allow_zero=True,
+            ),
+            early_stopping_patience=_positive(
+                training["early_stopping_patience"],
+                "training.early_stopping_patience",
+                allow_zero=True,
+            ),
         ),
         target=TargetConfig(
             kind=_choice(target["kind"], "target.kind", {"nextleg"}),  # type: ignore[arg-type]
@@ -376,6 +410,18 @@ def _validate_cross_fields(config: PipelineConfig) -> None:
         raise ConfigError("data.context_lengths must contain positive integers")
     if any(horizon <= 0 for horizon in config.target.horizons):
         raise ConfigError("target.horizons must contain positive integers")
+    if config.training.warmup_epochs >= config.training.epochs:
+        raise ConfigError("training.warmup_epochs must be less than training.epochs")
+    configured_streams = len(config.data.symbols) * len(config.data.intervals)
+    validation_samples = (
+        config.training.batch_size * config.training.validation_max_steps
+        if config.training.validation_max_steps
+        else 0
+    )
+    if validation_samples and validation_samples < configured_streams:
+        raise ConfigError(
+            "bounded validation must include at least one sample per configured stream"
+        )
     expected_features = ("open", "high", "low", "close", "volume")
     if config.data.feature_columns != expected_features:
         raise ConfigError(

@@ -13,6 +13,7 @@ just sync
 just gate
 just inspect-data
 just verify-upstream
+just probe-mps
 ```
 
 Production training is intentionally separate from smoke verification:
@@ -21,4 +22,4 @@ Production training is intentionally separate from smoke verification:
 just train mantis-v2/configs/nextleg.toml
 ```
 
-`just gate` includes the complete synthetic smoke workflow. The production config reads external data in place and writes ignored local artifacts. It never copies raw market data into this repository.
+`just gate` includes the complete synthetic smoke workflow. `just probe-mps` performs one real-data training batch and one validation batch with the pinned pretrained MantisV2 model. Production uses Apple MPS and writes checkpoints to the external drive. It never copies raw market data into this repository.

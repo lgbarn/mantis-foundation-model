@@ -37,7 +37,7 @@
 <p>From the repository root, create the locked environment and run the local gate:</p>
 <pre><code>just sync
 just gate</code></pre>
-<p>The lock pins the resolved Python dependency graph. The gate includes the full synthetic smoke workflow. Production configuration requires CUDA; the local Apple Silicon machine is intended for orchestration, tests, and smoke runs.</p>
+<p>The lock pins the resolved Python dependency graph. The gate includes the full synthetic smoke workflow. Production explicitly uses Apple MPS and fails instead of silently falling back to CPU.</p>
 
 <h2>2. Verify the pinned upstream model</h2>
 <pre><code>just verify-upstream</code></pre>
@@ -52,10 +52,14 @@ just gate</code></pre>
 <h2>4. Prove the pipeline locally</h2>
 <pre><code>just smoke</code></pre>
 <p>The smoke workflow creates deterministic synthetic OHLCV, performs two bounded scratch-model training steps, evaluates validation anchors, writes a resumable checkpoint, exports safetensors, reloads them, and checks output parity.</p>
+<p>Then verify the real pinned model, external corpus, and MPS gradient path with a command that is hard-limited to one train batch and one validation batch of 36, giving every configured stream one validation sample:</p>
+<pre><code>just probe-mps</code></pre>
 
 <h2>5. Start production training</h2>
 <pre><code>just train mantis-v2/configs/nextleg.toml</code></pre>
-<p>The production run verifies the official model revision and weights digest, hashes the 36 data files, builds leak-safe targets, and fine-tunes MantisV2 for the configured 120 epochs. Checkpoints are written after every epoch and resume only when all provenance identities match.</p>
+<p>The production run verifies the official model revision and weights digest, hashes the 36 data files, builds leak-safe targets, and fine-tunes MantisV2 on Apple MPS for up to 120 epochs. Each epoch uses 200 training batches of 128 samples and 20 validation batches. AdamW uses weight decay 0.05, ten epochs of linear warmup, and cosine learning-rate decay. Training stops after eight epochs without improvement.</p>
+<div class="callout"><strong>Recipe boundary:</strong> This is supervised NextLeg regression fine-tuning, not MantisV2 contrastive pretraining. Upstream defines the pretrained model, 512-point interpolation, channel handling, and optimizer schedule. FFM supplies the futures-specific objective, horizons, and bounded sampling regime.</div>
+<p>After every epoch, <code>metrics.json</code> records train and validation total loss, candle MSE, leg SmoothL1, learning rate, epoch, and global step. <code>latest.pt</code> supports exact resume; evaluation and export use <code>best.pt</code>, which tracks the lowest validation-total checkpoint. AUC and log loss are produced later by the 3-minute classifier, not this regression stage.</p>
 <div class="callout warn"><strong>Legacy checkpoint:</strong> <code>mantis_ssl_ctr_seq2seq.pt</code> belongs to the original Mantis architecture and cannot warm-start MantisV2. The production run begins from the pinned official MantisV2 weights.</div>
 
 <h2>6. Evaluate and export</h2>
@@ -77,9 +81,9 @@ just export mantis-v2/configs/nextleg.toml</code></pre>
 </table>
 
 <h2>Artifacts</h2>
-<p>All generated files are ignored by git under <code>artifacts/mantis-v2/&lt;run&gt;</code>. The native checkpoint is for exact resume. The exported safetensors file is for deployment interoperability. They are deliberately different artifacts.</p>
+<p>Production files are written under <code>/Volumes/Storage/trading-research/artifacts/mantis-foundation-model/mantisv2-nextleg-mps/</code>. The external drive must remain mounted for training and resume. Native checkpoints are for training state; the exported safetensors file is for deployment interoperability.</p>
 
 <h2>Open production decisions</h2>
-<p>No paid tracking service is configured. Hardware sizing, long-term retention, release criteria, and one-time holdout governance remain explicit operator decisions. The pipeline defaults to local JSON metrics and local ignored artifacts so none of those choices are made silently.</p>
+<p>No paid tracking service is configured. Metrics are durable local JSON on the external drive. Long-term retention, release criteria, and one-time holdout governance remain explicit operator decisions.</p>
 </body>
 </html>

@@ -19,6 +19,7 @@ from mantis_v2.pipeline import (
     anchor_counts,
     evaluate,
     export,
+    probe,
     smoke,
     train,
     verify_upstream,
@@ -29,7 +30,15 @@ from mantis_v2.runtime import RuntimeContractError
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mantis-v2")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for command in ("inspect-data", "train", "evaluate", "export", "smoke", "verify-upstream"):
+    for command in (
+        "inspect-data",
+        "train",
+        "evaluate",
+        "export",
+        "smoke",
+        "probe",
+        "verify-upstream",
+    ):
         child = subparsers.add_parser(command)
         child.add_argument("--config", required=True, type=Path)
     return parser
@@ -53,6 +62,7 @@ def main() -> None:
         "evaluate": evaluate,
         "export": export,
         "smoke": smoke,
+        "probe": probe,
         "verify-upstream": verify_upstream,
     }
     try:

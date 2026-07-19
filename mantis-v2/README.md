@@ -45,20 +45,32 @@ just sync
 just gate
 just verify-upstream
 just inspect-data
+just probe-mps
 just train mantis-v2/configs/nextleg.toml
 just evaluate mantis-v2/configs/nextleg.toml
 just export mantis-v2/configs/nextleg.toml
 ```
 
-`gate` includes deterministic synthetic smoke training, evaluation, checkpoint, and export parity. `verify-upstream` downloads or reuses the pinned official weights, checks their digest, constructs the real upstream MantisV2 on CPU, and verifies its embedding contract. `inspect-data` validates all configured files and computes legal anchor counts. Production training requires CUDA and starts from the pinned official MantisV2 weights.
+`gate` includes deterministic synthetic smoke training, evaluation, checkpoint, and export parity. `verify-upstream` downloads or reuses the pinned official weights, checks their digest, constructs the real upstream MantisV2 on CPU, and verifies its embedding contract. `inspect-data` validates all configured files and computes legal anchor counts. `probe-mps` is guarded to exactly one real-data train batch and one validation batch of 36, so every configured stream is represented once. Production training starts from the pinned official MantisV2 weights and runs on Apple MPS.
+
+## Training recipe
+
+This is supervised NextLeg fine-tuning, not a reproduction of MantisV2 contrastive foundation pretraining. It combines the strongest compatible parts of the authoritative sources:
+
+- Upstream MantisV2: official pretrained weights, linear resizing to 512, channel-independent encoding, concatenated 256-dimensional embeddings, full-model fine-tuning, AdamW weight decay `0.05`, 10-epoch linear warmup, and cosine decay.
+- FFM NextLeg: 120 epochs, 200 sampled training batches per epoch, 20 validation batches, learning rate `0.0001188117389055629`, horizons 5/10/20/25, two pivot legs, cap 256, and validation-loss model selection.
+- Local MPS: batch 128 and zero data-loader workers. A local throughput sweep showed batch 192 was fastest, but 128 preserves memory headroom while the 1.4 GiB corpus and optimizer state are resident.
+
+Training stops after eight epochs without validation-total improvement. `metrics.json` records the learning rate plus train and validation total, candle MSE, and leg SmoothL1 for every completed epoch. These regression checkpoints do not report AUC or log loss; those belong to the later 3-minute classifier stage.
 
 ## Artifacts and resume
 
-Outputs live under the configured ignored `artifact_root`:
+Outputs live under the configured external `artifact_root`:
 
 ```text
-artifacts/mantis-v2/nextleg/
+/Volumes/Storage/trading-research/artifacts/mantis-foundation-model/mantisv2-nextleg-mps/
 |-- checkpoints/latest.pt
+|-- checkpoints/best.pt
 |-- metrics.json
 |-- provenance.json
 |-- train-result.json
@@ -70,14 +82,14 @@ artifacts/mantis-v2/nextleg/
 
 Native checkpoints include model and optimizer state, epoch, global step, Python, NumPy, CPU Torch, CUDA, and MPS RNG state, config digest, full dataset content identity, training-source content digest, Git state, dependency-lock digest, and pinned upstream identities. Resume fails closed if any load-bearing identity changes, including uncommitted source content. Each epoch uses a pending checkpoint that is promoted only after metric history is durable, so an interrupted two-file update falls back to the prior valid epoch.
 
-`run.name` creates the final directory below `run.artifact_root`. A non-resume production run refuses to replace an existing named run unless `run.allow_overwrite` is explicitly enabled. The smoke config enables overwrite only for its disposable synthetic artifacts.
+`run.name` creates the final directory below `run.artifact_root`. A non-resume production run refuses to replace an existing named run unless `run.allow_overwrite` is explicitly enabled. Resume uses `latest.pt`; evaluation and export use validation-selected `best.pt`. The smoke and guarded probe configs enable overwrite only for disposable verification artifacts.
 
 The existing `Futures-Foundation-Model/checkpoints/mantis_ssl_ctr_seq2seq.pt` is a legacy Mantis checkpoint with `tokgen_unit`/`vit_unit` keys. It is not compatible with the MantisV2 architecture and is deliberately not loaded.
 
 ## Production notes
 
-- The local Apple Silicon host is supported for orchestration, tests, and smoke checks.
-- The production config requires CUDA and will fail rather than fall back to CPU.
+- The production config explicitly requires Apple MPS and fails rather than falling back to CPU.
+- The internal disk is nearly full, so production checkpoints and metrics are written to `/Volumes/Storage`.
 - No experiment-tracking service is enabled. Metrics and provenance are local JSON artifacts.
 - The normal evaluator refuses holdout access. A release-specific config and review are required before a one-time 2026 holdout evaluation.
 - Full data hashing reads all 36 CSVs before training. This is intentional and binds checkpoints to exact input content.

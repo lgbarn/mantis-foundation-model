@@ -1,10 +1,10 @@
 [run]
-name = "mantisv2-nextleg-mps"
+name = "mantisv2-nextleg-mps-probe"
 seed = 42
 artifact_root = "/Volumes/Storage/trading-research/artifacts/mantis-foundation-model"
 device = "mps"
 require_accelerator = true
-allow_overwrite = false
+allow_overwrite = true
 
 [data]
 root = "/Volumes/Storage/trading-research/data/FFM_NEXTLEG"
@@ -28,17 +28,17 @@ channel_strategy = "independent_concat"
 mode = "full_finetune"
 
 [training]
-epochs = 120
-batch_size = 128
+epochs = 1
+batch_size = 36
 learning_rate = 0.0001188117389055629
 weight_decay = 0.05
 num_workers = 0
 checkpoint_every = 1
-resume = true
-max_steps_per_epoch = 200
-validation_max_steps = 20
-warmup_epochs = 10
-early_stopping_patience = 8
+resume = false
+max_steps_per_epoch = 1
+validation_max_steps = 1
+warmup_epochs = 0
+early_stopping_patience = 0
 
 [target]
 kind = "nextleg"

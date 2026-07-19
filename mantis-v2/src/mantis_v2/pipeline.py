@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sized
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import torch
 from safetensors.torch import load_file, save_file
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, RandomSampler
 
 from mantis_v2.checkpoint import load_checkpoint, save_checkpoint
 from mantis_v2.config import PipelineConfig
-from mantis_v2.data import NextLegDataset, build_anchors, load_streams
+from mantis_v2.data import Anchor, NextLegDataset, build_anchors, load_streams
 from mantis_v2.model import MantisV2Adapter, NextLegModel, download_verified_weights, nextleg_loss
 from mantis_v2.provenance import Provenance, build_provenance
 from mantis_v2.runtime import seed_everything, select_device
@@ -38,6 +39,7 @@ def _assert_run_writable(config: PipelineConfig, root: Path) -> None:
         (root / relative).exists()
         for relative in (
             "checkpoints/latest.pt",
+            "checkpoints/best.pt",
             "metrics.json",
             "provenance.json",
             "train-result.json",
@@ -112,15 +114,76 @@ def _loader(
     epoch: int = 0,
 ) -> DataLoader[dict[str, torch.Tensor]]:
     generator = torch.Generator().manual_seed(config.run.seed + epoch)
+    sampler: RandomSampler | list[int] | None = None
+    if shuffle and config.training.max_steps_per_epoch:
+        sampler = RandomSampler(
+            cast(Sized, dataset),
+            replacement=True,
+            num_samples=config.training.batch_size * config.training.max_steps_per_epoch,
+            generator=generator,
+        )
+    elif not shuffle and config.training.validation_max_steps:
+        if not isinstance(dataset, NextLegDataset):
+            raise PipelineError("bounded validation requires a NextLegDataset")
+        sampler = _stratified_validation_indices(
+            dataset.anchors,
+            config.training.batch_size * config.training.validation_max_steps,
+        )
     return DataLoader(
         dataset,
         batch_size=config.training.batch_size,
-        shuffle=shuffle,
+        shuffle=shuffle and sampler is None,
+        sampler=sampler,
         num_workers=config.training.num_workers,
         pin_memory=config.run.device == "cuda",
         generator=generator,
         persistent_workers=config.training.num_workers > 0,
     )
+
+
+def _stratified_validation_indices(anchors: list[Anchor], num_samples: int) -> list[int]:
+    """Select deterministic, evenly spaced validation anchors from every stream."""
+    if num_samples >= len(anchors):
+        return list(range(len(anchors)))
+    by_stream: dict[int, list[int]] = {}
+    for index, anchor in enumerate(anchors):
+        by_stream.setdefault(anchor.stream_index, []).append(index)
+    stream_ids = sorted(by_stream)
+    if not stream_ids:
+        return []
+    if num_samples < len(stream_ids):
+        raise PipelineError("validation sample cap must include every configured stream")
+    base, extra = divmod(num_samples, len(stream_ids))
+    selected: dict[int, list[int]] = {}
+    for order, stream_index in enumerate(stream_ids):
+        candidates = by_stream[stream_index]
+        quota = base + (order < extra)
+        if quota > len(candidates):
+            raise PipelineError("validation sample cap exceeds anchors in a configured stream")
+        selected[stream_index] = [
+            candidates[min(((2 * index + 1) * len(candidates)) // (2 * quota), len(candidates) - 1)]
+            for index in range(quota)
+        ]
+    result: list[int] = []
+    for row in range(max(map(len, selected.values()), default=0)):
+        for stream_index in stream_ids:
+            if row < len(selected[stream_index]):
+                result.append(selected[stream_index][row])
+    return result
+
+
+def _validation_state(history: list[dict[str, Any]]) -> tuple[float, int]:
+    """Recover best validation loss and patience count from durable history."""
+    best = min(
+        (float(record["validation"]["total"]) for record in history),
+        default=float("inf"),
+    )
+    without_improvement = 0
+    for record in reversed(history):
+        if float(record["validation"]["total"]) <= best:
+            break
+        without_improvement += 1
+    return best, without_improvement
 
 
 def _model(config: PipelineConfig, device: torch.device) -> NextLegModel:
@@ -149,6 +212,7 @@ def _run_epoch(
     config: PipelineConfig,
     device: torch.device,
     optimizer: torch.optim.Optimizer | None,
+    max_steps: int,
 ) -> tuple[dict[str, float], int]:
     training = optimizer is not None
     model.train(training)
@@ -167,6 +231,8 @@ def _run_epoch(
                 moved["leg_target"],
                 config.target,
             )
+            if not torch.isfinite(losses["total"]):
+                raise PipelineError("non-finite training loss")
             if optimizer is not None:
                 losses["total"].backward()  # type: ignore[no-untyped-call]
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -174,10 +240,7 @@ def _run_epoch(
             for key in ("total", "candle", "leg"):
                 totals[key] += float(losses[key].detach().cpu())
             batches += 1
-            if (
-                config.training.max_steps_per_epoch
-                and batches >= config.training.max_steps_per_epoch
-            ):
+            if max_steps and batches >= max_steps:
                 break
     if not batches:
         raise PipelineError("data loader produced no batches")
@@ -221,22 +284,66 @@ def train(config: PipelineConfig) -> dict[str, Any]:
     elif config.training.resume and checkpoint_path.is_file():
         start_epoch, global_step = load_checkpoint(checkpoint_path, model, optimizer, provenance)
         history = _load_history(root, start_epoch)
+    best_validation, epochs_without_improvement = _validation_state(history)
+    stopped_early = bool(
+        config.training.early_stopping_patience
+        and epochs_without_improvement >= config.training.early_stopping_patience
+    )
     for epoch in range(start_epoch, config.training.epochs):
+        if stopped_early:
+            break
+        learning_rate = config.training.learning_rate_for_epoch(epoch)
+        for parameter_group in optimizer.param_groups:
+            parameter_group["lr"] = learning_rate
         train_loader = _loader(train_dataset, config, shuffle=True, epoch=epoch)
         validation_loader = _loader(validation_dataset, config, shuffle=False, epoch=epoch)
-        train_metrics, steps = _run_epoch(model, train_loader, config, device, optimizer)
-        validation_metrics, _ = _run_epoch(model, validation_loader, config, device, None)
+        train_metrics, steps = _run_epoch(
+            model,
+            train_loader,
+            config,
+            device,
+            optimizer,
+            config.training.max_steps_per_epoch,
+        )
+        validation_metrics, _ = _run_epoch(
+            model,
+            validation_loader,
+            config,
+            device,
+            None,
+            config.training.validation_max_steps,
+        )
         global_step += steps
+        improved = validation_metrics["total"] < best_validation
+        if improved:
+            best_validation = validation_metrics["total"]
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
         record = {
             "epoch": epoch,
             "global_step": global_step,
+            "learning_rate": learning_rate,
             "train": train_metrics,
             "validation": validation_metrics,
         }
         history.append(record)
-        checkpoint_due = (epoch + 1) % config.training.checkpoint_every == 0 or (
-            epoch + 1 == config.training.epochs
+        stopped_early = bool(
+            config.training.early_stopping_patience
+            and epochs_without_improvement >= config.training.early_stopping_patience
         )
+        checkpoint_due = (epoch + 1) % config.training.checkpoint_every == 0 or (
+            epoch + 1 == config.training.epochs or stopped_early
+        )
+        if improved:
+            save_checkpoint(
+                root / "checkpoints" / "best.pt",
+                model,
+                optimizer,
+                epoch,
+                global_step,
+                provenance,
+            )
         if checkpoint_due:
             save_checkpoint(pending_checkpoint, model, optimizer, epoch, global_step, provenance)
         _write_json(root / "metrics.json", history)
@@ -249,6 +356,8 @@ def train(config: PipelineConfig) -> dict[str, Any]:
         "validation_anchors": len(validation_dataset),
         "checkpoint": str(checkpoint_path),
         "epochs_completed": len(history),
+        "stopped_early": stopped_early,
+        "best_validation_loss": best_validation,
         "last": history[-1] if history else None,
     }
     _write_json(root / "train-result.json", result)
@@ -265,7 +374,7 @@ def _load_trained(
     provenance = build_provenance(config, repository_root())
     model = _model(config, device)
     optimizer = _optimizer(model, config)
-    checkpoint_path = artifact_root(config) / "checkpoints" / "latest.pt"
+    checkpoint_path = artifact_root(config) / "checkpoints" / "best.pt"
     if not checkpoint_path.is_file():
         raise PipelineError(f"checkpoint not found: {checkpoint_path}")
     load_checkpoint(checkpoint_path, model, optimizer, provenance)
@@ -284,6 +393,7 @@ def evaluate(config: PipelineConfig) -> dict[str, Any]:
         config,
         device,
         None,
+        config.training.validation_max_steps,
     )
     result = {
         "split": "validation",
@@ -343,6 +453,22 @@ def smoke(config: PipelineConfig) -> dict[str, Any]:
     evaluated = evaluate(config)
     exported = export(config)
     return {"train": trained, "evaluate": evaluated, "export": exported["parity"]}
+
+
+def probe(config: PipelineConfig) -> dict[str, Any]:
+    """Run one real-data train and validation batch behind a strict scale guard."""
+    if (
+        config.data.root == "synthetic"
+        or config.training.epochs != 1
+        or config.training.max_steps_per_epoch != 1
+        or config.training.validation_max_steps != 1
+        or config.training.resume
+    ):
+        raise PipelineError(
+            "probe requires real data, one epoch, one train step, one validation step, "
+            "and resume=false"
+        )
+    return train(config)
 
 
 def verify_upstream(config: PipelineConfig) -> dict[str, Any]:

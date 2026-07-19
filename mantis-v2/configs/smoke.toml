@@ -36,6 +36,9 @@ num_workers = 0
 checkpoint_every = 5
 resume = false
 max_steps_per_epoch = 2
+validation_max_steps = 2
+warmup_epochs = 0
+early_stopping_patience = 0
 
 [target]
 kind = "nextleg"
