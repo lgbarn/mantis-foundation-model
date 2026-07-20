@@ -17,6 +17,7 @@ from mantis_v2.corpus import (
     _Contract,
     _decode_source,
     _decoder_digest,
+    _expiry_symbol_key,
     _file_identity,
     _json_digest,
     _load_contracts,
@@ -144,6 +145,7 @@ def test_cache_loader_reads_each_partition_and_retains_only_selected_fronts(
     config = _config(tmp_path)
     index = pd.date_range("2025-01-01", periods=5, freq="1D", tz="UTC")
     inputs = {
+        "CLZ24": _bars(index[1:2], np.full(1, 90.0), np.asarray([1_000_000])),
         "CLF25": _bars(index, np.full(5, 100.0), np.asarray([100, 90, 80, 20, 10])),
         "CLG25": _bars(index, np.full(5, 110.0), np.asarray([1, 1, 1, 1, 1])),
         "CLH25": _bars(index, np.full(5, 120.0), np.asarray([10, 20, 90, 100, 110])),
@@ -159,6 +161,47 @@ def test_cache_loader_reads_each_partition_and_retains_only_selected_fronts(
     contracts = _load_contracts(cache, "CL", config)
 
     assert [contract.symbol for contract in contracts] == ["CLF25", "CLH25"]
+
+
+def test_single_digit_contract_year_is_inferred_from_first_trade() -> None:
+    assert _expiry_symbol_key("SIU1", pd.Timestamp("2021-07-14", tz="UTC"))[0] == 2021
+    assert _expiry_symbol_key("SIN0", pd.Timestamp("2026-06-09", tz="UTC"))[0] == 2030
+
+
+def test_si_loader_rejects_far_dated_recycled_year_as_initial_front(
+    tmp_path: Path,
+) -> None:
+    config = replace(
+        _config(tmp_path),
+        symbols=("SI",),
+        start=pd.Timestamp("2021-07-14", tz="UTC").to_pydatetime(),
+        end=pd.Timestamp("2026-07-14", tz="UTC").to_pydatetime(),
+    )
+    cache = tmp_path / "cache"
+    inputs = {
+        "SIU1": _bars(
+            pd.date_range("2021-07-14", periods=3, freq="1min", tz="UTC"),
+            np.full(3, 26.0),
+            np.asarray([100, 100, 100]),
+        ),
+        "SIN0": _bars(
+            pd.DatetimeIndex([pd.Timestamp("2026-06-09 19:02", tz="UTC")]),
+            np.asarray([80.0]),
+            np.asarray([2]),
+        ),
+    }
+    for contract, bars in inputs.items():
+        frame = bars.copy()
+        frame.index.name = "datetime"
+        frame["symbol"] = contract
+        path = cache / "SI" / contract / "part-00000.parquet"
+        path.parent.mkdir(parents=True)
+        frame.to_parquet(path)
+
+    contracts = _load_contracts(cache, "SI", config)
+
+    assert [contract.symbol for contract in contracts] == ["SIU1"]
+    assert contracts[0].bars.index[0] == pd.Timestamp("2021-07-14", tz="UTC")
 
 
 def test_bad_print_audit_preserves_source_bar_and_classifies_reversion() -> None:
@@ -254,7 +297,7 @@ def test_decode_cache_reuse_is_content_addressed(tmp_path: Path) -> None:
     part.parent.mkdir(parents=True)
     frame.to_parquet(part)
     manifest = {
-        "schema_version": 3,
+        "schema_version": 4,
         "source_sha256": source.sha256,
         "decoder_digest": _decoder_digest(),
         "symbols": ["ES"],

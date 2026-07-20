@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
+import inspect
 import json
 import os
 import re
@@ -44,6 +45,7 @@ _CANONICAL_MONTHS = {
     "ZN": frozenset("HMUZ"),
 }
 _CHUNK_ROWS = 1_000_000
+_CACHE_SCHEMA_VERSION = 4
 
 
 def sha256_file(path: Path) -> str:
@@ -135,18 +137,28 @@ def _builder_identity() -> dict[str, object]:
 
 def _cache_dir(config: CorpusRepairConfig, source: CorpusSource, source_sha: str) -> Path:
     symbols = "-".join(source.symbols)
-    return config.output_root / ".mantis-dbn-cache" / f"{source_sha[:16]}-{symbols}"
+    cache_id = f"{source_sha[:16]}-{_decoder_digest()[:12]}-{symbols}"
+    return config.output_root / ".mantis-dbn-cache" / cache_id
 
 
 def _decoder_digest() -> str:
     return _json_digest(
         {
-            "schema_version": 3,
-            "source_sha256": sha256_file(Path(__file__)),
+            "schema_version": _CACHE_SCHEMA_VERSION,
             "databento_version": importlib.metadata.version("databento"),
+            "pandas_version": importlib.metadata.version("pandas"),
+            "pyarrow_version": importlib.metadata.version("pyarrow"),
+            "implementation_sha256": hashlib.sha256(
+                (
+                    inspect.getsource(_chunk_roots) + inspect.getsource(_write_decoded_partition)
+                ).encode()
+            ).hexdigest(),
+            "exact_future_pattern": _EXACT_FUTURE.pattern,
             "canonical_months": {
                 symbol: sorted(months) for symbol, months in _CANONICAL_MONTHS.items()
             },
+            "output_columns": [*_OHLCV, "symbol"],
+            "chunk_rows": _CHUNK_ROWS,
         }
     )
 
@@ -160,7 +172,7 @@ def _cache_is_valid(
     if not isinstance(manifest, dict):
         return False
     if (
-        manifest.get("schema_version") != 3
+        manifest.get("schema_version") != _CACHE_SCHEMA_VERSION
         or manifest.get("source_sha256") != source_sha
         or manifest.get("decoder_digest") != _decoder_digest()
         or manifest.get("symbols") != list(source.symbols)
@@ -212,6 +224,10 @@ def _chunk_roots(frame: pd.DataFrame, roots: tuple[str, ...]) -> dict[str, pd.Da
     }
 
 
+def _write_decoded_partition(frame: pd.DataFrame, path: Path) -> None:
+    frame.to_parquet(path)
+
+
 def _decode_source(
     config: CorpusRepairConfig, source: CorpusSource
 ) -> tuple[Path, dict[str, object]]:
@@ -259,7 +275,7 @@ def _decode_source(
                     contract_dir = temporary / root / contract
                     contract_dir.mkdir(parents=True, exist_ok=True)
                     part = contract_dir / f"part-{part_number:05d}.parquet"
-                    contract_frame.to_parquet(part)
+                    _write_decoded_partition(contract_frame, part)
                     identities.append(_file_identity(part, len(contract_frame), temporary))
                     contract_counts[key] = part_number + 1
                     root_counts[root] += 1
@@ -271,7 +287,7 @@ def _decode_source(
         _atomic_json(
             temporary / "manifest.json",
             {
-                "schema_version": 3,
+                "schema_version": _CACHE_SCHEMA_VERSION,
                 "source_sha256": source_sha,
                 "decoder_digest": _decoder_digest(),
                 "symbols": list(source.symbols),
@@ -292,10 +308,27 @@ def _load_contracts(cache: Path, symbol: str, config: CorpusRepairConfig) -> lis
     contract_dirs = [path for path in (cache / symbol).iterdir() if path.is_dir()]
     if not contract_dirs:
         raise CorpusRepairError(f"decoded cache has no {symbol} parts")
-    ordered = sorted(contract_dirs, key=lambda path: _expiry_symbol_key(path.name))
+    first_timestamps = {path: _first_contract_timestamp(path) for path in contract_dirs}
+    ordered = sorted(
+        contract_dirs,
+        key=lambda path: _expiry_symbol_key(path.name, first_timestamps[path]),
+    )
+    target_session = _session(pd.DatetimeIndex([pd.Timestamp(config.start)]), config)[0]
+    initial_volumes: list[float] = []
+    for contract_dir in ordered:
+        volume = pd.read_parquet(contract_dir, columns=["volume"])
+        volume = volume.loc[(volume.index >= config.start) & (volume.index < config.end)]
+        if volume.empty:
+            initial_volumes.append(0.0)
+            continue
+        sessions = _session(volume.index, config)
+        initial_volumes.append(float(volume.loc[sessions == target_session, "volume"].sum()))
+    if not initial_volumes or max(initial_volumes) <= 0:
+        raise CorpusRepairError(f"{symbol}: no volume in the first configured trade session")
+    initial_index = int(np.argmax(initial_volumes))
     selected: list[_Contract] = []
     roll_dates: list[pd.Timestamp] = []
-    for contract_dir in ordered:
+    for contract_dir in ordered[initial_index:]:
         name = contract_dir.name
         bars = pd.read_parquet(contract_dir).sort_index()
         bars = bars.loc[(bars.index >= config.start) & (bars.index < config.end)]
@@ -365,20 +398,34 @@ def _classify_isolated_bad_prints(
 
 
 def _expiry_key(contract: _Contract) -> tuple[int, int, pd.Timestamp]:
-    match = _EXACT_FUTURE.fullmatch(contract.symbol.upper())
-    if match is None:
-        return 9999, 12, contract.bars.index[0]
-    year_code = int(match.group(3))
-    year = 2020 + year_code if year_code < 10 else 2000 + year_code
-    return year, _MONTH_NUMBER[match.group(2)], contract.bars.index[0]
+    year, month, _ = _expiry_symbol_key(contract.symbol, contract.bars.index[0])
+    return year, month, contract.bars.index[0]
 
 
-def _expiry_symbol_key(symbol: str) -> tuple[int, int, str]:
+def _first_contract_timestamp(contract_dir: Path) -> pd.Timestamp:
+    parts = sorted(contract_dir.glob("part-*.parquet"))
+    if not parts:
+        raise CorpusRepairError(f"decoded contract partition is empty: {contract_dir}")
+    parquet = pq.ParquetFile(parts[0])
+    index_column = "datetime"
+    if index_column not in parquet.schema.names:
+        index_column = "__index_level_0__"
+    if index_column not in parquet.schema.names:
+        raise CorpusRepairError(f"decoded contract partition has no datetime index: {parts[0]}")
+    timestamp = parquet.read_row_group(0, columns=[index_column]).column(0)[0].as_py()
+    return pd.Timestamp(timestamp)
+
+
+def _expiry_symbol_key(symbol: str, first_timestamp: pd.Timestamp) -> tuple[int, int, str]:
     match = _EXACT_FUTURE.fullmatch(symbol.upper())
     if match is None:
         return 9999, 12, symbol
     year_code = int(match.group(3))
-    year = 2020 + year_code if year_code < 10 else 2000 + year_code
+    if year_code < 10:
+        first_year = first_timestamp.year
+        year = first_year + (year_code - first_year % 10) % 10
+    else:
+        year = 2000 + year_code
     return year, _MONTH_NUMBER[match.group(2)], symbol
 
 

@@ -35,8 +35,17 @@ the corpus manifest.
 
 Each source archive has an expected SHA-256 in the config. The builder refuses
 to decode a changed archive under the existing corpus ID. Decode-cache shards
-also carry their own sizes, row counts, SHA-256 values, decoder-code digest, and
-SDK version; cache reuse fails closed on any mismatch.
+also carry their own sizes, row counts, SHA-256 values, decoding-policy digest,
+SDK/dataframe/Parquet versions, and a digest of the targeted decode and partition
+writer implementations; cache reuse fails closed on any mismatch. The cache
+directory identity includes that policy digest, so reconstruction-only changes
+create a new verified cache alongside older caches instead of overwriting them.
+
+Databento preserves exchange contract symbols. CME one-digit year codes repeat
+every decade, so the builder resolves the expiry decade from each contract's
+first observation. It initializes a continuous series with the highest-volume
+contract in the first configured CME trade session; an isolated stale or
+far-dated print cannot become the initial front contract.
 
 ## Commands
 
@@ -60,7 +69,7 @@ The configured publication root is:
 `-- repairs/   # classified source anomalies; empty files are still published
 ```
 
-The source-hash-keyed decode cache is stored beside the corpus under
+The source-hash-and-policy-keyed decode cache is stored beside the corpus under
 `.mantis-dbn-cache/`. It is reproducible scratch data and is not part of the
 published corpus identity. DBN decode is chunked to disk and reconstruction is
 bounded to one root symbol at a time, rather than materializing all nine symbols
