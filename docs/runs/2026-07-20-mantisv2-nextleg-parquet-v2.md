@@ -1,0 +1,94 @@
+# MantisV2 repaired-Parquet production run
+
+## Record status
+
+- Foundation run: `mantisv2-nextleg-parquet-v2`
+- Status: Complete and validated-exported
+- Device: Apple MPS
+- Corpus span: July 14, 2021 through July 13, 2026
+- Fit boundary: January 1, 2026 holdout start
+- Foundation source revision: `c98e00ce5a7a7242c4c635ec1de39f5d15d99812`
+- Downstream Trend Magic prepare source revision: `9a03fa3`
+
+The full repaired corpus spans July 2021 through July 2026. Model fitting and
+routine downstream preparation stop before January 1, 2026 so January through
+July 2026 remains a sealed out-of-sample holdout.
+
+## Corpus identity
+
+| Field | Value |
+| --- | --- |
+| Corpus | `MANTIS_NEXTLEG_PARQUET_V1` |
+| Format | Parquet |
+| Rows | 40,251,760 |
+| Streams | 27 |
+| Symbols | ES, NQ, RTY, YM, GC, SI, CL, ZB, ZN |
+| Timeframes | 1m, 3m, 15m |
+| Manifest SHA-256 | `2d8cf8b708c7c743c849059410b3654bc44f9fe4f7d795928de82526e120d703` |
+| Training dataset digest | `84dd590ea5ae5b9e42acc1368060f88375bb48cc0a3ef3ba2e0c5d7c1739ae2a` |
+
+## Training result
+
+| Field | Value |
+| --- | ---: |
+| Epochs completed | 32 |
+| Final global step | 6,400 |
+| Early stopped | Yes |
+| Best epoch index | 23 |
+| Best human epoch number | 24 |
+| Best global step | 4,800 |
+| Best validation total | 2.4601407408714295 |
+| Best validation candle | 2.1815908193588256 |
+| Best validation leg | 0.2785499066114426 |
+| Final validation total | 2.461732339859009 |
+
+The primary foundation metric is validation loss. This is neither AUC nor a
+trading-performance result.
+
+## Validated export
+
+| Field | Value |
+| --- | --- |
+| Checkpoint SHA-256 | `94ce00361894c2df818c158bcdc01b2c43463408f97e0dc22b4d4489c1c11b78` |
+| Evaluation SHA-256 | `9398bcc37a34e50ed48fb010e22c5fa4537a5a8ce82c1ef4911ed109ff1b4c42` |
+| Safetensors SHA-256 | `aab5bac1459a3cf0b08663d1d327e79ee3c1337dd51a30e16def53b8f563c1b9` |
+| Absolute tolerance | `0.00001` |
+| Relative tolerance | `0.0001` |
+| Native/export parity | Verified |
+| Validation gate | Verified |
+
+## Trend Magic preparation
+
+The first downstream stage used
+`mantis-v2/configs/trend-magic-topstep-100k.toml` and the validated export above.
+
+| Field | Value |
+| --- | --- |
+| Run | `mantisv2-trend-magic-topstep-100k` |
+| Candidate semantics | Every eligible closed 3m Trend Magic state bar |
+| Pre-holdout candidate rows | 3,259,736 |
+| Holdout locked | Yes |
+| Workflow digest | `bd0913b868f0e4b3fee5e1792371f7e5a0fa3cf3151162010fac1a6f72e82a44` |
+| Contamination digest | `aba3ff00056b99810226482db554cc104673fe69af5e0d0e9be5299757117e64` |
+
+Candidate rows by symbol:
+
+| Symbol | Rows |
+| --- | ---: |
+| ES | 483,203 |
+| NQ | 474,830 |
+| RTY | 438,135 |
+| YM | 462,259 |
+| GC | 463,125 |
+| CL | 447,300 |
+| ZB | 490,884 |
+
+The next durable stage is MPS embedding. Walk-forward fitting and Topstep 100K
+simulation must not begin until the embedding manifest is complete and audited.
+
+## Evidence boundary
+
+This record proves repaired-corpus binding, completed foundation adaptation,
+checkpoint-bound validation, safetensors parity, and pre-holdout candidate
+preparation. It does not prove holdout performance, classifier quality, Topstep
+success, or profitability.

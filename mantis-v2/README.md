@@ -2,6 +2,15 @@
 
 This package trains MantisV2 on the FFM NextLeg objective while preserving a strict boundary around the official upstream model.
 
+Repository-wide guides:
+
+- [Why the Mantis family is used](../docs/mantis-family.md)
+- [System architecture](../docs/architecture.md)
+- [Setup, dependencies, and hardware](../docs/setup-and-hardware.md)
+- [End-to-end workflow](../docs/workflow.md)
+- [AI-agent runbook](../docs/agent-runbook.md)
+- [Troubleshooting](../docs/troubleshooting.md)
+
 ## Authoritative inputs
 
 - Semantics: MantisV2 paper, arXiv 2602.17868.
@@ -13,9 +22,15 @@ The adapter verifies the immutable Hub revision and weight digest before using p
 
 ## Data contract
 
-The production config expects 36 CSV streams under `/Volumes/Storage/trading-research/data/FFM_NEXTLEG`: nine roots (`ES`, `NQ`, `RTY`, `YM`, `GC`, `SI`, `CL`, `ZB`, `ZN`) at four intervals (`1min`, `3min`, `5min`, `15min`). Every file must provide sorted, unique UTC timestamps and finite `open,high,low,close,volume` values.
+The current production config binds 27 repaired Parquet streams under
+`/Volumes/Storage/trading-research/data/MANTIS_NEXTLEG_PARQUET_V1/market`: nine
+roots (`ES`, `NQ`, `RTY`, `YM`, `GC`, `SI`, `CL`, `ZB`, `ZN`) at `1min`,
+`3min`, and `15min`. Every file must match the corpus manifest, provide sorted,
+unique UTC timestamps, and contain finite `open,high,low,close,volume` values.
 
-Verified on 2026-07-18: 25,057,097 rows spanning 2021-07-14 through 2026-07-13, with 1,967,568 legal train anchors, 224,519 validation anchors, and 294,781 holdout anchors. Full inspection took about 91 seconds on the local Apple Silicon host.
+Verified on 2026-07-20: 40,251,760 rows spanning 2021-07-14 through
+2026-07-13. The corpus contains 27 streams and is bound by manifest SHA-256
+`2d8cf8b708c7c743c849059410b3654bc44f9fe4f7d795928de82526e120d703`.
 
 Data is split independently per stream:
 
@@ -79,7 +94,7 @@ Training stops after eight epochs without validation-total improvement. `metrics
 Outputs live under the configured external `artifact_root`:
 
 ```text
-/Volumes/Storage/trading-research/artifacts/mantis-foundation-model/mantisv2-nextleg-mps-target-clamp-v2/
+/Volumes/Storage/trading-research/artifacts/mantis-foundation-model/mantisv2-nextleg-parquet-v2/
 |-- checkpoints/latest.pt
 |-- checkpoints/best.pt
 |-- metrics.json
@@ -100,7 +115,12 @@ Native checkpoints include model and optimizer state, epoch, global step, Python
 
 Large training artifacts are not committed to the source Git repository. Native checkpoints and complete run state remain on the external drive. Safetensors is the deployment format; pickle-based native checkpoints remain private training state. The upstream license declarations currently conflict, so derived weights must not be uploaded to Hugging Face or otherwise redistributed until the license is resolved. Publishing remains an explicit operator action and is not performed by training or export.
 
-The completed `mantisv2-nextleg-mps-target-clamp-v2` artifact is immutable under source commit `cc30dcd0a0034140cde0f2ed3b9f35db7f9f3361`. It completed evaluation, export parity, and a separate artifact audit before this gate was added. Its exact source-provenance contract deliberately prevents later source from reopening the native checkpoint. Future training runs use the mandatory gate described above.
+The completed `mantisv2-nextleg-parquet-v2` artifact records source commit
+`c98e00ce5a7a7242c4c635ec1de39f5d15d99812`, early-stopped after 32 epochs,
+selected human epoch 24, and passed the mandatory checkpoint-bound evaluation
+and export gate. See the
+[current run record](../docs/runs/2026-07-20-mantisv2-nextleg-parquet-v2.md).
+The older target-clamp artifact remains documented as historical evidence.
 
 The earlier `mantisv2-nextleg-mps` run is preserved as a superseded diagnostic artifact. It completed 12 epochs before investigation found that unclamped future normalization could amplify a one-tick move in a constant-price window into a target of 15,625. Because correcting the target changes both source and config provenance, that checkpoint is intentionally not resumable by the corrected production config.
 
@@ -111,15 +131,19 @@ The existing `Futures-Foundation-Model/checkpoints/mantis_ssl_ctr_seq2seq.pt` is
 - The production config explicitly requires Apple MPS and fails rather than falling back to CPU.
 - The internal disk is nearly full, so production checkpoints and metrics are written to `/Volumes/Storage`.
 - No experiment-tracking service is enabled. Metrics and provenance are local JSON artifacts.
-- The normal evaluator refuses holdout access. A release-specific config and review are required before a one-time 2026 holdout evaluation.
-- Full data hashing reads all 36 CSVs before training. This is intentional and binds checkpoints to exact input content.
+- The normal foundation evaluator refuses holdout access, and no foundation
+  holdout command is implemented. The separate downstream holdout has a reviewed
+  two-key workflow.
+- Full data hashing validates all 27 Parquet streams and their corpus manifest before training.
 
-## Supertrend and Topstep 100K downstream pipeline
+## Strategy and Topstep 100K downstream pipeline
 
-The default downstream config is `configs/supertrend-topstep-100k.toml`. It
+The current production config is `configs/trend-magic-topstep-100k.toml`. It
 uses `ES`, `NQ`, `RTY`, `YM`, `GC`, `CL`, and `ZB` at 1m, 3m, and 15m. A
 candidate is emitted for every eligible closed 3m bar and is directed by the
-current Supertrend(10, 3.0) state; flips are not required. Entry is the next 3m
+current close-CCI(20)/SMA-TR(5) Trend Magic state; flips are not required.
+Historical Supertrend configs retain their original semantics and artifact
+identities. Entry is the next 3m
 open, the stop is 0.5 ATR(20), the primary target is 3R, the horizon is 120
 bars, same-bar ties stop out, and round-trip cost is 0.03R. Any still-open trade
 is force-closed on the final completed bar before 3:10 PM CT; the simulator
@@ -128,16 +152,16 @@ never selects trades based on their future realized exit time.
 Run one stage at a time for bounded failure recovery and inspection:
 
 ```bash
-just downstream-prepare
-just downstream-embed
-just downstream-walk-forward
-just downstream-simulate
+just downstream-prepare mantis-v2/configs/trend-magic-topstep-100k.toml
+just downstream-embed mantis-v2/configs/trend-magic-topstep-100k.toml
+just downstream-walk-forward mantis-v2/configs/trend-magic-topstep-100k.toml
+just downstream-simulate mantis-v2/configs/trend-magic-topstep-100k.toml
 ```
 
 Or run the normal chain:
 
 ```bash
-just downstream-run
+just downstream-run mantis-v2/configs/trend-magic-topstep-100k.toml
 ```
 
 All locations and parameters live in TOML. A command can record a one-off

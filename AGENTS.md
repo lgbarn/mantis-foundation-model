@@ -84,6 +84,13 @@ For implementation work:
 4. Run the narrowest relevant checks, then the repository gate before completion.
 5. Report the exact commands run and distinguish verified results from inference.
 
+For operating an existing workflow rather than changing implementation, read
+`docs/agent-runbook.md` and `docs/workflow.md`. During an active or resumable run,
+do not edit its source, dependency lock, config, data, or artifact files; do not
+start a second command with the same run identity; and do not kill, signal,
+suspend, or restart its processes. Documentation-only work must remain outside
+active data and artifact paths.
+
 ## Scope discipline
 
 - Build MantisV2 first. Do not populate `mantis/` or `mantis-plus/` by copying MantisV2.
@@ -94,4 +101,10 @@ For implementation work:
 
 ## Planning state
 
-The active decision map is `.scratch/mantis-family-repo/map.md`. It is not an implementation backlog. The upstream contract is resolved; production hardware, tracking, retention, and final target decisions remain configurable pending user confirmation.
+The map at `.scratch/mantis-family-repo/map.md` is historical decision context,
+not an implementation backlog or operating guide. Current commands and behavior
+are defined by `justfile`, committed TOML configs, package tests,
+`docs/workflow.md`, and `mantis-v2/README.md`. The qualified production path is
+Apple MPS with local JSON/provenance artifacts; paths and future run identities
+remain machine-specific configuration. CPU and CUDA production recipes are not
+qualified end to end.
