@@ -25,6 +25,18 @@ def test_production_rl_config_loads_locked_entry_contract() -> None:
     assert len(config.digest) == 64
 
 
+@pytest.mark.parametrize("invalid_version", ("true", "1.0"))
+def test_rl_config_rejects_non_integer_schema_versions(
+    tmp_path: Path, invalid_version: str
+) -> None:
+    source = (ROOT / "configs" / "rl-entry-smoke.toml").read_text()
+    path = tmp_path / "invalid-schema-version.toml"
+    path.write_text(source.replace("schema_version = 1", f"schema_version = {invalid_version}"))
+
+    with pytest.raises(ConfigError, match="schema_version must be integer 1"):
+        load_rl_config(path)
+
+
 def test_rl_config_rejects_unknown_missing_invalid_and_incompatible_values(
     tmp_path: Path,
 ) -> None:

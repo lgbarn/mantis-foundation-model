@@ -398,8 +398,9 @@ def load_rl_config(path: str | Path) -> RlConfig:
     unknown = set(raw) - {"schema_version", "upstream", "rl"}
     if unknown:
         raise ConfigError(f"unknown sections: {', '.join(sorted(unknown))}")
-    if raw.get("schema_version") != 1:
-        raise ConfigError("schema_version must be 1")
+    schema_version = raw.get("schema_version")
+    if type(schema_version) is not int or schema_version != 1:
+        raise ConfigError("schema_version must be integer 1")
     upstream = raw.get("upstream")
     if not isinstance(upstream, dict):
         raise ConfigError("missing or invalid [upstream] section")
