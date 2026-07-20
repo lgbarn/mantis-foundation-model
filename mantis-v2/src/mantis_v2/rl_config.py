@@ -19,6 +19,8 @@ from mantis_v2.config import ConfigError
 class RlUpstreamConfig:
     source_digest: str
     lock_digest: str
+    rule_contract_path: Path
+    rule_contract_sha256: str
     downstream_config_path: Path
     downstream_config_sha256: str
     corpus_manifest_path: Path
@@ -34,6 +36,7 @@ class RlUpstreamConfig:
 @dataclass(frozen=True)
 class RlRunConfig:
     name: str
+    profile: Literal["smoke", "production"]
     seed: int
     device: Literal["cpu"]
     artifact_root: Path
@@ -174,6 +177,7 @@ class RlConfig:
     def rule_digest(self) -> str:
         payload = {
             "downstream_config_sha256": self.upstream.downstream_config_sha256,
+            "rule_contract_sha256": self.upstream.rule_contract_sha256,
             "episode": asdict(self.episode),
             "exit": asdict(self.exit),
             "sizing": asdict(self.sizing),
@@ -190,6 +194,8 @@ _EXPECTED: dict[str, set[str]] = {
     "upstream": {
         "source_digest",
         "lock_digest",
+        "rule_contract_path",
+        "rule_contract_sha256",
         "downstream_config_path",
         "downstream_config_sha256",
         "corpus_manifest_path",
@@ -201,7 +207,7 @@ _EXPECTED: dict[str, set[str]] = {
         "foundation_weights_path",
         "foundation_weights_sha256",
     },
-    "run": {"name", "seed", "device", "artifact_root"},
+    "run": {"name", "profile", "seed", "device", "artifact_root"},
     "policy": {
         "role",
         "algorithm",
@@ -438,6 +444,10 @@ def load_rl_config(path: str | Path) -> RlConfig:
         upstream=RlUpstreamConfig(
             source_digest=_sha(upstream["source_digest"], "upstream.source_digest"),
             lock_digest=_sha(upstream["lock_digest"], "upstream.lock_digest"),
+            rule_contract_path=_path(upstream["rule_contract_path"], "upstream.rule_contract_path"),
+            rule_contract_sha256=_sha(
+                upstream["rule_contract_sha256"], "upstream.rule_contract_sha256"
+            ),
             downstream_config_path=_path(
                 upstream["downstream_config_path"], "upstream.downstream_config_path"
             ),
@@ -471,6 +481,7 @@ def load_rl_config(path: str | Path) -> RlConfig:
         ),
         run=RlRunConfig(
             name=_run_name(run["name"]),
+            profile=_choice(run["profile"], "rl.run.profile", {"smoke", "production"}),
             seed=_int(run["seed"], "rl.run.seed"),
             device=_choice(run["device"], "rl.run.device", {"cpu"}),
             artifact_root=_path(run["artifact_root"], "rl.run.artifact_root"),
@@ -795,3 +806,35 @@ def _validate(config: RlConfig) -> None:
     ):
         if value > 1:
             raise ConfigError(f"rl.evaluation.{field} must be <= 1")
+    accepted_gates = {
+        "market_uncertainty": "synchronized_calendar_block_bootstrap",
+        "sealed_holdout_start": datetime.fromisoformat("2026-01-01T00:00:00+00:00"),
+        "minimum_raw_pass_rate": 0.60,
+        "minimum_seed_raw_pass_rate": 0.50,
+        "minimum_pass_rate_lcb_95": 0.50,
+        "maximum_observed_blows": 0,
+        "maximum_blow_rate_ucb_95": 0.01,
+        "minimum_chronological_attempts": 300,
+    }
+    if asdict(config.evaluation) != accepted_gates:
+        raise ConfigError("rl.evaluation promotion gates must match the accepted contract")
+    accepted_production_training = {
+        "development_seeds": (42, 43, 44, 45, 46),
+        "confirmation_seeds": (42, 43, 44, 45, 46, 47, 48, 49, 50, 51),
+        "serving_seed": 42,
+        "vector_environments": 7,
+        "smoke_timesteps": 50_000,
+        "search_timesteps_per_seed": 500_000,
+        "search_seeds": 3,
+        "maximum_search_trials": 30,
+        "development_timesteps_per_seed": 2_000_000,
+        "confirmation_timesteps_per_seed": 5_000_000,
+        "maximum_timesteps_per_seed": 10_000_000,
+    }
+    if (
+        config.run.profile == "production"
+        and asdict(config.training) != accepted_production_training
+    ):
+        raise ConfigError(
+            "rl.training production training settings must match the accepted contract"
+        )

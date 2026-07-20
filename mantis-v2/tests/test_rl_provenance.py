@@ -25,7 +25,14 @@ def _configured_fixture(tmp_path: Path):
     lock = repository / "uv.lock"
     lock.write_text("locked\n")
     inputs = {}
-    for name in ("downstream", "corpus", "embedding", "foundation", "weights"):
+    for name in (
+        "rule_contract",
+        "downstream",
+        "corpus",
+        "embedding",
+        "foundation",
+        "weights",
+    ):
         path = tmp_path / f"{name}.json"
         path.write_text(json.dumps({"identity": name}) + "\n")
         inputs[name] = path
@@ -66,6 +73,8 @@ def _configured_fixture(tmp_path: Path):
         base.upstream,
         source_digest=source_digest(repository),
         lock_digest=digest(lock),
+        rule_contract_path=inputs["rule_contract"],
+        rule_contract_sha256=digest(inputs["rule_contract"]),
         downstream_config_path=inputs["downstream"],
         downstream_config_sha256=digest(inputs["downstream"]),
         corpus_manifest_path=inputs["corpus"],
@@ -110,7 +119,16 @@ def test_dry_run_writes_atomic_no_overwrite_identity_manifest(tmp_path: Path) ->
 
 @pytest.mark.parametrize(
     "identity",
-    ("source", "lock", "downstream", "corpus", "embedding", "foundation", "weights"),
+    (
+        "source",
+        "lock",
+        "rule_contract",
+        "downstream",
+        "corpus",
+        "embedding",
+        "foundation",
+        "weights",
+    ),
 )
 def test_dry_run_rejects_each_modified_upstream_identity(tmp_path: Path, identity: str) -> None:
     config, repository, inputs, source, lock, _sealed = _configured_fixture(tmp_path)
@@ -119,6 +137,92 @@ def test_dry_run_rejects_each_modified_upstream_identity(tmp_path: Path, identit
 
     with pytest.raises(RlProvenanceError, match=f"{identity}.*digest mismatch"):
         write_rl_dry_run_manifest(config, repository)
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "field"),
+    (
+        ("corpus.json", "other-corpus.json", "data.corpus_manifest_path"),
+        (
+            'corpus_manifest_sha256 = "',
+            'corpus_manifest_sha256 = "0',
+            "data.corpus_manifest_sha256",
+        ),
+        ("foundation.json", "other-foundation.json", "foundation.manifest_path"),
+        (
+            'weights_sha256 = "',
+            'weights_sha256 = "0',
+            "foundation.weights_sha256",
+        ),
+        ("embedding.json", "other-embedding.json", "walk_forward.embed_manifest_path"),
+        (
+            'embed_manifest_sha256 = "',
+            'embed_manifest_sha256 = "0',
+            "walk_forward.embed_manifest_sha256",
+        ),
+        (
+            "2026-01-01T00:00:00+00:00",
+            "2026-02-01T00:00:00+00:00",
+            "data.holdout_start",
+        ),
+        ("allow_holdout = false", "allow_holdout = true", "evaluation.allow_holdout"),
+    ),
+)
+def test_dry_run_rejects_each_nested_downstream_identity_mismatch(
+    tmp_path: Path, old: str, new: str, field: str
+) -> None:
+    config, repository, inputs, _source, _lock, _sealed = _configured_fixture(tmp_path)
+    downstream = inputs["downstream"]
+    downstream.write_text(downstream.read_text().replace(old, new, 1))
+    digest = hashlib.sha256(downstream.read_bytes()).hexdigest()
+    config = replace(
+        config,
+        upstream=replace(config.upstream, downstream_config_sha256=digest),
+    )
+
+    with pytest.raises(RlProvenanceError, match=rf"identity mismatch: {field}"):
+        write_rl_dry_run_manifest(config, repository)
+
+
+@pytest.mark.parametrize("identity", ("embedding", "foundation"))
+def test_dry_run_rejects_nested_manifest_foundation_mismatch(tmp_path: Path, identity: str) -> None:
+    config, repository, inputs, _source, _lock, _sealed = _configured_fixture(tmp_path)
+    manifest = inputs[identity]
+    key = "foundation_weights_sha256" if identity == "embedding" else "weights_sha256"
+    manifest.write_text(json.dumps({key: "0" * 64}) + "\n")
+    digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    digest_field = f"{identity}_manifest_sha256"
+    replacements = {digest_field: digest}
+    if identity == "embedding":
+        downstream = inputs["downstream"]
+        downstream.write_text(
+            downstream.read_text().replace(config.upstream.embedding_manifest_sha256, digest)
+        )
+        replacements["downstream_config_sha256"] = hashlib.sha256(
+            downstream.read_bytes()
+        ).hexdigest()
+    config = replace(
+        config,
+        upstream=replace(config.upstream, **replacements),
+    )
+
+    with pytest.raises(
+        RlProvenanceError, match=rf"{identity} manifest foundation identity mismatch"
+    ):
+        write_rl_dry_run_manifest(config, repository)
+
+
+def test_committed_rl_configs_pin_current_source_and_rule_contract() -> None:
+    repository = ROOT.parent
+    expected_source = source_digest(repository)
+    for name in ("rl-entry-smoke.toml", "rl-entry-topstep-100k.toml"):
+        config = load_rl_config(ROOT / "configs" / name)
+        rule_path = repository / config.upstream.rule_contract_path
+
+        assert config.upstream.source_digest == expected_source
+        assert hashlib.sha256(rule_path.read_bytes()).hexdigest() == (
+            config.upstream.rule_contract_sha256
+        )
 
 
 def test_dry_run_never_reads_the_sealed_holdout(

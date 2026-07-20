@@ -154,6 +154,12 @@ def _verify_manifest_binding(label: str, path: Path, weights_sha256: str) -> Non
 
 def _build_manifest(config: RlConfig, repository_root: Path, output: Path) -> dict[str, Any]:
     lock = _file_identity("lock", Path("uv.lock"), config.upstream.lock_digest, repository_root)
+    rule_contract = _file_identity(
+        "rule_contract",
+        config.upstream.rule_contract_path,
+        config.upstream.rule_contract_sha256,
+        repository_root,
+    )
     _file_identity(
         "downstream",
         config.upstream.downstream_config_path,
@@ -208,7 +214,7 @@ def _build_manifest(config: RlConfig, repository_root: Path, output: Path) -> di
                 "weights": foundation_weights,
             },
             "config": {"sha256": config.digest},
-            "rule": {"sha256": config.rule_digest},
+            "rule": {"sha256": config.rule_digest, "contract": rule_contract},
             "fee": {
                 "snapshot": config.execution.fee_schedule,
                 "sha256": config.fee_digest,

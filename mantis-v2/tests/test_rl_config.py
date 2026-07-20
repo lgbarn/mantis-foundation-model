@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tomllib
 from dataclasses import replace
 from pathlib import Path
 
@@ -10,9 +11,53 @@ from mantis_v2.rl_config import load_rl_config
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_topstep_rule_contract_pins_account_and_instrument_economics() -> None:
+    rules = tomllib.loads((ROOT / "configs" / "topstep-100k-2026-07-20.toml").read_text())
+
+    assert rules["account"] == {
+        "starting_balance": 100000.0,
+        "initial_mll_floor": 97000.0,
+        "mll_distance": 3000.0,
+        "profit_target": 6000.0,
+        "consistency_limit": 0.50,
+        "minimum_trading_days": 2,
+        "maximum_position_equivalence": 10,
+        "mll_lock_balance": 100000.0,
+        "mll_ratchet": "end_of_day_high_water",
+        "mll_enforcement": "continuous_realized_and_unrealized",
+        "overnight_holding": False,
+    }
+    assert rules["position_equivalence"] == {
+        "micros_per_mini": 10,
+        "maximum_minis": 10,
+        "maximum_micros": 100,
+    }
+    expected_ticks = {
+        "ES": (0.25, 12.50),
+        "MES": (0.25, 1.25),
+        "NQ": (0.25, 5.00),
+        "MNQ": (0.25, 0.50),
+        "RTY": (0.10, 5.00),
+        "M2K": (0.10, 0.50),
+        "YM": (1.00, 5.00),
+        "MYM": (1.00, 0.50),
+        "GC": (0.10, 10.00),
+        "MGC": (0.10, 1.00),
+        "CL": (0.01, 10.00),
+        "MCL": (0.01, 1.00),
+        "ZB": (0.03125, 31.25),
+    }
+    assert {
+        symbol: (contract["tick_size"], contract["tick_value"])
+        for symbol, contract in rules["contracts"].items()
+    } == expected_ticks
+    assert rules["contracts"]["ZB"]["mini_only"] is True
+
+
 def test_production_rl_config_loads_locked_entry_contract() -> None:
     config = load_rl_config(ROOT / "configs" / "rl-entry-topstep-100k.toml")
 
+    assert config.run.profile == "production"
     assert config.policy.actions == ("skip", "enter")
     assert config.episode.timeout_trading_days == 20
     assert config.exit.activation_r == 2.0
@@ -23,6 +68,15 @@ def test_production_rl_config_loads_locked_entry_contract() -> None:
     assert config.fees.mcl == 1.52
     assert config.run.device == "cpu"
     assert len(config.digest) == 64
+
+
+def test_smoke_profile_reduces_scale_without_weakening_promotion_gates() -> None:
+    smoke = load_rl_config(ROOT / "configs" / "rl-entry-smoke.toml")
+    production = load_rl_config(ROOT / "configs" / "rl-entry-topstep-100k.toml")
+
+    assert smoke.run.profile == "smoke"
+    assert smoke.training.smoke_timesteps < production.training.smoke_timesteps
+    assert smoke.evaluation == production.evaluation
 
 
 @pytest.mark.parametrize("invalid_version", ("true", "1.0"))
@@ -50,12 +104,64 @@ def test_rl_config_rejects_unknown_missing_invalid_and_incompatible_values(
             "timeout_trading_days = 19",
             r"rl.episode.timeout_trading_days must be 20",
         ),
+        (
+            "development_seeds = [42, 43, 44, 45, 46]",
+            "development_seeds = [42]",
+            r"production training settings must match the accepted contract",
+        ),
+        (
+            "minimum_chronological_attempts = 300",
+            "minimum_chronological_attempts = 299",
+            r"promotion gates must match the accepted contract",
+        ),
     )
     for index, (old, new, message) in enumerate(cases):
         path = tmp_path / f"invalid-{index}.toml"
         path.write_text(source.replace(old, new, 1))
         with pytest.raises(ConfigError, match=message):
             load_rl_config(path)
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    (
+        ("seed = 42", "seed = 99", "rl.run.seed must appear in rl.training.development_seeds"),
+        (
+            "development_seeds = [42]",
+            "development_seeds = [42, 42]",
+            "rl.training.development_seeds must be unique",
+        ),
+        (
+            "confirmation_seeds = [42]",
+            "confirmation_seeds = [42, 42]",
+            "rl.training.confirmation_seeds must be unique",
+        ),
+        (
+            "maximum_search_trials = 1",
+            "maximum_search_trials = 31",
+            "rl.training.maximum_search_trials must be <= 30",
+        ),
+        (
+            "development_timesteps_per_seed = 128",
+            "development_timesteps_per_seed = 64",
+            "rl.training timestep budgets must be nondecreasing",
+        ),
+        (
+            "minimum_raw_pass_rate = 0.60",
+            "minimum_raw_pass_rate = 1.01",
+            "rl.evaluation.minimum_raw_pass_rate must be <= 1",
+        ),
+    ),
+)
+def test_rl_config_rejects_cross_field_incompatibilities(
+    tmp_path: Path, old: str, new: str, message: str
+) -> None:
+    source = (ROOT / "configs" / "rl-entry-smoke.toml").read_text()
+    path = tmp_path / "incompatible.toml"
+    path.write_text(source.replace(old, new, 1))
+
+    with pytest.raises(ConfigError, match=message):
+        load_rl_config(path)
 
 
 @pytest.mark.parametrize("name", ("../escaped", "/tmp/escaped", "nested/run", ".", ".."))
