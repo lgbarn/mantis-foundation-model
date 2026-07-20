@@ -10,7 +10,9 @@ session_timezone = "America/Chicago"
 session_start_hour = 17
 adjustment = "ratio_back_adjusted"
 max_relative_price_dislocation = 0.05
-accepted_dislocations = []
+accepted_dislocations = [
+  { symbol = "SI", timestamp = "2026-02-01T23:00:00+00:00", reason = "Reviewed SIH6 weekend continuation after the January 30 precious-metals selloff: the active contract reopened on sustained volume; this is neither a roll nor an isolated bad print." },
+]
 allow_overwrite = false
 
 [[sources]]

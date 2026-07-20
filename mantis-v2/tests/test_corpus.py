@@ -28,7 +28,12 @@ from mantis_v2.corpus import (
     validate_corpus,
     validate_corpus_binding,
 )
-from mantis_v2.corpus_config import CorpusRepairConfig, CorpusSource, load_corpus_repair_config
+from mantis_v2.corpus_config import (
+    AcceptedDislocation,
+    CorpusRepairConfig,
+    CorpusSource,
+    load_corpus_repair_config,
+)
 from mantis_v2.provenance import sha256_file
 
 
@@ -432,6 +437,51 @@ def test_unclassified_persistent_dislocation_blocks_publication(
     _mock_corpus_source(monkeypatch, config, close)
 
     with pytest.raises(CorpusRepairError, match="unclassified same-contract dislocations"):
+        corpus_module.repair_corpus(config)
+
+    assert not config.output_path.exists()
+
+
+def test_exact_reviewed_dislocation_is_recorded_in_published_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    event_time = pd.Timestamp("2025-01-06", tz="UTC")
+    reason = "Reviewed persistent same-contract market repricing."
+    config = replace(
+        _config(tmp_path),
+        accepted_dislocations=(AcceptedDislocation("ES", event_time.to_pydatetime(), reason),),
+    )
+    close = np.asarray([100.0] * 5 + [80.0] * 5)
+    _mock_corpus_source(monkeypatch, config, close)
+
+    manifest = corpus_module.repair_corpus(config)
+
+    quality_rows = manifest["quality"]
+    assert isinstance(quality_rows, list)
+    quality = next(item for item in quality_rows if item["symbol"] == "ES")
+    assert quality["accepted_same_contract_dislocations"] == [
+        {"timestamp": event_time.isoformat(), "reason": reason}
+    ]
+
+
+def test_stale_reviewed_dislocation_blocks_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = replace(
+        _config(tmp_path),
+        accepted_dislocations=(
+            AcceptedDislocation(
+                "ES",
+                pd.Timestamp("2025-01-07", tz="UTC").to_pydatetime(),
+                "Wrong timestamp must not waive the observed event.",
+            ),
+        ),
+    )
+    _mock_corpus_source(monkeypatch, config)
+
+    with pytest.raises(
+        CorpusRepairError, match="configured accepted dislocations were not observed"
+    ):
         corpus_module.repair_corpus(config)
 
     assert not config.output_path.exists()

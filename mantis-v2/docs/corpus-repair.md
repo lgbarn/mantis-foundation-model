@@ -95,6 +95,19 @@ UTC timestamp, and review reason. Unclassified dislocations fail publication.
 Stale allowlist entries also fail, so an acceptance cannot silently carry into
 a different corpus.
 
+### Reviewed market dislocations
+
+The version 1 config explicitly accepts the SIH6 event at 2026-02-01 23:00 UTC.
+The active contract closed the prior session at 85.250, then its first Sunday
+minute traded 512 contracts from 84.300 to 80.865 with an 80.680 low. Subsequent
+minutes continued trading at high volume, and no contract transition occurred;
+the event is real weekend price discovery, not a rollover or isolated print.
+External evidence also records the late-January silver crash and emergency CME
+margin increase ([S&P Global](https://www.spglobal.com/market-intelligence/en/news-insights/research/2026/02/the-rise-and-fall-of-the-silver-price),
+[BIS Quarterly Review](https://www.bis.org/publ/qtrpdf/r_qt2603.pdf)). The source
+bar remains unchanged in Parquet. Its exact timestamp and review reason are
+recorded in the manifest quality report; stale acceptances fail publication.
+
 The repair function runs that complete audit against its partial directory
 before the atomic rename. A failed audit never creates the final immutable
 corpus directory.
