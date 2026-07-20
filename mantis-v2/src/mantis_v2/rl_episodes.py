@@ -64,6 +64,26 @@ def _session_id(timestamp: pd.Timestamp) -> date:
     return cast(date, (local.to_pydatetime() - timedelta(hours=17)).date())
 
 
+def _session_ordinal(session: date) -> int:
+    trade_date = session + timedelta(days=1)
+    return int(np.busday_count("1970-01-01", trade_date.isoformat()))
+
+
+def _session_is_complete(values: pd.Series) -> bool:
+    ordered = values.sort_values()
+    if len(ordered) < 2:
+        return False
+    gaps = ordered.diff().dropna()
+    first_local = ordered.iloc[0].tz_convert(_CHICAGO)
+    last_local = ordered.iloc[-1].tz_convert(_CHICAGO)
+    return bool(
+        (17, 0) <= (first_local.hour, first_local.minute) <= (17, 3)
+        and last_local.date() > first_local.date()
+        and (last_local.hour, last_local.minute) >= (15, 9)
+        and (gaps.empty or gaps.max() <= timedelta(minutes=3))
+    )
+
+
 def _spans(rows: pd.DataFrame) -> tuple[ObservationSpan, ...]:
     spans: list[ObservationSpan] = []
     for shard, group in rows.groupby("shard", sort=False):
@@ -356,12 +376,11 @@ def _validate_corpus(
             sessions = values.map(_session_id)
             ordered_sessions = list(dict.fromkeys(sessions.tolist()))
             session_ordinals[key[0]] = {
-                session: ordinal for ordinal, session in enumerate(ordered_sessions)
+                session: _session_ordinal(session) for session in ordered_sessions
             }
             complete: set[date] = set()
             for session, group in values.groupby(sessions):
-                gaps = group.sort_values().diff().dropna()
-                if len(group) >= 2 and (gaps.empty or gaps.max() <= pd.Timedelta("3min")):
+                if _session_is_complete(group):
                     complete.add(session)
             complete_sessions[key[0]] = complete
             segments = frame["segment"].to_numpy()
@@ -462,10 +481,22 @@ def _load_embeddings(
         session_ordinals[str(symbol)].get(session, -1)
         for symbol, session in zip(metadata["symbol"], sessions, strict=True)
     ]
-    metadata["rollover_safe"] = [
-        session not in rollover_sessions[str(symbol)]
-        for symbol, session in zip(metadata["symbol"], sessions, strict=True)
-    ]
+    rollover_safe: list[bool] = []
+    for symbol, lookback, terminal, complete in zip(
+        metadata["symbol"],
+        metadata["lookback_start_ts"],
+        metadata["terminal_ts"],
+        horizon_complete,
+        strict=True,
+    ):
+        if not complete or pd.isna(terminal):
+            rollover_safe.append(False)
+            continue
+        first_ordinal = _session_ordinal(_session_id(pd.Timestamp(lookback)))
+        last_ordinal = _session_ordinal(_session_id(pd.Timestamp(terminal)))
+        banned = {_session_ordinal(session) for session in rollover_sessions[str(symbol)]}
+        rollover_safe.append(not any(first_ordinal <= value <= last_ordinal for value in banned))
+    metadata["rollover_safe"] = rollover_safe
     metadata["horizon_complete"] = horizon_complete
     return metadata, output_records, width
 
@@ -529,10 +560,11 @@ def build_episode_manifest(
     if fold_number < 0 or fold_number >= len(folds):
         raise EpisodeContractError("fold number is out of range")
     fold = folds[fold_number]
+    embargo = pd.Timedelta(seconds=180 * int(downstream.walk_forward.embargo_bars))
     boundaries = {
-        "training": (fold.train_start, fold.train_end),
-        "validation": (fold.validation_start, fold.validation_end),
-        "test": (fold.test_start, fold.test_end),
+        "training": (fold.train_start, fold.train_end - embargo),
+        "validation": (fold.validation_start + embargo, fold.validation_end - embargo),
+        "test": (fold.test_start + embargo, fold.test_end),
     }
     start, end = boundaries[partition_name]
     partition = Partition(partition_name, start, end)

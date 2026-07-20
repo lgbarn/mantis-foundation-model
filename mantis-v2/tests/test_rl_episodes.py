@@ -13,6 +13,9 @@ from mantis_v2.rl_episodes import (
     EpisodeContractError,
     Partition,
     _atomic_resume,
+    _session_id,
+    _session_is_complete,
+    _session_ordinal,
     _verified_path,
     build_episode_schedule,
     read_observation,
@@ -32,7 +35,7 @@ def _rows(symbol: str, first: str, sessions: int = 22) -> pd.DataFrame:
                 "lookback_start_ts": decision - timedelta(hours=1),
                 "terminal_ts": decision + timedelta(minutes=9),
                 "session_complete": True,
-                "session_ordinal": index,
+                "session_ordinal": _session_ordinal(_session_id(pd.Timestamp(decision))),
                 "rollover_safe": True,
                 "horizon_complete": True,
                 "shard": index // 8,
@@ -132,6 +135,22 @@ def test_schedule_does_not_bridge_absent_or_rollover_sessions() -> None:
         build_episode_schedule({"ES": absent}, partition, seed=5, episode_count=1)
     with pytest.raises(EpisodeContractError, match="no complete episode"):
         build_episode_schedule({"ES": rollover}, partition, seed=5, episode_count=1)
+
+
+def test_session_calendar_detects_whole_and_partial_session_gaps() -> None:
+    monday = date(2025, 1, 5)
+    wednesday = date(2025, 1, 7)
+    assert _session_ordinal(wednesday) - _session_ordinal(monday) == 2
+
+    complete = pd.Series(
+        pd.date_range(
+            "2025-01-05T17:00:00-06:00",
+            "2025-01-06T15:09:00-06:00",
+            freq="3min",
+        )
+    )
+    assert _session_is_complete(complete)
+    assert not _session_is_complete(complete.iloc[:2])
 
 
 def test_schedule_contains_complete_lookback_exit_and_terminal_horizons() -> None:
