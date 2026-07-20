@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tomllib
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -120,6 +121,38 @@ symbols = ["ES"]
     source.unlink()
     with pytest.raises(ConfigError, match="missing corpus source archives"):
         load_corpus_repair_config(config_path)
+
+
+def test_production_config_pins_every_reviewed_market_event(tmp_path: Path) -> None:
+    config_path = Path(__file__).resolve().parents[1] / "configs" / "corpus-repair-v1.toml"
+    config_text = config_path.read_text()
+    raw = tomllib.loads(config_text)
+    for index, source in enumerate(raw["sources"]):
+        fixture = tmp_path / f"source-{index}.dbn.zst"
+        fixture.touch()
+        config_text = config_text.replace(source["path"], str(fixture))
+    portable_path = tmp_path / "corpus-repair-v1.toml"
+    portable_path.write_text(config_text)
+
+    config = load_corpus_repair_config(portable_path)
+    accepted = config.accepted_dislocations
+
+    assert [
+        (item.symbol, item.timestamp.isoformat(), item.kind, item.contracts) for item in accepted
+    ] == [
+        ("SI", "2026-02-01T23:00:00+00:00", "same_contract", ("SIH6",)),
+        ("CL", "2026-04-19T22:00:00+00:00", "roll", ("CLK6", "CLM6")),
+        ("CL", "2022-02-27T23:00:00+00:00", "same_contract", ("CLJ2",)),
+        ("CL", "2022-03-06T23:00:00+00:00", "same_contract", ("CLJ2",)),
+        ("CL", "2023-04-02T22:00:00+00:00", "same_contract", ("CLK3",)),
+        ("CL", "2024-10-27T22:00:00+00:00", "same_contract", ("CLZ4",)),
+        ("CL", "2025-06-15T22:00:00+00:00", "same_contract", ("CLN5",)),
+        ("CL", "2025-06-22T22:00:00+00:00", "same_contract", ("CLQ5",)),
+        ("CL", "2026-03-01T23:02:00+00:00", "same_contract", ("CLJ6",)),
+        ("CL", "2026-03-08T22:00:00+00:00", "same_contract", ("CLJ6",)),
+        ("CL", "2026-03-23T11:08:00+00:00", "same_contract", ("CLK6",)),
+        ("CL", "2026-04-12T22:00:00+00:00", "same_contract", ("CLK6",)),
+    ]
 
 
 def test_roll_requires_two_liquidity_wins_and_activates_next_session(tmp_path: Path) -> None:
@@ -615,6 +648,8 @@ def test_exact_reviewed_dislocation_is_recorded_in_published_manifest(
             "reason": reason,
         }
     ]
+    market = pd.read_parquet(config.output_path / "market" / "ES_1min.parquet")
+    assert market["close"].to_numpy().tolist() == close.tolist()
 
 
 def test_stale_reviewed_dislocation_blocks_publication(

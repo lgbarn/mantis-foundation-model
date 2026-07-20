@@ -122,6 +122,33 @@ after renewed Strait of Hormuz disruption
 [S&P Global](https://www.spglobal.com/energy/en/news-research/latest-news/crude-oil/042026-factbox-oil-prices-rise-on-us-iran-hormuz-standoff-ahead-of-ceasefire-expiry)).
 The manifest records this separately as an accepted roll dislocation.
 
+CL has ten additional reviewed same-contract events. Each event was reproduced
+in the next listed contract with a similar move, began with 2,970-10,134
+contracts in the selected bar, and remained materially displaced afterward.
+The builder preserves every source value and records each acceptance in the
+manifest.
+
+| UTC timestamp | Contract | Maximum excursion | Review |
+| --- | --- | ---: | --- |
+| 2022-02-27 23:00 | CLJ2 | 6.1236% | Ukraine invasion supply shock |
+| 2022-03-06 23:00 | CLJ2 | 9.6522% | Russia sanctions and supply fears |
+| 2023-04-02 22:00 | CLK3 | 7.9128% | Surprise OPEC+ production cuts |
+| 2024-10-27 22:00 | CLZ4 | 5.2309% | Israel spared Iranian energy facilities |
+| 2025-06-15 22:00 | CLN5 | 5.8896% | Israel-Iran escalation |
+| 2025-06-22 22:00 | CLQ5 | 5.8887% | US strikes on Iranian nuclear sites |
+| 2026-03-01 23:02 | CLJ6 | 11.9483% | US-Israeli strikes and shipping disruption |
+| 2026-03-08 22:00 | CLJ6 | 10.9346% | Iran war and Strait of Hormuz disruption |
+| 2026-03-23 11:08 | CLK6 | 6.0275% | Middle East negotiation-headline reversal |
+| 2026-04-12 22:00 | CLK6 | 10.0596% | Failed talks and blockade risk |
+
+Authoritative context includes the
+[EIA's Ukraine analysis](https://www.eia.gov/todayinenergy/detail.php?id=51498),
+the [OPEC April 2023 announcement](https://www.opec.org/pr-detail/63-03-apr-2023.html),
+and [CME's March 23, 2026 WTI report](https://www.cmegroup.com/videos/2026/03/23/wti-crude-oil-futures-drop-10-as-middle-east-talks-continue-3-.html).
+The complete post-fix rates audit found no 5% events: ZB contained 1,543,998
+rows with a 1.5848% maximum excursion, and ZN contained 1,667,561 rows with a
+1.0168% maximum; both span the configured five years.
+
 The repair function runs that complete audit against its partial directory
 before the atomic rename. A failed audit never creates the final immutable
 corpus directory.
