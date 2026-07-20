@@ -54,6 +54,7 @@ from mantis_v2.pipeline import (
     verify_upstream,
 )
 from mantis_v2.rl_config import load_rl_config
+from mantis_v2.rl_episodes import EpisodeContractError, build_episode_manifest
 from mantis_v2.rl_provenance import RlProvenanceError, write_rl_dry_run_manifest
 from mantis_v2.runtime import RuntimeContractError
 from mantis_v2.strategy import StrategyContractError
@@ -85,11 +86,18 @@ def _parser() -> argparse.ArgumentParser:
         "probe",
         "verify-upstream",
         "rl-dry-run",
+        "rl-build-episodes",
         *_CORPUS_COMMANDS,
         *_DOWNSTREAM_COMMANDS,
     ):
         child = subparsers.add_parser(command)
         child.add_argument("--config", required=True, type=Path)
+        if command == "rl-build-episodes":
+            child.add_argument("--fold", required=True, type=int)
+            child.add_argument(
+                "--partition", required=True, choices=("training", "validation", "test")
+            )
+            child.add_argument("--episodes", required=True, type=int)
         if command in _DOWNSTREAM_COMMANDS:
             child.add_argument(
                 "--set",
@@ -129,6 +137,13 @@ def main() -> None:
     try:
         if args.command == "rl-dry-run":
             result = write_rl_dry_run_manifest(load_rl_config(args.config))
+        elif args.command == "rl-build-episodes":
+            result = build_episode_manifest(
+                load_rl_config(args.config),
+                fold_number=args.fold,
+                partition_name=args.partition,
+                episode_count=args.episodes,
+            )
         elif args.command in _CORPUS_COMMANDS:
             corpus_config = load_corpus_repair_config(args.config)
             if args.command == "repair-corpus":
@@ -168,6 +183,7 @@ def main() -> None:
         PipelineError,
         RuntimeContractError,
         RlProvenanceError,
+        EpisodeContractError,
         DownstreamPipelineError,
         EmbeddingContractError,
         StrategyContractError,

@@ -79,3 +79,6 @@ downstream-holdout config unlock="":
 
 rl-dry-run config="mantis-v2/configs/rl-entry-smoke.toml":
     uv run mantis-v2 rl-dry-run --config {{config}}
+
+rl-build-episodes config fold partition episodes:
+    uv run mantis-v2 rl-build-episodes --config {{config}} --fold {{fold}} --partition {{partition}} --episodes {{episodes}}
