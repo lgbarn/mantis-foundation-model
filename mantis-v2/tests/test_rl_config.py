@@ -56,6 +56,30 @@ def test_rl_run_name_cannot_escape_the_artifact_root(tmp_path: Path, name: str) 
         load_rl_config(path)
 
 
+@pytest.mark.parametrize(
+    ("field", "qualified"),
+    (
+        ("downstream_config_path", "upstream.downstream_config_path"),
+        ("corpus_manifest_path", "upstream.corpus_manifest_path"),
+        ("embedding_manifest_path", "upstream.embedding_manifest_path"),
+        ("foundation_manifest_path", "upstream.foundation_manifest_path"),
+        ("foundation_weights_path", "upstream.foundation_weights_path"),
+        ("artifact_root", "rl.run.artifact_root"),
+    ),
+)
+def test_rl_paths_reject_non_string_values(tmp_path: Path, field: str, qualified: str) -> None:
+    source = (ROOT / "configs" / "rl-entry-smoke.toml").read_text()
+    mutated = "\n".join(
+        f"{field} = true" if line.startswith(f"{field} = ") else line
+        for line in source.splitlines()
+    )
+    path = tmp_path / f"invalid-{field}.toml"
+    path.write_text(mutated)
+
+    with pytest.raises(ConfigError, match=rf"{qualified} must be a non-empty path string"):
+        load_rl_config(path)
+
+
 def test_every_locked_rl_identity_contributes_to_the_canonical_digest() -> None:
     config = load_rl_config(ROOT / "configs" / "rl-entry-topstep-100k.toml")
     variants = (

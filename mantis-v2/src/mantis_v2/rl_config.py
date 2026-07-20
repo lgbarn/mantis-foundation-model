@@ -380,6 +380,12 @@ def _run_name(value: Any) -> str:
     return value
 
 
+def _path(value: Any, field: str) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{field} must be a non-empty path string")
+    return Path(value)
+
+
 def load_rl_config(path: str | Path) -> RlConfig:
     """Load and validate the complete entry-only RL configuration."""
     config_path = Path(path)
@@ -431,23 +437,33 @@ def load_rl_config(path: str | Path) -> RlConfig:
         upstream=RlUpstreamConfig(
             source_digest=_sha(upstream["source_digest"], "upstream.source_digest"),
             lock_digest=_sha(upstream["lock_digest"], "upstream.lock_digest"),
-            downstream_config_path=Path(str(upstream["downstream_config_path"])),
+            downstream_config_path=_path(
+                upstream["downstream_config_path"], "upstream.downstream_config_path"
+            ),
             downstream_config_sha256=_sha(
                 upstream["downstream_config_sha256"], "upstream.downstream_config_sha256"
             ),
-            corpus_manifest_path=Path(str(upstream["corpus_manifest_path"])),
+            corpus_manifest_path=_path(
+                upstream["corpus_manifest_path"], "upstream.corpus_manifest_path"
+            ),
             corpus_manifest_sha256=_sha(
                 upstream["corpus_manifest_sha256"], "upstream.corpus_manifest_sha256"
             ),
-            embedding_manifest_path=Path(str(upstream["embedding_manifest_path"])),
+            embedding_manifest_path=_path(
+                upstream["embedding_manifest_path"], "upstream.embedding_manifest_path"
+            ),
             embedding_manifest_sha256=_sha(
                 upstream["embedding_manifest_sha256"], "upstream.embedding_manifest_sha256"
             ),
-            foundation_manifest_path=Path(str(upstream["foundation_manifest_path"])),
+            foundation_manifest_path=_path(
+                upstream["foundation_manifest_path"], "upstream.foundation_manifest_path"
+            ),
             foundation_manifest_sha256=_sha(
                 upstream["foundation_manifest_sha256"], "upstream.foundation_manifest_sha256"
             ),
-            foundation_weights_path=Path(str(upstream["foundation_weights_path"])),
+            foundation_weights_path=_path(
+                upstream["foundation_weights_path"], "upstream.foundation_weights_path"
+            ),
             foundation_weights_sha256=_sha(
                 upstream["foundation_weights_sha256"], "upstream.foundation_weights_sha256"
             ),
@@ -456,7 +472,7 @@ def load_rl_config(path: str | Path) -> RlConfig:
             name=_run_name(run["name"]),
             seed=_int(run["seed"], "rl.run.seed"),
             device=_choice(run["device"], "rl.run.device", {"cpu"}),
-            artifact_root=Path(str(run["artifact_root"])),
+            artifact_root=_path(run["artifact_root"], "rl.run.artifact_root"),
         ),
         policy=RlPolicyConfig(
             role=_choice(policy["role"], "rl.policy.role", {"entry"}),

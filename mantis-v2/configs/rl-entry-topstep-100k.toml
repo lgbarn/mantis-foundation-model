@@ -1,7 +1,7 @@
 schema_version = 1
 
 [upstream]
-source_digest = "afc0365b8571a92beff68c670dfddcf1a543d1fcdf40776dee5adf8bff663f50"
+source_digest = "e56ba8e7ad98dedb1cb827da518b741f31a7eece674cdd89c186c9f23c1d05ea"
 lock_digest = "ff9068081c5e4c1383d252850d5ea99b2cca0775d318ce5346c5cd88542db8e0"
 downstream_config_path = "mantis-v2/configs/trend-magic-topstep-100k-head-c0001-v2.toml"
 downstream_config_sha256 = "a7d5d7fc11363f22df2e642904aa8ab367353faaac0aec3bfb19d0b2ddb62c08"
