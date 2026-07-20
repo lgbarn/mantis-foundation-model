@@ -46,6 +46,16 @@ def test_rl_config_rejects_unknown_missing_invalid_and_incompatible_values(
             load_rl_config(path)
 
 
+@pytest.mark.parametrize("name", ("../escaped", "/tmp/escaped", "nested/run", ".", ".."))
+def test_rl_run_name_cannot_escape_the_artifact_root(tmp_path: Path, name: str) -> None:
+    source = (ROOT / "configs" / "rl-entry-smoke.toml").read_text()
+    path = tmp_path / "escaped.toml"
+    path.write_text(source.replace('name = "rl-entry-smoke-v1"', f'name = "{name}"'))
+
+    with pytest.raises(ConfigError, match="rl.run.name must be a portable identifier"):
+        load_rl_config(path)
+
+
 def test_every_locked_rl_identity_contributes_to_the_canonical_digest() -> None:
     config = load_rl_config(ROOT / "configs" / "rl-entry-topstep-100k.toml")
     variants = (

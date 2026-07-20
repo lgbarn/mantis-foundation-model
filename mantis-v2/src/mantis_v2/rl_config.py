@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import tomllib
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -369,6 +370,16 @@ def _sha(value: Any, field: str) -> str:
     return value.lower()
 
 
+def _run_name(value: Any) -> str:
+    if (
+        not isinstance(value, str)
+        or value in {".", ".."}
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value) is None
+    ):
+        raise ConfigError("rl.run.name must be a portable identifier")
+    return value
+
+
 def load_rl_config(path: str | Path) -> RlConfig:
     """Load and validate the complete entry-only RL configuration."""
     config_path = Path(path)
@@ -442,7 +453,7 @@ def load_rl_config(path: str | Path) -> RlConfig:
             ),
         ),
         run=RlRunConfig(
-            name=str(run["name"]),
+            name=_run_name(run["name"]),
             seed=_int(run["seed"], "rl.run.seed"),
             device=_choice(run["device"], "rl.run.device", {"cpu"}),
             artifact_root=Path(str(run["artifact_root"])),
@@ -653,8 +664,6 @@ def load_rl_config(path: str | Path) -> RlConfig:
 
 
 def _validate(config: RlConfig) -> None:
-    if not config.run.name.strip():
-        raise ConfigError("rl.run.name must not be empty")
     locked: tuple[tuple[bool, str], ...] = (
         (config.policy.actions == ("skip", "enter"), "rl.policy.actions must be skip, enter"),
         (config.policy.ticker_conditioning, "rl.policy.ticker_conditioning must be true"),

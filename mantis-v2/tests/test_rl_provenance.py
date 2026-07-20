@@ -34,10 +34,13 @@ def _configured_fixture(tmp_path: Path):
     inputs["embedding"].write_text(json.dumps({"foundation_weights_sha256": weights_digest}) + "\n")
     inputs["foundation"].write_text(json.dumps({"weights_sha256": weights_digest}) + "\n")
     embedding_digest = hashlib.sha256(inputs["embedding"].read_bytes()).hexdigest()
+    sealed = tmp_path / "sealed-holdout"
+    sealed.mkdir()
     inputs["downstream"].write_text(
         "\n".join(
             (
                 "[data]",
+                f'root = "{sealed}"',
                 f'corpus_manifest_path = "{inputs["corpus"]}"',
                 f'corpus_manifest_sha256 = "{corpus_digest}"',
                 'holdout_start = "2026-01-01T00:00:00+00:00"',
@@ -79,11 +82,11 @@ def _configured_fixture(tmp_path: Path):
         upstream=upstream,
         run=replace(base.run, name="fixture-run", artifact_root=output),
     )
-    return config, repository, inputs, source, lock
+    return config, repository, inputs, source, lock, sealed
 
 
 def test_dry_run_writes_atomic_no_overwrite_identity_manifest(tmp_path: Path) -> None:
-    config, repository, _inputs, _source, _lock = _configured_fixture(tmp_path)
+    config, repository, _inputs, _source, _lock, _sealed = _configured_fixture(tmp_path)
 
     manifest = write_rl_dry_run_manifest(config, repository)
     path = config.run.artifact_root / config.run.name / "dry-run-manifest.json"
@@ -110,7 +113,7 @@ def test_dry_run_writes_atomic_no_overwrite_identity_manifest(tmp_path: Path) ->
     ("source", "lock", "downstream", "corpus", "embedding", "foundation", "weights"),
 )
 def test_dry_run_rejects_each_modified_upstream_identity(tmp_path: Path, identity: str) -> None:
-    config, repository, inputs, source, lock = _configured_fixture(tmp_path)
+    config, repository, inputs, source, lock, _sealed = _configured_fixture(tmp_path)
     target = source if identity == "source" else lock if identity == "lock" else inputs[identity]
     target.write_text(target.read_text() + "modified\n")
 
@@ -118,15 +121,44 @@ def test_dry_run_rejects_each_modified_upstream_identity(tmp_path: Path, identit
         write_rl_dry_run_manifest(config, repository)
 
 
-def test_dry_run_never_reads_the_sealed_holdout(tmp_path: Path) -> None:
-    config, repository, _inputs, _source, _lock = _configured_fixture(tmp_path)
-    sealed = tmp_path / "sealed-holdout"
-    assert not sealed.exists()
+def test_dry_run_never_reads_the_sealed_holdout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, repository, _inputs, _source, _lock, sealed = _configured_fixture(tmp_path)
+    original_open = Path.open
+    attempted_holdout_reads: list[Path] = []
+
+    def guarded_open(path: Path, *args, **kwargs):
+        if path == sealed or sealed in path.parents:
+            attempted_holdout_reads.append(path)
+            raise AssertionError(f"sealed holdout read attempted: {path}")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded_open)
 
     manifest = write_rl_dry_run_manifest(config, repository)
 
     assert manifest["sealed_holdout"]["accessed"] is False
     assert manifest["sealed_holdout"]["start"] == "2026-01-01 00:00:00+00:00"
+    assert attempted_holdout_reads == []
+
+
+def test_atomic_publication_does_not_overwrite_a_concurrent_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, repository, _inputs, _source, _lock, _sealed = _configured_fixture(tmp_path)
+    destination = config.run.artifact_root / config.run.name / "dry-run-manifest.json"
+    original_link = __import__("os").link
+
+    def racing_link(source, target):
+        Path(target).write_text("concurrent-writer\n")
+        return original_link(source, target)
+
+    monkeypatch.setattr("os.link", racing_link)
+
+    with pytest.raises(RlProvenanceError, match="already exists"):
+        write_rl_dry_run_manifest(config, repository)
+    assert destination.read_text() == "concurrent-writer\n"
 
 
 def test_cli_exposes_bounded_rl_dry_run(monkeypatch: pytest.MonkeyPatch, capsys) -> None:

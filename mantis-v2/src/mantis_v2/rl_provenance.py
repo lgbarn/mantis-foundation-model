@@ -253,9 +253,11 @@ def _atomic_no_overwrite(path: Path, payload: dict[str, Any]) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        if path.exists():
-            raise RlProvenanceError(f"dry-run manifest already exists: {path}")
-        os.replace(temporary, path)
+        try:
+            os.link(temporary, path)
+        except FileExistsError as exc:
+            raise RlProvenanceError(f"dry-run manifest already exists: {path}") from exc
+        temporary.unlink()
         temporary = None
     finally:
         if temporary is not None:
