@@ -141,7 +141,11 @@ def _embedding_manifest_input(
         ):
             raise DownstreamPipelineError("reusable embed producer config digest mismatch")
         producer = load_downstream_config(producer_path)
-        if manifest.get("workflow_digest") != producer.legacy_workflow_digest:
+        producer_workflow_digests = {
+            producer.workflow_digest,
+            producer.legacy_workflow_digest,
+        }
+        if manifest.get("workflow_digest") not in producer_workflow_digests:
             raise DownstreamPipelineError(
                 "reusable embed manifest does not match its producer config"
             )

@@ -147,15 +147,19 @@ def test_head_config_digest_changes_without_changing_embed_identity() -> None:
     assert config.head_config_digest(embed_sha) != changed_holdout.head_config_digest(embed_sha)
 
 
-def test_reusable_embed_manifest_requires_its_exact_digest(tmp_path: Path) -> None:
+@pytest.mark.parametrize("use_legacy_digest", [False, True])
+def test_reusable_embed_manifest_requires_its_exact_digest(
+    tmp_path: Path, use_legacy_digest: bool
+) -> None:
     config = load_downstream_config(CONFIG)
     manifest_path = tmp_path / "embed-manifest.json"
+    workflow_digest = config.legacy_workflow_digest if use_legacy_digest else config.workflow_digest
     manifest_path.write_text(
         json.dumps(
             {
                 "schema_version": 1,
                 "stage": "embed",
-                "workflow_digest": config.legacy_workflow_digest,
+                "workflow_digest": workflow_digest,
                 "foundation_weights_sha256": config.foundation.weights_sha256,
                 "embedding_dim_per_channel": 256,
                 "feature_width": 3840,

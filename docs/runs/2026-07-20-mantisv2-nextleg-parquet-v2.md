@@ -118,6 +118,15 @@ audited embed manifest and its producer config by SHA-256, preserves the failed
 run, and writes head artifacts under a new run identity. Full walk-forward must
 still pass convergence and proper-score gates before Topstep simulation can run.
 
+The first consumer launch then exposed a provenance-reader defect before any
+head fit: new embed manifests store the producer's current `workflow_digest`,
+but the reuse guard accepted only `legacy_workflow_digest`. The two exact values
+for this producer were different, so the valid pinned manifest was rejected.
+The reader now accepts either explicitly supported producer digest while still
+requiring the exact manifest SHA-256, producer-config SHA-256, embedding contract,
+foundation weights, feature width, and row-count checks. Regression coverage
+exercises both current and legacy manifests. No artifact was modified.
+
 ## Evidence boundary
 
 This record proves repaired-corpus binding, completed foundation adaptation,

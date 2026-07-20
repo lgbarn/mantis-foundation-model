@@ -21,6 +21,10 @@ Patching the old manifests would destroy provenance.
 
 - Permit walk-forward training to consume an explicit embed manifest only when
   both that manifest and its producer config are pinned by full SHA-256.
+- Accept the producer's current workflow digest and the explicitly supported
+  legacy workflow digest. Newly generated manifests record the current digest;
+  the legacy alternative exists only for artifacts created before the digest
+  split. All other identity and semantic checks remain unchanged.
 - Require the producer's original workflow identity and its ordered data,
   labeling, preprocessing, and encoder semantics to match the consumer config.
 - Rehash every referenced feature and metadata shard before fitting. Preserve
