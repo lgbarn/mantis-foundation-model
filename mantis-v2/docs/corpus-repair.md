@@ -20,7 +20,9 @@ the corpus manifest.
 3. Aggregate volume by CME session. A candidate must beat the current contract
    for two consecutive sessions.
 4. Activate the roll at the first bar of the following session.
-5. Ratio-back-adjust all earlier OHLC prices and preserve volume unchanged.
+5. Price the calendar spread from the latest timestamp shared by both contracts
+   at or before activation, with a three-day maximum age. Record that pricing
+   timestamp, ratio-back-adjust all earlier OHLC prices, and preserve volume.
 6. Classify an extreme isolated print only if prices recover within three bars.
    Preserve the source row, write it to the anomaly ledger, and exclude affected
    model windows through a propagated Parquet `quality_flag` rather than

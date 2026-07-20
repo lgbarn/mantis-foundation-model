@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +23,7 @@ from mantis_v2.corpus import (
     _json_digest,
     _load_contracts,
     _resample,
+    _roll_basis,
     _roll_ratio,
     _validate_coverage,
     _validate_persisted_aggregation,
@@ -133,16 +135,35 @@ def test_roll_requires_two_liquidity_wins_and_activates_next_session(tmp_path: P
     assert continuous.raw.loc[index[3], "contract"] == "ESM25"
     assert continuous.raw.loc[index[2], "adjustment_factor"] == pytest.approx(1.2)
     assert continuous.adjusted.loc[index[2], "close"] == pytest.approx(120.0)
+    assert continuous.rolls.loc[0, "roll_date"] == index[3]
+    assert continuous.rolls.loc[0, "pricing_timestamp"] == index[3]
 
 
-def test_roll_ratio_requires_both_contracts_at_exact_activation_timestamp() -> None:
-    old_index = pd.date_range("2025-01-01", periods=3, freq="1D", tz="UTC")
-    new_index = old_index.delete(1)
-    old = _bars(old_index, np.full(3, 100.0), np.ones(3))
-    new = _bars(new_index, np.full(2, 110.0), np.ones(2))
+def test_roll_ratio_rejects_missing_recent_shared_pricing_timestamp() -> None:
+    old_index = pd.DatetimeIndex([pd.Timestamp("2025-01-01", tz="UTC")])
+    new_index = pd.DatetimeIndex([pd.Timestamp("2025-01-01", tz="UTC")])
+    old = _bars(old_index, np.asarray([100.0]), np.ones(1))
+    new = _bars(new_index, np.asarray([110.0]), np.ones(1))
 
-    with pytest.raises(CorpusRepairError, match="both contracts at exact timestamp"):
-        _roll_ratio(old, new, old_index[1])
+    with pytest.raises(CorpusRepairError, match="shared pricing timestamp within three days"):
+        _roll_ratio(old, new, pd.Timestamp("2025-01-10", tz="UTC"))
+
+    assert _roll_ratio(old, new, pd.Timestamp("2025-01-04", tz="UTC")) == pytest.approx(1.1)
+
+
+def test_roll_basis_uses_latest_shared_timestamp_without_looking_forward() -> None:
+    activation = pd.Timestamp("2022-12-13 23:00", tz="UTC")
+    shared = pd.Timestamp("2022-12-13 21:59", tz="UTC")
+    older = activation - timedelta(days=2)
+    old_index = pd.DatetimeIndex([older, shared, activation + timedelta(minutes=7)])
+    new_index = pd.DatetimeIndex([older, shared, activation])
+    old = _bars(old_index, np.asarray([1800.0, 1833.1, 1835.5]), np.ones(3))
+    new = _bars(new_index, np.asarray([1900.0, 1848.3, 1848.7]), np.ones(3))
+
+    ratio, pricing_timestamp = _roll_basis(old, new, activation)
+
+    assert pricing_timestamp == shared
+    assert ratio == pytest.approx(1848.3 / 1833.1)
 
 
 def test_roll_chain_skips_an_illiquid_delivery_month(tmp_path: Path) -> None:
@@ -525,6 +546,10 @@ def test_exact_reviewed_roll_dislocation_is_recorded_in_manifest(
             "reason": reason,
         }
     ]
+    rolls = pd.read_parquet(config.output_path / "rolls" / "ES.parquet")
+    assert pd.to_datetime(rolls.loc[0, "datetime"], utc=True) == event_time
+    assert pd.to_datetime(rolls.loc[0, "pricing_timestamp"], utc=True) == event_time
+    assert rolls.loc[0, "ratio"] == pytest.approx(1.1)
 
 
 @pytest.mark.parametrize(

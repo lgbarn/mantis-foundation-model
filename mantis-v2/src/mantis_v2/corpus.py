@@ -473,13 +473,26 @@ def _roll_date(
     return candidates[0] if len(candidates) else None
 
 
-def _roll_ratio(old: pd.DataFrame, new: pd.DataFrame, date: pd.Timestamp) -> float:
-    if date not in old.index or date not in new.index:
-        raise CorpusRepairError(f"roll requires both contracts at exact timestamp {date}")
-    ratio = float(new.loc[date, "close"]) / float(old.loc[date, "close"])
+def _roll_basis(
+    old: pd.DataFrame, new: pd.DataFrame, date: pd.Timestamp
+) -> tuple[float, pd.Timestamp]:
+    lower = date - timedelta(days=3)
+    old_window = old.loc[(old.index >= lower) & (old.index <= date)].index
+    new_window = new.loc[(new.index >= lower) & (new.index <= date)].index
+    common = old_window.intersection(new_window)
+    if common.empty:
+        raise CorpusRepairError(
+            f"roll requires a shared pricing timestamp within three days before {date}"
+        )
+    pricing_timestamp = common[-1]
+    ratio = float(new.loc[pricing_timestamp, "close"]) / float(old.loc[pricing_timestamp, "close"])
     if not np.isfinite(ratio) or ratio <= 0:
         raise CorpusRepairError(f"invalid ratio at roll {date}")
-    return ratio
+    return ratio, pricing_timestamp
+
+
+def _roll_ratio(old: pd.DataFrame, new: pd.DataFrame, date: pd.Timestamp) -> float:
+    return _roll_basis(old, new, date)[0]
 
 
 def _build_continuous(
@@ -508,6 +521,7 @@ def _build_continuous(
     selected = [cleaned[0]]
     roll_dates: list[pd.Timestamp] = []
     ratios: list[float] = []
+    pricing_timestamps: list[pd.Timestamp] = []
     next_index = 1
     while next_index < len(cleaned):
         old = selected[-1]
@@ -531,7 +545,12 @@ def _build_continuous(
             break
         selected.append(chosen)
         roll_dates.append(chosen_date)
-        ratios.append(_roll_ratio(old.bars, chosen.bars, chosen_date))
+        try:
+            ratio, pricing_timestamp = _roll_basis(old.bars, chosen.bars, chosen_date)
+        except CorpusRepairError as exc:
+            raise CorpusRepairError(f"{symbol} {old.symbol}->{chosen.symbol}: {exc}") from exc
+        ratios.append(ratio)
+        pricing_timestamps.append(pricing_timestamp)
         next_index = chosen_index + 1
     cleaned = selected
     factors = np.ones(len(cleaned), dtype=np.float64)
@@ -569,6 +588,7 @@ def _build_continuous(
     rolls = pd.DataFrame(
         {
             "roll_date": roll_dates,
+            "pricing_timestamp": pricing_timestamps,
             "old_contract": [cleaned[index].symbol for index in range(len(roll_dates))],
             "new_contract": [cleaned[index + 1].symbol for index in range(len(roll_dates))],
             "ratio": ratios,
