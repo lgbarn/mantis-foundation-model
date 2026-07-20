@@ -54,6 +54,8 @@ them can make a checkpoint intentionally non-resumable.
 | `just downstream-simulate <config>` | Replays trades and account rules | Results and manifest | CPU |
 | `just downstream-run <config>` | Runs all downstream stages | All downstream outputs | Long, multi-stage mutation |
 | `just downstream-holdout ...` | Opens sealed 2026 downstream data | Holdout artifacts | One-time governance action |
+| `just rl-dry-run <config>` | Validates the locked RL identity | Atomic dry-run manifest | CPU; no holdout access |
+| `just rl-account-replay <input> <output> <config>` | Replays marked-equity account fixtures | Atomic replay manifest | CPU; refuses overwrite |
 
 ## Phase 1: inspect the repository
 
