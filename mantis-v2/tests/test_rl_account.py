@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -191,33 +192,48 @@ def test_profit_consistency_two_day_minimum_and_timeout_match_oracles() -> None:
     assert timeout_result["terminal"]["session_days"] == 20
 
 
-def test_mini_micro_equivalence_tick_economics_fees_and_one_time_costs() -> None:
-    def fixture(contract: str, quantity: int) -> dict[str, object]:
-        return {
-            "schema_version": 1,
-            "fixture_id": contract,
-            "bars": [
-                _bar(
-                    "2026-07-20T19:00:00+00:00",
-                    action="enter",
-                    contract=contract,
-                    quantity=quantity,
-                    side="long",
-                ),
-                _bar("2026-07-20T20:10:00+00:00", action="exit", mark_ticks="4"),
-            ],
-        }
+@pytest.mark.parametrize(
+    ("contract", "quantity", "ending_balance"),
+    (
+        ("ES", 1, "100021.22"),
+        ("MES", 10, "100012.80"),
+        ("NQ", 1, "100006.22"),
+        ("MNQ", 10, "99997.80"),
+        ("RTY", 1, "100006.22"),
+        ("M2K", 10, "99997.80"),
+        ("YM", 1, "100006.22"),
+        ("MYM", 10, "99997.80"),
+        ("GC", 1, "100015.68"),
+        ("MGC", 10, "100000.80"),
+        ("CL", 1, "100015.98"),
+        ("MCL", 10, "100004.80"),
+        ("ZB", 1, "100059.74"),
+    ),
+)
+def test_each_contract_tick_economics_fee_and_one_time_cost_oracle(
+    contract: str, quantity: int, ending_balance: str
+) -> None:
+    fixture = {
+        "schema_version": 1,
+        "fixture_id": contract,
+        "bars": [
+            _bar(
+                "2026-07-20T19:00:00+00:00",
+                action="enter",
+                contract=contract,
+                quantity=quantity,
+                side="long",
+            ),
+            _bar("2026-07-20T20:10:00+00:00", action="exit", mark_ticks="4"),
+        ],
+    }
 
-    mini = replay_account_fixture(_config(), fixture("ES", 1), ROOT.parent)
-    micro = replay_account_fixture(_config(), fixture("MES", 10), ROOT.parent)
+    result = replay_account_fixture(_config(), fixture, ROOT.parent)
 
-    assert mini["account_path"][0]["position"]["account_units"] == 10
-    assert micro["account_path"][0]["position"]["account_units"] == 10
-    assert mini["account_path"][0]["balance"] == "100000.00"
-    assert micro["account_path"][0]["balance"] == "100000.00"
+    assert result["account_path"][0]["position"]["account_units"] == 10
+    assert result["account_path"][0]["balance"] == "100000.00"
     # Four gross ticks less two adverse ticks per side and the pinned RT fee.
-    assert mini["terminal"]["balance"] == "100021.22"
-    assert micro["terminal"]["balance"] == "100012.80"
+    assert result["terminal"]["balance"] == ending_balance
 
 
 @pytest.mark.parametrize(
@@ -271,6 +287,43 @@ def test_replay_manifest_is_atomic_no_overwrite_and_byte_deterministic(tmp_path:
     assert not list(tmp_path.glob(".*.json.*"))
     with pytest.raises(RlAccountError, match="already exists"):
         write_account_replay_manifest(_config(), input_path, first, ROOT.parent)
+
+
+def test_input_identity_hashes_the_same_bytes_that_are_replayed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = json.dumps(
+        {
+            "schema_version": 1,
+            "fixture_id": "immutable-read",
+            "bars": [_bar("2026-07-20T19:00:00+00:00", realized_pnl="1.25")],
+        },
+        sort_keys=True,
+    ).encode()
+    replacement = json.dumps(
+        {
+            "schema_version": 1,
+            "fixture_id": "replacement",
+            "bars": [_bar("2026-07-20T19:00:00+00:00", realized_pnl="9.99")],
+        },
+        sort_keys=True,
+    ).encode()
+    input_path = tmp_path / "fixture.json"
+    input_path.write_bytes(original)
+    real_loads = json.loads
+
+    def replacing_loads(value):
+        input_path.write_bytes(replacement)
+        return real_loads(value)
+
+    monkeypatch.setattr("mantis_v2.rl_account.json.loads", replacing_loads)
+
+    result = write_account_replay_manifest(
+        _config(), input_path, tmp_path / "manifest.json", ROOT.parent
+    )
+
+    assert result["fixture_id"] == "immutable-read"
+    assert result["identities"]["input"] == hashlib.sha256(original).hexdigest()
 
 
 def test_cli_exposes_bounded_account_replay(monkeypatch: pytest.MonkeyPatch, capsys) -> None:

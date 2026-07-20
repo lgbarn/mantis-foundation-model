@@ -61,12 +61,8 @@ def _integer(value: Any, field: str, minimum: int = 0) -> int:
     return value
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+def _sha256_bytes(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
 
 
 def _resolve(path: Path, repository_root: Path) -> Path:
@@ -77,11 +73,15 @@ def _load_contracts(
     config: RlConfig, repository_root: Path
 ) -> tuple[dict[str, Any], dict[str, _Contract]]:
     path = _resolve(config.upstream.rule_contract_path, repository_root)
-    if not path.is_file() or _sha256(path) != config.upstream.rule_contract_sha256:
+    try:
+        content = path.read_bytes()
+    except OSError as exc:
+        raise RlAccountError("rule contract identity file does not exist") from exc
+    if _sha256_bytes(content) != config.upstream.rule_contract_sha256:
         raise RlAccountError("rule contract identity digest mismatch")
     try:
-        rules = tomllib.loads(path.read_text())
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+        rules = tomllib.loads(content.decode())
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise RlAccountError("rule contract is not valid TOML") from exc
     raw_contracts = rules.get("contracts")
     if not isinstance(raw_contracts, dict):
@@ -433,13 +433,14 @@ def write_account_replay_manifest(
     """Replay a JSON fixture and publish one atomic no-overwrite manifest."""
     root = (repository_root or Path.cwd()).resolve()
     try:
-        fixture = json.loads(input_path.read_text())
+        input_bytes = input_path.read_bytes()
+        fixture = json.loads(input_bytes)
     except (OSError, json.JSONDecodeError) as exc:
         raise RlAccountError("replay fixture is not valid JSON") from exc
     if not isinstance(fixture, dict):
         raise RlAccountError("replay fixture root must be an object")
     result = replay_account_fixture(config, fixture, root)
-    result["identities"]["input"] = _sha256(input_path)
+    result["identities"]["input"] = _sha256_bytes(input_bytes)
     payload = (json.dumps(result, indent=2, sort_keys=True) + "\n").encode()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None
