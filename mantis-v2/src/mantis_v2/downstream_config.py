@@ -74,6 +74,14 @@ class WalkForwardConfig:
     max_fit_rows: int
     max_iter: int
     class_weight: Literal["balanced", "none"]
+    solver: Literal["lbfgs", "liblinear", "newton-cg", "sag", "saga"]
+    regularization_c: float
+    tolerance: float
+    convergence_policy: Literal["fail", "record"]
+    embed_manifest_path: Path | None
+    embed_manifest_sha256: str
+    embed_producer_config_path: Path | None
+    embed_producer_config_sha256: str
 
 
 @dataclass(frozen=True)
@@ -126,6 +134,52 @@ class DownstreamConfig:
         encoded = json.dumps(payload, default=str, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(encoded.encode()).hexdigest()
 
+    @property
+    def legacy_workflow_digest(self) -> str:
+        """Reproduce the schema-v1 digest used before reusable head inputs."""
+        payload = asdict(self)
+        del payload["evaluation"]
+        for key in (
+            "solver",
+            "regularization_c",
+            "tolerance",
+            "convergence_policy",
+            "embed_manifest_path",
+            "embed_manifest_sha256",
+            "embed_producer_config_path",
+            "embed_producer_config_sha256",
+        ):
+            del payload["walk_forward"][key]
+        encoded = json.dumps(payload, default=str, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode()).hexdigest()
+
+    @property
+    def embedding_contract_digest(self) -> str:
+        """Identify data, label, and encoder semantics that produced embeddings."""
+        payload = {
+            "data": asdict(self.data),
+            "foundation": asdict(self.foundation),
+            "strategy": asdict(self.strategy),
+        }
+        encoded = json.dumps(payload, default=str, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode()).hexdigest()
+
+    def head_config_digest(self, embed_manifest_sha256: str) -> str:
+        """Identify a head fit independently from the reusable embeddings."""
+        walk = asdict(self.walk_forward)
+        walk.pop("embed_manifest_path")
+        walk.pop("embed_manifest_sha256")
+        walk.pop("embed_producer_config_path")
+        walk.pop("embed_producer_config_sha256")
+        payload = {
+            "seed": self.run.seed,
+            "walk_forward": walk,
+            "embed_manifest_sha256": embed_manifest_sha256,
+            "embedding_contract_digest": self.embedding_contract_digest,
+        }
+        encoded = json.dumps(payload, default=str, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode()).hexdigest()
+
 
 _EXPECTED: dict[str, set[str]] = {
     "run": {"name", "seed", "artifact_root", "device", "allow_overwrite"},
@@ -174,6 +228,14 @@ _EXPECTED: dict[str, set[str]] = {
         "max_fit_rows",
         "max_iter",
         "class_weight",
+        "solver",
+        "regularization_c",
+        "tolerance",
+        "convergence_policy",
+        "embed_manifest_path",
+        "embed_manifest_sha256",
+        "embed_producer_config_path",
+        "embed_producer_config_sha256",
     },
     "topstep": {
         "starting_balance",
@@ -195,13 +257,26 @@ _EXPECTED: dict[str, set[str]] = {
     "evaluation": {"allow_holdout", "holdout_unlock"},
 }
 
+_OPTIONAL: dict[str, set[str]] = {
+    "walk_forward": {
+        "solver",
+        "regularization_c",
+        "tolerance",
+        "convergence_policy",
+        "embed_manifest_path",
+        "embed_manifest_sha256",
+        "embed_producer_config_path",
+        "embed_producer_config_sha256",
+    }
+}
+
 
 def _section(raw: dict[str, Any], name: str) -> dict[str, Any]:
     value = raw.get(name)
     if not isinstance(value, dict):
         raise ConfigError(f"missing or invalid [{name}] section")
     unknown = set(value) - _EXPECTED[name]
-    missing = _EXPECTED[name] - set(value)
+    missing = _EXPECTED[name] - _OPTIONAL.get(name, set()) - set(value)
     if unknown:
         raise ConfigError(f"unknown [{name}] keys: {', '.join(sorted(unknown))}")
     if missing:
@@ -385,6 +460,36 @@ def load_downstream_config(path: str | Path, overrides: tuple[str, ...] = ()) ->
             class_weight=_choice(
                 walk["class_weight"], "walk_forward.class_weight", {"balanced", "none"}
             ),
+            solver=_choice(
+                walk.get("solver", "lbfgs"),
+                "walk_forward.solver",
+                {"lbfgs", "liblinear", "newton-cg", "sag", "saga"},
+            ),
+            regularization_c=_float(
+                walk.get("regularization_c", 1.0),
+                "walk_forward.regularization_c",
+                minimum=1e-12,
+            ),
+            tolerance=_float(
+                walk.get("tolerance", 1e-4),
+                "walk_forward.tolerance",
+                minimum=1e-12,
+            ),
+            convergence_policy=_choice(
+                walk.get("convergence_policy", "fail"),
+                "walk_forward.convergence_policy",
+                {"fail", "record"},
+            ),
+            embed_manifest_path=(
+                Path(str(walk["embed_manifest_path"])) if walk.get("embed_manifest_path") else None
+            ),
+            embed_manifest_sha256=str(walk.get("embed_manifest_sha256", "")),
+            embed_producer_config_path=(
+                Path(str(walk["embed_producer_config_path"]))
+                if walk.get("embed_producer_config_path")
+                else None
+            ),
+            embed_producer_config_sha256=str(walk.get("embed_producer_config_sha256", "")),
         ),
         topstep=TopstepConfig(
             starting_balance=_float(topstep["starting_balance"], "topstep.starting_balance"),
@@ -443,6 +548,19 @@ def _validate(config: DownstreamConfig) -> None:
         raise ConfigError("foundation.return_transf_layer must be -1 or a layer index from 0 to 5")
     if config.walk_forward.threshold_percentile > 100:
         raise ConfigError("walk_forward.threshold_percentile must be <= 100")
+    has_embed_path = config.walk_forward.embed_manifest_path is not None
+    has_embed_sha = bool(config.walk_forward.embed_manifest_sha256)
+    has_producer_path = config.walk_forward.embed_producer_config_path is not None
+    has_producer_sha = bool(config.walk_forward.embed_producer_config_sha256)
+    if len({has_embed_path, has_embed_sha, has_producer_path, has_producer_sha}) != 1:
+        raise ConfigError(
+            "walk_forward reusable embed manifest and producer config paths and SHA-256 "
+            "values must be set together"
+        )
+    if has_embed_sha and len(config.walk_forward.embed_manifest_sha256) != 64:
+        raise ConfigError("walk_forward.embed_manifest_sha256 must be a full SHA-256 digest")
+    if has_producer_sha and len(config.walk_forward.embed_producer_config_sha256) != 64:
+        raise ConfigError("walk_forward.embed_producer_config_sha256 must be a full SHA-256 digest")
     if not 0 < config.topstep.consistency_limit <= 1:
         raise ConfigError("topstep.consistency_limit must be in (0, 1]")
     if not 0 <= config.topstep.session_start_hour <= 23:

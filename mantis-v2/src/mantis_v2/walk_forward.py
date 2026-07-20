@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from datetime import timedelta
 
 import numpy as np
 import pandas as pd
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, log_loss, roc_auc_score
 from sklearn.preprocessing import StandardScaler
@@ -16,6 +18,17 @@ from mantis_v2.downstream_config import DownstreamConfig
 
 class WalkForwardContractError(ValueError):
     """Raised when a fold cannot be built or evaluated safely."""
+
+
+class HeadConvergenceError(WalkForwardContractError):
+    """Raised when a configured production head does not converge."""
+
+    def __init__(self, diagnostics: HeadFitDiagnostics) -> None:
+        self.diagnostics = diagnostics
+        super().__init__(
+            f"logistic head did not converge after {diagnostics.n_iter} iterations "
+            f"with max_iter={diagnostics.max_iter}"
+        )
 
 
 @dataclass(frozen=True)
@@ -38,6 +51,17 @@ class PortableHead:
     threshold: float
 
 
+@dataclass(frozen=True)
+class HeadFitDiagnostics:
+    converged: bool
+    n_iter: int
+    max_iter: int
+    solver: str
+    regularization_c: float
+    tolerance: float
+    warnings: tuple[str, ...]
+
+
 def build_folds(metadata: pd.DataFrame, config: DownstreamConfig) -> list[Fold]:
     """Build fixed rolling month windows before the sealed holdout."""
     if metadata.empty:
@@ -46,9 +70,11 @@ def build_folds(metadata: pd.DataFrame, config: DownstreamConfig) -> list[Fold]:
     non_holdout = decisions[decisions < pd.Timestamp(config.data.holdout_start)]
     if non_holdout.empty:
         raise WalkForwardContractError("no pre-holdout rows are available")
-    start = non_holdout.min().to_period("M").start_time.tz_localize("UTC")
+    earliest = pd.Timestamp(non_holdout.min())
+    start = pd.Timestamp(year=earliest.year, month=earliest.month, day=1, tz="UTC")
     limit = min(
-        non_holdout.max() + pd.Timedelta(nanoseconds=1), pd.Timestamp(config.data.holdout_start)
+        pd.Timestamp(non_holdout.max()) + timedelta(microseconds=1),
+        pd.Timestamp(config.data.holdout_start),
     )
     walk = config.walk_forward
     folds: list[Fold] = []
@@ -118,7 +144,7 @@ def fit_logistic_head(
     validation_features: np.ndarray,
     validation_labels: np.ndarray,
     config: DownstreamConfig,
-) -> tuple[PortableHead, dict[str, float | None]]:
+) -> tuple[PortableHead, dict[str, float | None], HeadFitDiagnostics]:
     """Fit scaler/classifier on train only and choose a threshold on validation only."""
     if len(np.unique(train_labels)) != 2:
         raise WalkForwardContractError("training fold must contain both label classes")
@@ -131,8 +157,27 @@ def fit_logistic_head(
         max_iter=config.walk_forward.max_iter,
         class_weight=class_weight,
         random_state=config.run.seed,
+        solver=config.walk_forward.solver,
+        C=config.walk_forward.regularization_c,
+        tol=config.walk_forward.tolerance,
     )
-    classifier.fit(scaled_train, train_labels)
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always", ConvergenceWarning)
+        classifier.fit(scaled_train, train_labels)
+    convergence_warnings = tuple(
+        str(item.message) for item in captured if issubclass(item.category, ConvergenceWarning)
+    )
+    diagnostics = HeadFitDiagnostics(
+        converged=not convergence_warnings,
+        n_iter=int(np.max(classifier.n_iter_)),
+        max_iter=config.walk_forward.max_iter,
+        solver=config.walk_forward.solver,
+        regularization_c=config.walk_forward.regularization_c,
+        tolerance=config.walk_forward.tolerance,
+        warnings=convergence_warnings,
+    )
+    if not diagnostics.converged and config.walk_forward.convergence_policy == "fail":
+        raise HeadConvergenceError(diagnostics)
     probability = classifier.predict_proba(scaler.transform(validation_features))[:, 1]
     threshold = float(np.percentile(probability, config.walk_forward.threshold_percentile))
     metrics = probability_metrics(validation_labels, probability)
@@ -144,7 +189,7 @@ def fit_logistic_head(
         intercept=np.asarray(classifier.intercept_, dtype=np.float64),
         threshold=threshold,
     )
-    return head, metrics
+    return head, metrics, diagnostics
 
 
 def predict_head(head: PortableHead, features: np.ndarray) -> np.ndarray:

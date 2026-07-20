@@ -10,12 +10,16 @@ import pandas as pd
 import pytest
 from mantis_v2 import strategy as strategy_module
 from mantis_v2.config import ConfigError
-from mantis_v2.downstream_config import load_downstream_config
+from mantis_v2.downstream_config import DownstreamConfig, load_downstream_config
 from mantis_v2.downstream_pipeline import (
     DownstreamPipelineError,
+    _embedding_manifest_input,
     _manifest_base,
+    _walk_forward_quality_gate,
     evaluate_holdout,
+    simulate,
     smoke,
+    walk_forward,
 )
 from mantis_v2.embedding import EmbeddingContractError, _validated_evidence, load_foundation
 from mantis_v2.model import sha256_file
@@ -28,6 +32,7 @@ from mantis_v2.strategy import (
 from mantis_v2.topstep import TopstepContractError, simulate_topstep
 from mantis_v2.walk_forward import (
     Fold,
+    WalkForwardContractError,
     fit_logistic_head,
     fold_masks,
     predict_head,
@@ -36,6 +41,7 @@ from mantis_v2.walk_forward import (
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "configs" / "supertrend-topstep-100k.toml"
+TUNED_CONFIG = ROOT / "configs" / "supertrend-topstep-100k-head-c0001-v2.toml"
 
 
 def test_downstream_config_is_strict_and_supports_recorded_overrides() -> None:
@@ -51,6 +57,197 @@ def test_downstream_config_is_strict_and_supports_recorded_overrides() -> None:
     assert unlocked.workflow_digest == config.workflow_digest
     with pytest.raises(ConfigError, match="unknown override key"):
         load_downstream_config(CONFIG, ("strategy.magic=7",))
+    with pytest.raises(ConfigError, match="must be set together"):
+        load_downstream_config(
+            CONFIG,
+            ('walk_forward.embed_manifest_path="/tmp/embed.json"',),
+        )
+
+
+def test_tuned_production_config_pins_reusable_embeddings_and_head_settings() -> None:
+    config = load_downstream_config(TUNED_CONFIG)
+    assert config.run.name == "mantisv2-supertrend-topstep-100k-head-c0001-v2"
+    assert config.walk_forward.regularization_c == pytest.approx(0.0001)
+    assert config.walk_forward.solver == "lbfgs"
+    assert config.walk_forward.convergence_policy == "fail"
+    assert config.walk_forward.embed_manifest_path is not None
+    assert len(config.walk_forward.embed_manifest_sha256) == 64
+    assert config.walk_forward.embed_producer_config_path == CONFIG
+    assert config.walk_forward.embed_producer_config_sha256 == sha256_file(CONFIG)
+
+
+def test_head_config_digest_changes_without_changing_embed_identity() -> None:
+    config = load_downstream_config(CONFIG)
+    embed_sha = "a" * 64
+    changed = replace(
+        config,
+        walk_forward=replace(config.walk_forward, regularization_c=0.0001),
+    )
+    assert config.head_config_digest(embed_sha) != changed.head_config_digest(embed_sha)
+    assert changed.head_config_digest(embed_sha) == changed.head_config_digest(embed_sha)
+    changed_holdout = replace(
+        config,
+        data=replace(config.data, holdout_start=config.data.holdout_start + timedelta(days=1)),
+    )
+    assert config.head_config_digest(embed_sha) != changed_holdout.head_config_digest(embed_sha)
+
+
+def test_reusable_embed_manifest_requires_its_exact_digest(tmp_path: Path) -> None:
+    config = load_downstream_config(CONFIG)
+    manifest_path = tmp_path / "embed-manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "stage": "embed",
+                "workflow_digest": config.legacy_workflow_digest,
+                "foundation_weights_sha256": config.foundation.weights_sha256,
+                "embedding_dim_per_channel": 256,
+                "feature_width": 3840,
+                "rows": 1,
+                "outputs": [{"rows": 1}],
+            }
+        )
+    )
+    config = replace(
+        config,
+        walk_forward=replace(
+            config.walk_forward,
+            embed_manifest_path=manifest_path,
+            embed_manifest_sha256=sha256_file(manifest_path),
+            embed_producer_config_path=CONFIG,
+            embed_producer_config_sha256=sha256_file(CONFIG),
+        ),
+    )
+    manifest, path, digest = _embedding_manifest_input(config)
+    assert manifest["rows"] == 1
+    assert path == manifest_path.resolve()
+    assert digest == config.walk_forward.embed_manifest_sha256
+    manifest_path.write_text("{}")
+    with pytest.raises(DownstreamPipelineError, match="digest mismatch"):
+        _embedding_manifest_input(config)
+
+
+def test_reusable_embed_manifest_rejects_same_width_semantic_changes(
+    tmp_path: Path,
+) -> None:
+    producer = load_downstream_config(CONFIG)
+    manifest_path = tmp_path / "embed-manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "stage": "embed",
+                "workflow_digest": producer.legacy_workflow_digest,
+                "foundation_weights_sha256": producer.foundation.weights_sha256,
+                "embedding_dim_per_channel": 256,
+                "feature_width": 3840,
+                "rows": 1,
+                "outputs": [{"rows": 1}],
+            }
+        )
+    )
+    changed = replace(
+        producer,
+        foundation=replace(producer.foundation, return_transf_layer=0),
+        walk_forward=replace(
+            producer.walk_forward,
+            embed_manifest_path=manifest_path,
+            embed_manifest_sha256=sha256_file(manifest_path),
+            embed_producer_config_path=CONFIG,
+            embed_producer_config_sha256=sha256_file(CONFIG),
+        ),
+    )
+    with pytest.raises(DownstreamPipelineError, match="semantics mismatch"):
+        _embedding_manifest_input(changed)
+
+
+def _write_embedding_fixture(config: DownstreamConfig, rows: int = 122) -> tuple[Path, Path]:
+    root = config.run.artifact_root / config.run.name
+    shard_root = root / "embed" / "shards"
+    shard_root.mkdir(parents=True)
+    feature_path = shard_root / "features-00000.npy"
+    metadata_path = shard_root / "metadata-00000.parquet"
+    generator = np.random.default_rng(42)
+    with feature_path.open("wb") as handle:
+        np.save(handle, generator.normal(size=(rows, 4)).astype(np.float32))
+    decision = pd.date_range("2025-01-01T00:00:00Z", periods=rows, freq="1D")
+    metadata = pd.DataFrame(
+        {
+            "symbol": ["NQ"] * rows,
+            "decision_ts": decision,
+            "label_end_ts": decision + timedelta(minutes=3),
+            "label": np.arange(rows, dtype=np.int8) % 2,
+        }
+    )
+    metadata.to_parquet(metadata_path, index=False)
+    outputs = [
+        {
+            "number": 0,
+            "rows": rows,
+            "features": {
+                "path": str(feature_path),
+                "size": feature_path.stat().st_size,
+                "sha256": sha256_file(feature_path),
+            },
+            "metadata": {
+                "path": str(metadata_path),
+                "size": metadata_path.stat().st_size,
+                "sha256": sha256_file(metadata_path),
+            },
+        }
+    ]
+    manifest = {**_manifest_base(config, "embed"), "outputs": outputs, "rows": rows}
+    (root / "embed" / "manifest.json").write_text(json.dumps(manifest))
+    return feature_path, metadata_path
+
+
+@pytest.mark.parametrize("changed_kind", ["features", "metadata"])
+def test_walk_forward_rehashes_every_embedding_shard_before_fit(
+    tmp_path: Path, changed_kind: str
+) -> None:
+    config = load_downstream_config(CONFIG)
+    config = replace(
+        config,
+        run=replace(config.run, name=f"changed-{changed_kind}", artifact_root=tmp_path),
+    )
+    feature_path, metadata_path = _write_embedding_fixture(config)
+    changed = feature_path if changed_kind == "features" else metadata_path
+    with changed.open("ab") as handle:
+        handle.write(b"changed")
+    with pytest.raises(DownstreamPipelineError, match=f"embedding {changed_kind} changed"):
+        walk_forward(config)
+
+
+def test_walk_forward_persists_failure_diagnostics_on_nonconvergence(
+    tmp_path: Path,
+) -> None:
+    config = load_downstream_config(CONFIG)
+    config = replace(
+        config,
+        run=replace(config.run, name="nonconvergent", artifact_root=tmp_path),
+        walk_forward=replace(
+            config.walk_forward,
+            train_months=1,
+            validation_months=1,
+            test_months=1,
+            stride_months=1,
+            embargo_bars=0,
+            max_fit_rows=100,
+            max_iter=1,
+        ),
+    )
+    _write_embedding_fixture(config)
+    embed_manifest_path = tmp_path / config.run.name / "embed" / "manifest.json"
+    embed_manifest_sha = sha256_file(embed_manifest_path)
+    with pytest.raises(WalkForwardContractError, match="did not converge"):
+        walk_forward(config)
+    failure = json.loads((tmp_path / config.run.name / "walk-forward" / "failure.json").read_text())
+    assert failure["fold"]["number"] == 0
+    assert failure["embed_manifest_sha256"] == embed_manifest_sha
+    assert failure["head_config_digest"] == config.head_config_digest(embed_manifest_sha)
+    assert failure["convergence"]["converged"] is False
+    assert failure["convergence"]["n_iter"] == 1
 
 
 def test_causal_alignment_cannot_see_a_forming_higher_timeframe_bar() -> None:
@@ -251,11 +448,39 @@ def test_logistic_scaler_and_threshold_are_not_fit_on_test() -> None:
     train_y = np.array([0, 0, 1, 1])
     validation_x = np.array([[1.0], [2.0], [100.0], [101.0]])
     validation_y = np.array([0, 1, 1, 1])
-    head, metrics = fit_logistic_head(train_x, train_y, validation_x, validation_y, config)
+    head, metrics, convergence = fit_logistic_head(
+        train_x, train_y, validation_x, validation_y, config
+    )
     assert head.scaler_mean.tolist() == [1.5]
     probabilities = predict_head(head, validation_x)
     assert head.threshold == pytest.approx(np.percentile(probabilities, 50.0))
     assert np.isfinite(metrics["log_loss"])
+    assert convergence.converged is True
+
+
+def test_logistic_head_fails_closed_when_optimizer_does_not_converge() -> None:
+    config = load_downstream_config(CONFIG)
+    config = replace(
+        config,
+        walk_forward=replace(config.walk_forward, max_iter=1),
+    )
+    train_x = np.column_stack(
+        [
+            np.linspace(-5.0, 5.0, 200),
+            np.sin(np.linspace(-5.0, 5.0, 200)),
+        ]
+    )
+    train_y = (train_x[:, 0] + train_x[:, 1] > 0).astype(np.int8)
+
+    with pytest.raises(WalkForwardContractError, match="did not converge"):
+        fit_logistic_head(train_x, train_y, train_x, train_y, config)
+
+
+def test_walk_forward_quality_gate_requires_both_primary_baselines() -> None:
+    passing = [{"test_metrics": {"weighted_log_loss": 0.68, "weighted_brier": 0.24}}]
+    failing = [{"test_metrics": {"weighted_log_loss": 0.68, "weighted_brier": 0.26}}]
+    assert _walk_forward_quality_gate(passing)["passed"] is True
+    assert _walk_forward_quality_gate(failing)["passed"] is False
 
 
 def test_single_class_diagnostics_serialize_as_null_not_nan() -> None:
@@ -352,11 +577,44 @@ def test_holdout_rejects_a_modified_head_before_scoring(tmp_path: Path) -> None:
     walk_manifest = {
         **_manifest_base(config, "walk-forward"),
         "embed_manifest_sha256": sha256_file(embed_manifest_path),
+        "convergence_gate_passed": True,
+        "quality_gate": {"passed": True},
         "folds": [{"head": {"path": str(head_path), "sha256": "0" * 64}}],
     }
     (root / "walk-forward" / "manifest.json").write_text(json.dumps(walk_manifest))
     with pytest.raises(DownstreamPipelineError, match="head digest mismatch"):
         evaluate_holdout(config, config.evaluation.holdout_unlock)
+
+
+@pytest.mark.parametrize(
+    ("convergence_passed", "quality_passed", "message"),
+    [
+        (False, True, "convergence gate"),
+        (True, False, "quality gate"),
+    ],
+)
+def test_simulation_rejects_an_ungated_walk_forward_run(
+    tmp_path: Path,
+    convergence_passed: bool,
+    quality_passed: bool,
+    message: str,
+) -> None:
+    config = load_downstream_config(CONFIG)
+    config = replace(config, run=replace(config.run, artifact_root=tmp_path))
+    path = tmp_path / config.run.name / "walk-forward" / "manifest.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                **_manifest_base(config, "walk-forward"),
+                "convergence_gate_passed": convergence_passed,
+                "quality_gate": {"passed": quality_passed},
+                "folds": [],
+            }
+        )
+    )
+    with pytest.raises(DownstreamPipelineError, match=message):
+        simulate(config)
 
 
 def test_downstream_smoke_writes_and_verifies_all_stage_manifests(tmp_path: Path) -> None:

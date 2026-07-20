@@ -15,12 +15,13 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from mantis_v2.downstream_config import DownstreamConfig
+from mantis_v2.downstream_config import DownstreamConfig, load_downstream_config
 from mantis_v2.embedding import iter_symbol_embeddings, load_foundation
 from mantis_v2.model import sha256_file
 from mantis_v2.strategy import build_symbol_candidates, market_path
 from mantis_v2.topstep import simulate_topstep
 from mantis_v2.walk_forward import (
+    HeadConvergenceError,
     PortableHead,
     build_folds,
     deterministic_cap,
@@ -109,6 +110,58 @@ def _manifest(path: Path, config: DownstreamConfig, expected_stage: str) -> dict
         if value.get(key) != expected[key]:
             raise DownstreamPipelineError(f"{expected_stage} manifest identity mismatch: {key}")
     return cast(dict[str, Any], value)
+
+
+def _embedding_manifest_input(
+    config: DownstreamConfig,
+) -> tuple[dict[str, Any], Path, str]:
+    configured = config.walk_forward.embed_manifest_path
+    if configured is None:
+        path = artifact_root(config) / "embed" / "manifest.json"
+        manifest = _manifest(path, config, "embed")
+    else:
+        path = configured.resolve()
+        expected_sha = config.walk_forward.embed_manifest_sha256
+        if not path.is_file() or sha256_file(path) != expected_sha:
+            raise DownstreamPipelineError("reusable embed manifest digest mismatch")
+        try:
+            manifest = json.loads(path.read_text())
+        except json.JSONDecodeError as exc:
+            raise DownstreamPipelineError("reusable embed manifest is invalid JSON") from exc
+        if manifest.get("schema_version") != 1 or manifest.get("stage") != "embed":
+            raise DownstreamPipelineError("reusable embed manifest contract is invalid")
+        producer_path_value = config.walk_forward.embed_producer_config_path
+        if producer_path_value is None:
+            raise DownstreamPipelineError("reusable embed producer config is missing")
+        producer_path = producer_path_value.resolve()
+        if (
+            not producer_path.is_file()
+            or sha256_file(producer_path) != config.walk_forward.embed_producer_config_sha256
+        ):
+            raise DownstreamPipelineError("reusable embed producer config digest mismatch")
+        producer = load_downstream_config(producer_path)
+        if manifest.get("workflow_digest") != producer.legacy_workflow_digest:
+            raise DownstreamPipelineError(
+                "reusable embed manifest does not match its producer config"
+            )
+        if producer.embedding_contract_digest != config.embedding_contract_digest:
+            raise DownstreamPipelineError("reusable embedding semantics mismatch")
+        if manifest.get("foundation_weights_sha256") != config.foundation.weights_sha256:
+            raise DownstreamPipelineError("reusable embeddings use different foundation weights")
+        embedding_dim = manifest.get("embedding_dim_per_channel")
+        if not isinstance(embedding_dim, int) or embedding_dim < 1:
+            raise DownstreamPipelineError("reusable embedding dimension is invalid")
+        expected_width = (
+            embedding_dim * len(config.data.feature_columns) * len(config.data.timeframes)
+        )
+        if manifest.get("feature_width") != expected_width:
+            raise DownstreamPipelineError("reusable embedding feature width mismatch")
+        outputs = manifest.get("outputs")
+        if not isinstance(outputs, list) or not outputs:
+            raise DownstreamPipelineError("reusable embed manifest has no shard outputs")
+        if manifest.get("rows") != sum(int(output.get("rows", -1)) for output in outputs):
+            raise DownstreamPipelineError("reusable embed manifest row count mismatch")
+    return manifest, path, sha256_file(path)
 
 
 def prepare(config: DownstreamConfig) -> dict[str, Any]:
@@ -292,6 +345,29 @@ def _require_finite_primary(metrics: dict[str, float | None], partition: str) ->
             raise DownstreamPipelineError(f"non-finite {partition} primary metric: {name}")
 
 
+def _walk_forward_quality_gate(
+    fold_outputs: list[dict[str, Any]],
+) -> dict[str, float | bool]:
+    mean_weighted_log_loss = float(
+        np.mean([float(fold["test_metrics"]["weighted_log_loss"]) for fold in fold_outputs])
+    )
+    mean_weighted_brier = float(
+        np.mean([float(fold["test_metrics"]["weighted_brier"]) for fold in fold_outputs])
+    )
+    baseline_log_loss = float(np.log(2.0))
+    baseline_brier = 0.25
+    baseline_passed = (
+        mean_weighted_log_loss < baseline_log_loss and mean_weighted_brier < baseline_brier
+    )
+    return {
+        "passed": baseline_passed,
+        "mean_test_weighted_log_loss": mean_weighted_log_loss,
+        "balanced_constant_weighted_log_loss": baseline_log_loss,
+        "mean_test_weighted_brier": mean_weighted_brier,
+        "balanced_constant_weighted_brier": baseline_brier,
+    }
+
+
 def _read_head(path: Path) -> PortableHead:
     values = np.load(path, allow_pickle=False)
     return PortableHead(
@@ -306,10 +382,11 @@ def _read_head(path: Path) -> PortableHead:
 def walk_forward(config: DownstreamConfig) -> dict[str, Any]:
     """Fit train-only logistic heads and emit full out-of-sample predictions."""
     root = artifact_root(config)
-    embedded = _manifest(root / "embed" / "manifest.json", config, "embed")
+    embedded, embed_manifest_path, embed_manifest_sha = _embedding_manifest_input(config)
     stage_root = root / "walk-forward"
     manifest_path = stage_root / "manifest.json"
     _require_new(stage_root, config)
+    head_config_digest = config.head_config_digest(embed_manifest_sha)
     _verify_embedding_features(embedded)
     metadata = _load_embedding_metadata(embedded)
     folds = build_folds(metadata, config)
@@ -329,13 +406,29 @@ def walk_forward(config: DownstreamConfig) -> dict[str, Any]:
         test_indices = np.flatnonzero(test_mask)
         train_features = _feature_rows(embedded, metadata, train_indices)
         validation_features = _feature_rows(embedded, metadata, validation_indices)
-        head, validation_metrics = fit_logistic_head(
-            train_features,
-            metadata["label"].iloc[train_indices].to_numpy(dtype=np.int8),
-            validation_features,
-            metadata["label"].iloc[validation_indices].to_numpy(dtype=np.int8),
-            config,
-        )
+        try:
+            head, validation_metrics, convergence = fit_logistic_head(
+                train_features,
+                metadata["label"].iloc[train_indices].to_numpy(dtype=np.int8),
+                validation_features,
+                metadata["label"].iloc[validation_indices].to_numpy(dtype=np.int8),
+                config,
+            )
+        except HeadConvergenceError as exc:
+            _atomic_json(
+                stage_root / "failure.json",
+                {
+                    "stage": "walk-forward",
+                    "fold": asdict(fold),
+                    "head_config_digest": head_config_digest,
+                    "embed_manifest": str(embed_manifest_path),
+                    "embed_manifest_sha256": embed_manifest_sha,
+                    "embedding_contract_digest": config.embedding_contract_digest,
+                    "convergence": asdict(exc.diagnostics),
+                    "error": str(exc),
+                },
+            )
+            raise
         _require_finite_primary(validation_metrics, f"fold {fold.number} validation")
         del train_features, validation_features
         head_path = stage_root / "heads" / f"fold-{fold.number:03d}.npz"
@@ -379,13 +472,24 @@ def walk_forward(config: DownstreamConfig) -> dict[str, Any]:
                 "test_rows": len(test_indices),
                 "validation_metrics": validation_metrics,
                 "test_metrics": test_metrics,
+                "convergence": asdict(convergence),
                 "head": _file_identity(head_path),
                 "predictions": _file_identity(prediction_path),
             }
         )
+    quality_gate = _walk_forward_quality_gate(fold_outputs)
+    convergence_gate_passed = all(bool(fold["convergence"]["converged"]) for fold in fold_outputs)
     manifest = {
         **_manifest_base(config, "walk-forward"),
-        "embed_manifest_sha256": sha256_file(root / "embed" / "manifest.json"),
+        "embed_manifest": str(embed_manifest_path),
+        "embed_manifest_sha256": embed_manifest_sha,
+        "embed_producer_config": str(config.walk_forward.embed_producer_config_path),
+        "embed_producer_config_sha256": config.walk_forward.embed_producer_config_sha256,
+        "embedding_contract_digest": config.embedding_contract_digest,
+        "head_config_digest": head_config_digest,
+        "head_config": asdict(config.walk_forward),
+        "convergence_gate_passed": convergence_gate_passed,
+        "quality_gate": quality_gate,
         "primary_metrics": ["weighted_log_loss", "weighted_brier"],
         "diagnostic_metrics": ["log_loss", "brier", "roc_auc", "pr_auc"],
         "folds": fold_outputs,
@@ -398,6 +502,11 @@ def simulate(config: DownstreamConfig) -> dict[str, Any]:
     """Replay walk-forward predictions under the configured Combine rules."""
     root = artifact_root(config)
     walked = _manifest(root / "walk-forward" / "manifest.json", config, "walk-forward")
+    if walked.get("convergence_gate_passed") is not True:
+        raise DownstreamPipelineError("walk-forward convergence gate did not pass")
+    quality_gate = walked.get("quality_gate")
+    if not isinstance(quality_gate, dict) or quality_gate.get("passed") is not True:
+        raise DownstreamPipelineError("walk-forward quality gate did not pass")
     stage_root = root / "simulate"
     manifest_path = stage_root / "manifest.json"
     _require_new(stage_root, config)
@@ -474,7 +583,7 @@ def smoke(config: DownstreamConfig) -> dict[str, Any]:
         "metadata": _file_identity(metadata_path),
     }
     _atomic_json(root / "embed" / "manifest.json", embed_manifest)
-    head, validation_metrics = fit_logistic_head(
+    head, validation_metrics, convergence = fit_logistic_head(
         features[:8], labels[:8], features[8:], labels[8:], config
     )
     _require_finite_primary(validation_metrics, "smoke validation")
@@ -493,6 +602,9 @@ def smoke(config: DownstreamConfig) -> dict[str, Any]:
         "embed_manifest_sha256": sha256_file(root / "embed" / "manifest.json"),
         "validation_metrics": validation_metrics,
         "test_metrics": test_metrics,
+        "convergence_gate_passed": convergence.converged,
+        "quality_gate": {"passed": True},
+        "convergence": asdict(convergence),
         "head": _file_identity(head_path),
         "predictions": _file_identity(predictions_path),
     }
@@ -527,13 +639,17 @@ def evaluate_holdout(config: DownstreamConfig, unlock: str) -> dict[str, Any]:
     stage_root = root / "holdout"
     manifest_path = stage_root / "manifest.json"
     _require_new(stage_root, config)
-    _manifest(root / "embed" / "manifest.json", config, "embed")
+    _embedded, embed_manifest_path, embed_manifest_sha = _embedding_manifest_input(config)
     walked = _manifest(root / "walk-forward" / "manifest.json", config, "walk-forward")
-    embed_manifest_sha = sha256_file(root / "embed" / "manifest.json")
     if walked.get("embed_manifest_sha256") != embed_manifest_sha:
         raise DownstreamPipelineError(
             "walk-forward manifest is not bound to the current embeddings"
         )
+    if walked.get("convergence_gate_passed") is not True:
+        raise DownstreamPipelineError("walk-forward convergence gate did not pass")
+    quality_gate = walked.get("quality_gate")
+    if not isinstance(quality_gate, dict) or quality_gate.get("passed") is not True:
+        raise DownstreamPipelineError("walk-forward quality gate did not pass")
     last = walked["folds"][-1]
     head_path = Path(last["head"]["path"])
     if not head_path.is_file() or sha256_file(head_path) != last["head"]["sha256"]:

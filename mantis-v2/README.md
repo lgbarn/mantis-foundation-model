@@ -145,6 +145,28 @@ the prior stage's hashes and emits a manifest. The foundation export path and
 trusted safetensors SHA-256 are both explicit config values. The logistic head stores scaler
 and coefficient arrays in `.npz`, never pickle.
 
+Head-only reruns may reuse an existing embedding stage without copying or
+rewriting it. Set the manifest path/SHA and producer-config path/SHA fields,
+choose a new `run.name`, and run only `downstream-walk-forward`. The producer's
+legacy workflow identity and full data, label, and encoder semantics must match
+before any shard is read. Every feature and metadata shard is then rehashed,
+and the new walk-forward manifest records the exact embed identity and a
+separate head configuration digest. The tuned production example is:
+
+```bash
+just downstream-walk-forward \
+  mantis-v2/configs/supertrend-topstep-100k-head-c0001-v2.toml
+```
+
+Logistic solver, inverse regularization strength `regularization_c`, tolerance,
+iteration ceiling, class weighting, and convergence policy are TOML settings.
+Production uses `convergence_policy = "fail"`; a `ConvergenceWarning` writes a
+durable `failure.json` and stops the stage. The completed walk-forward manifest
+also compares mean class-balanced test log loss and Brier score with the
+constant 0.5 probability baselines (`log(2)` and `0.25`). Simulation and sealed
+holdout evaluation reject a run unless both convergence and primary-loss gates
+pass. See [ADR 0003](../docs/adr/0003-reuse-embeddings-for-isolated-head-runs.md).
+
 `just downstream-smoke` runs a deterministic CPU-only component smoke and
 writes all four stage manifests. It is part of `just gate`. Production stages
 fail closed on partial output; resume with a new run name, or explicitly use an
