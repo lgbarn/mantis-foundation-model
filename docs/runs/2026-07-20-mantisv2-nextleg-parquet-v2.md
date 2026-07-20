@@ -83,12 +83,45 @@ Candidate rows by symbol:
 | CL | 447,300 |
 | ZB | 490,884 |
 
-The next durable stage is MPS embedding. Walk-forward fitting and Topstep 100K
-simulation must not begin until the embedding manifest is complete and audited.
+## Trend Magic embedding
+
+| Field | Value |
+| --- | --- |
+| Feature/metadata shard pairs | 400 |
+| Rows | 3,259,736 |
+| Feature width | 3,840 |
+| Storage dtype | float16 |
+| Embed manifest SHA-256 | `bffb74988497aec1c1c51821188e9c77b8a028c3016ddab30a843cbd785eea35` |
+| Manifest row parity | Verified against prepare |
+| File hashes and shapes | Verified for all 800 files |
+| Finite samples | Verified at first, middle, and last row of every shard |
+
+## Walk-forward convergence incident
+
+The original run failed closed on fold 0 because its class-balanced LBFGS head
+reached 500 of 500 iterations at `C=1.0`. The failure is preserved at
+`mantisv2-trend-magic-topstep-100k/walk-forward/failure.json`; no embedding was
+modified or discarded.
+
+The operator-recorded exact fold-0 diagnostic used the production pipeline's
+deterministic masks and caps: 25,000 train and 25,000 validation rows, each with
+a 0.2498 positive rate. There were no zero-variance embedding dimensions.
+Changing only `C` to `0.0001` converged in 56 iterations. Fold-0 validation was
+still weak: weighted log loss 0.696498, weighted Brier 0.251644, and ROC AUC
+0.504507. These observations diagnose the failure; they are not a pipeline
+manifest or production qualification. The production walk-forward manifest is
+the required durable evidence for all-fold results.
+
+The replacement consumer config is
+`mantis-v2/configs/trend-magic-topstep-100k-head-c0001-v2.toml`. It pins the
+audited embed manifest and its producer config by SHA-256, preserves the failed
+run, and writes head artifacts under a new run identity. Full walk-forward must
+still pass convergence and proper-score gates before Topstep simulation can run.
 
 ## Evidence boundary
 
 This record proves repaired-corpus binding, completed foundation adaptation,
-checkpoint-bound validation, safetensors parity, and pre-holdout candidate
-preparation. It does not prove holdout performance, classifier quality, Topstep
-success, or profitability.
+checkpoint-bound validation, safetensors parity, pre-holdout candidate
+preparation, embedding completeness, and the isolated convergence diagnosis. It
+does not prove full-fold classifier quality, Topstep success, sealed-holdout
+performance, or profitability.

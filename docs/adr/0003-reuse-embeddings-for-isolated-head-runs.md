@@ -47,3 +47,11 @@ and cannot silently become eligible for simulation. The first walk-forward run
 remains an immutable diagnostic artifact. Strong regularization improves the
 linear probe, but the full eight-fold rerun must still pass the primary-loss
 gate; fold-0 improvement is not treated as production qualification.
+
+The same decision applies to the Trend Magic production embeddings. Its first
+fold reached 500 iterations at `C=1.0`; changing only `C` to `0.0001` converged
+in 56 iterations on the exact 25,000-row capped fold with no zero-variance
+features. The replacement consumer pins the original Trend Magic embed manifest
+and producer config, uses a new run identity, and leaves the failed artifact
+intact. Its weak fold-0 proper scores remain subject to the unchanged full-fold
+quality gate.

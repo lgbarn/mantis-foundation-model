@@ -46,6 +46,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "configs" / "supertrend-topstep-100k.toml"
 TUNED_CONFIG = ROOT / "configs" / "supertrend-topstep-100k-head-c0001-v2.toml"
 TREND_MAGIC_CONFIG = ROOT / "configs" / "trend-magic-topstep-100k.toml"
+TREND_MAGIC_TUNED_CONFIG = ROOT / "configs" / "trend-magic-topstep-100k-head-c0001-v2.toml"
 
 
 def test_downstream_config_is_strict_and_supports_recorded_overrides() -> None:
@@ -111,6 +112,23 @@ def test_tuned_production_config_pins_reusable_embeddings_and_head_settings() ->
     assert len(config.walk_forward.embed_manifest_sha256) == 64
     assert config.walk_forward.embed_producer_config_path == CONFIG
     assert config.walk_forward.embed_producer_config_sha256 == sha256_file(CONFIG)
+
+
+def test_tuned_trend_magic_config_reuses_exact_production_embeddings() -> None:
+    config = load_downstream_config(TREND_MAGIC_TUNED_CONFIG)
+    assert config.run.name == "mantisv2-trend-magic-topstep-100k-head-c0001-v2"
+    assert config.strategy.kind == "trend_magic"
+    assert config.walk_forward.max_iter == 1000
+    assert config.walk_forward.regularization_c == pytest.approx(0.0001)
+    assert config.walk_forward.solver == "lbfgs"
+    assert config.walk_forward.convergence_policy == "fail"
+    assert config.walk_forward.embed_manifest_sha256 == (
+        "bffb74988497aec1c1c51821188e9c77b8a028c3016ddab30a843cbd785eea35"
+    )
+    assert config.walk_forward.embed_producer_config_path == TREND_MAGIC_CONFIG
+    assert config.walk_forward.embed_producer_config_sha256 == sha256_file(TREND_MAGIC_CONFIG)
+    producer = load_downstream_config(TREND_MAGIC_CONFIG)
+    assert config.embedding_contract_digest == producer.embedding_contract_digest
 
 
 def test_head_config_digest_changes_without_changing_embed_identity() -> None:

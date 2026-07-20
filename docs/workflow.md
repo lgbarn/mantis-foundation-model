@@ -313,15 +313,20 @@ Run stages independently for bounded recovery:
 ```bash
 just downstream-prepare mantis-v2/configs/trend-magic-topstep-100k.toml
 just downstream-embed mantis-v2/configs/trend-magic-topstep-100k.toml
-just downstream-walk-forward mantis-v2/configs/trend-magic-topstep-100k.toml
-just downstream-simulate mantis-v2/configs/trend-magic-topstep-100k.toml
+just downstream-walk-forward mantis-v2/configs/trend-magic-topstep-100k-head-c0001-v2.toml
+just downstream-simulate mantis-v2/configs/trend-magic-topstep-100k-head-c0001-v2.toml
 ```
 
-Or run the normal chain:
+`trend-magic-topstep-100k-head-c0001-v2.toml` is the production consumer for
+walk-forward and simulation. It pins and reuses the completed embeddings from
+the producer config, changes only head fitting, and writes under a distinct run
+identity. Do not run the all-stage chain with this consumer config because its
+purpose is isolated head fitting against immutable embeddings.
 
-```bash
-just downstream-run mantis-v2/configs/trend-magic-topstep-100k.toml
-```
+No all-stage Trend Magic command is currently qualified. A future producer
+config may use `downstream-run` only after its embedded head settings have
+passed the exact-fold convergence diagnostic and that config has its own
+documented run identity.
 
 Each stage verifies upstream hashes and writes a manifest. Production stages fail
 closed on partial output when overwrite is false. Do not delete partial outputs
@@ -348,6 +353,13 @@ Verify:
 - The manifest binds source rows to shard outputs.
 
 ### Walk forward
+
+The head must converge on every fold and beat both class-balanced constant
+baselines before simulation. A convergence failure is durable evidence: retain
+`failure.json`, diagnose on the exact capped fold, and create a new run identity
+for any changed head parameters. Never patch an old manifest or copy embeddings
+into a new directory. Reuse requires exact embed-manifest and producer-config
+paths and SHA-256 values in the consumer TOML.
 
 Verify:
 

@@ -154,15 +154,18 @@ Run one stage at a time for bounded failure recovery and inspection:
 ```bash
 just downstream-prepare mantis-v2/configs/trend-magic-topstep-100k.toml
 just downstream-embed mantis-v2/configs/trend-magic-topstep-100k.toml
-just downstream-walk-forward mantis-v2/configs/trend-magic-topstep-100k.toml
-just downstream-simulate mantis-v2/configs/trend-magic-topstep-100k.toml
+just downstream-walk-forward mantis-v2/configs/trend-magic-topstep-100k-head-c0001-v2.toml
+just downstream-simulate mantis-v2/configs/trend-magic-topstep-100k-head-c0001-v2.toml
 ```
 
-Or run the normal chain:
+The head-only config pins the completed production embeddings and their producer
+config by SHA-256, uses a distinct run identity, and keeps convergence and
+proper-score gates fail-closed. The original `C=1.0` fold-0 convergence failure
+is retained as evidence. Do not use the all-stage chain for this consumer config.
 
-```bash
-just downstream-run mantis-v2/configs/trend-magic-topstep-100k.toml
-```
+No all-stage Trend Magic command is currently qualified. Use the separate
+producer and head-consumer commands above; this prevents the known-failing head
+settings from triggering another expensive embed run.
 
 All locations and parameters live in TOML. A command can record a one-off
 scalar override without changing code, for example:

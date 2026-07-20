@@ -78,9 +78,17 @@ Run each recoverable stage separately:
 ```bash
 just downstream-prepare mantis-v2/configs/trend-magic-topstep-100k.toml
 just downstream-embed mantis-v2/configs/trend-magic-topstep-100k.toml
-just downstream-walk-forward mantis-v2/configs/trend-magic-topstep-100k.toml
-just downstream-simulate mantis-v2/configs/trend-magic-topstep-100k.toml
+just downstream-walk-forward mantis-v2/configs/trend-magic-topstep-100k-head-c0001-v2.toml
+just downstream-simulate mantis-v2/configs/trend-magic-topstep-100k-head-c0001-v2.toml
 ```
+
+The original `C=1.0`, 500-iteration head failed closed on fold 0. An exact-fold
+diagnostic changed one variable and found that `C=0.0001` converged in 56 of 500
+LBFGS iterations; the 3,840 features contained no zero-variance dimensions.
+The production consumer therefore pins `C=0.0001`, a 1,000-iteration safety
+ceiling, and the exact completed embed and producer-config hashes under a new
+run identity. This repairs optimizer conditioning only. It does not relax the
+full-fold proper-score gate or establish strategy quality.
 
 ## Validation and interpretation
 
