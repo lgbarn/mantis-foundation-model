@@ -1,0 +1,149 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+from mantis_v2 import cli
+from mantis_v2.rl_config import load_rl_config
+from mantis_v2.rl_provenance import (
+    RlProvenanceError,
+    source_digest,
+    write_rl_dry_run_manifest,
+)
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _configured_fixture(tmp_path: Path):
+    repository = tmp_path / "repo"
+    source = repository / "mantis-v2" / "src" / "mantis_v2" / "fixture.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("VALUE = 1\n")
+    lock = repository / "uv.lock"
+    lock.write_text("locked\n")
+    inputs = {}
+    for name in ("downstream", "corpus", "embedding", "foundation", "weights"):
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps({"identity": name}) + "\n")
+        inputs[name] = path
+    weights_digest = hashlib.sha256(inputs["weights"].read_bytes()).hexdigest()
+    corpus_digest = hashlib.sha256(inputs["corpus"].read_bytes()).hexdigest()
+    inputs["embedding"].write_text(json.dumps({"foundation_weights_sha256": weights_digest}) + "\n")
+    inputs["foundation"].write_text(json.dumps({"weights_sha256": weights_digest}) + "\n")
+    embedding_digest = hashlib.sha256(inputs["embedding"].read_bytes()).hexdigest()
+    inputs["downstream"].write_text(
+        "\n".join(
+            (
+                "[data]",
+                f'corpus_manifest_path = "{inputs["corpus"]}"',
+                f'corpus_manifest_sha256 = "{corpus_digest}"',
+                'holdout_start = "2026-01-01T00:00:00+00:00"',
+                "[foundation]",
+                f'manifest_path = "{inputs["foundation"]}"',
+                f'weights_sha256 = "{weights_digest}"',
+                "[walk_forward]",
+                f'embed_manifest_path = "{inputs["embedding"]}"',
+                f'embed_manifest_sha256 = "{embedding_digest}"',
+                "[evaluation]",
+                "allow_holdout = false",
+                "",
+            )
+        )
+    )
+    output = tmp_path / "outputs"
+    base = load_rl_config(ROOT / "configs" / "rl-entry-smoke.toml")
+
+    def digest(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    upstream = replace(
+        base.upstream,
+        source_digest=source_digest(repository),
+        lock_digest=digest(lock),
+        downstream_config_path=inputs["downstream"],
+        downstream_config_sha256=digest(inputs["downstream"]),
+        corpus_manifest_path=inputs["corpus"],
+        corpus_manifest_sha256=digest(inputs["corpus"]),
+        embedding_manifest_path=inputs["embedding"],
+        embedding_manifest_sha256=digest(inputs["embedding"]),
+        foundation_manifest_path=inputs["foundation"],
+        foundation_manifest_sha256=digest(inputs["foundation"]),
+        foundation_weights_path=inputs["weights"],
+        foundation_weights_sha256=digest(inputs["weights"]),
+    )
+    config = replace(
+        base,
+        upstream=upstream,
+        run=replace(base.run, name="fixture-run", artifact_root=output),
+    )
+    return config, repository, inputs, source, lock
+
+
+def test_dry_run_writes_atomic_no_overwrite_identity_manifest(tmp_path: Path) -> None:
+    config, repository, _inputs, _source, _lock = _configured_fixture(tmp_path)
+
+    manifest = write_rl_dry_run_manifest(config, repository)
+    path = config.run.artifact_root / config.run.name / "dry-run-manifest.json"
+
+    assert json.loads(path.read_text()) == manifest
+    assert set(manifest["identities"]) == {
+        "source",
+        "lock",
+        "corpus",
+        "embedding",
+        "foundation",
+        "config",
+        "rule",
+        "fee",
+        "output",
+    }
+    assert not list(path.parent.glob("*.tmp"))
+    with pytest.raises(RlProvenanceError, match="already exists"):
+        write_rl_dry_run_manifest(config, repository)
+
+
+@pytest.mark.parametrize(
+    "identity",
+    ("source", "lock", "downstream", "corpus", "embedding", "foundation", "weights"),
+)
+def test_dry_run_rejects_each_modified_upstream_identity(tmp_path: Path, identity: str) -> None:
+    config, repository, inputs, source, lock = _configured_fixture(tmp_path)
+    target = source if identity == "source" else lock if identity == "lock" else inputs[identity]
+    target.write_text(target.read_text() + "modified\n")
+
+    with pytest.raises(RlProvenanceError, match=f"{identity}.*digest mismatch"):
+        write_rl_dry_run_manifest(config, repository)
+
+
+def test_dry_run_never_reads_the_sealed_holdout(tmp_path: Path) -> None:
+    config, repository, _inputs, _source, _lock = _configured_fixture(tmp_path)
+    sealed = tmp_path / "sealed-holdout"
+    assert not sealed.exists()
+
+    manifest = write_rl_dry_run_manifest(config, repository)
+
+    assert manifest["sealed_holdout"]["accessed"] is False
+    assert manifest["sealed_holdout"]["start"] == "2026-01-01 00:00:00+00:00"
+
+
+def test_cli_exposes_bounded_rl_dry_run(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    expected = {"stage": "rl-entry-dry-run"}
+    config = load_rl_config(ROOT / "configs" / "rl-entry-smoke.toml")
+    monkeypatch.setattr(cli, "load_rl_config", lambda _path: config, raising=False)
+    monkeypatch.setattr(
+        cli,
+        "write_rl_dry_run_manifest",
+        lambda _config: expected,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        ["mantis-v2", "rl-dry-run", "--config", "rl.toml"],
+    )
+
+    cli.main()
+
+    assert json.loads(capsys.readouterr().out) == expected

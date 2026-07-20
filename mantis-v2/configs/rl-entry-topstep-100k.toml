@@ -1,0 +1,109 @@
+schema_version = 1
+
+[upstream]
+source_digest = "8711098ba2c1e01f7fb70a2ae9c67ddffed8ed69c622d58bf4c3e32d1de707f1"
+lock_digest = "ff9068081c5e4c1383d252850d5ea99b2cca0775d318ce5346c5cd88542db8e0"
+downstream_config_path = "mantis-v2/configs/trend-magic-topstep-100k-head-c0001-v2.toml"
+downstream_config_sha256 = "a7d5d7fc11363f22df2e642904aa8ab367353faaac0aec3bfb19d0b2ddb62c08"
+corpus_manifest_path = "/Volumes/Storage/trading-research/data/MANTIS_NEXTLEG_PARQUET_V1/manifest.json"
+corpus_manifest_sha256 = "2d8cf8b708c7c743c849059410b3654bc44f9fe4f7d795928de82526e120d703"
+embedding_manifest_path = "/Volumes/Storage/trading-research/artifacts/mantis-foundation-model/mantisv2-trend-magic-topstep-100k/embed/manifest.json"
+embedding_manifest_sha256 = "bffb74988497aec1c1c51821188e9c77b8a028c3016ddab30a843cbd785eea35"
+foundation_manifest_path = "/Volumes/Storage/trading-research/artifacts/mantis-foundation-model/mantisv2-nextleg-parquet-v2/export/manifest.json"
+foundation_manifest_sha256 = "42e58ac02f1505bca7b213acd7ee4c6cc88152e7bb29c264863635b24234408f"
+foundation_weights_path = "/Volumes/Storage/trading-research/artifacts/mantis-foundation-model/mantisv2-nextleg-parquet-v2/export/model.safetensors"
+foundation_weights_sha256 = "aab5bac1459a3cf0b08663d1d327e79ee3c1337dd51a30e16def53b8f563c1b9"
+
+[rl.run]
+name = "rl-entry-topstep-100k-v1"
+seed = 42
+device = "cpu"
+artifact_root = "/Volumes/Storage/trading-research/artifacts/mantis-foundation-model"
+
+[rl.policy]
+role = "entry"
+algorithm = "maskable_ppo"
+actions = ["skip", "enter"]
+ticker_conditioning = true
+critic = "ticker_specific_heads"
+embedding_projection_dim = 256
+
+[rl.episode]
+ticker_mode = "one_per_episode"
+ticker_sampling = "uniform"
+account_start = 100000.0
+timeout_trading_days = 20
+randomize_starting_cushion = false
+
+[rl.execution]
+adverse_slippage_ticks_per_side = 1.0
+stress_adverse_slippage_ticks_per_side = 2.0
+fee_schedule = "topstepx-2026-07-20"
+cost_booking = "account_simulator_only"
+
+[rl.fees]
+snapshot = "topstepx-2026-07-20"
+es = 3.78
+mes = 1.22
+nq = 3.78
+mnq = 1.22
+rty = 3.78
+m2k = 1.22
+ym = 3.78
+mym = 1.22
+gc = 4.32
+mgc = 1.92
+cl = 4.02
+mcl = 1.52
+zb = 2.76
+
+[rl.exit]
+policy = "two_r_trailing_v0"
+initial_stop_r = 1.0
+activation_r = 2.0
+giveback_r = 0.75
+horizon_bars = 120
+same_bar_policy = "prior_stop_first"
+
+[rl.sizing]
+actor_controls_size = false
+episode_profiles = ["one_mini", "ten_micros"]
+profile_sampling = "uniform_when_supported"
+mini_quantity = 1
+micro_quantity = 10
+mini_only_instruments = ["ZB"]
+
+[rl.topstep]
+rule_snapshot = "topstep-100k-2026-07-20"
+daily_loss_limit_enabled = true
+daily_loss_limit_dollars = 2000.0
+daily_loss_limit_action = "flatten_cancel_lockout"
+daily_loss_limit_terminal = false
+
+[rl.reward]
+kind = "terminal_pass_with_blow_cost"
+gamma = 1.0
+potential_shaping = false
+
+[rl.training]
+development_seeds = [42, 43, 44, 45, 46]
+confirmation_seeds = [42, 43, 44, 45, 46, 47, 48, 49, 50, 51]
+serving_seed = 42
+vector_environments = 7
+smoke_timesteps = 50000
+search_timesteps_per_seed = 500000
+search_seeds = 3
+maximum_search_trials = 30
+development_timesteps_per_seed = 2000000
+confirmation_timesteps_per_seed = 5000000
+maximum_timesteps_per_seed = 10000000
+
+[rl.evaluation]
+market_uncertainty = "synchronized_calendar_block_bootstrap"
+sealed_holdout_start = "2026-01-01T00:00:00+00:00"
+minimum_raw_pass_rate = 0.60
+minimum_seed_raw_pass_rate = 0.50
+minimum_pass_rate_lcb_95 = 0.50
+maximum_observed_blows = 0
+maximum_blow_rate_ucb_95 = 0.01
+minimum_chronological_attempts = 300

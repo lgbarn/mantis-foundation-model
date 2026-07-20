@@ -63,6 +63,7 @@ just inspect-data mantis-v2/configs/nextleg-parquet-v2.toml
 just probe-mps
 just train mantis-v2/configs/nextleg-parquet-v2.toml
 just validated-export mantis-v2/configs/nextleg-parquet-v2.toml
+just rl-dry-run mantis-v2/configs/rl-entry-smoke.toml
 ```
 
 `gate` includes deterministic synthetic smoke training, evaluation, checkpoint,
@@ -78,6 +79,12 @@ passes. The qualified production path starts from pinned official MantisV2
 weights and runs on Apple MPS.
 
 For diagnosis, `just evaluate <config>` and `just export <config>` expose the individual stages. Direct export still enforces the same evaluation gate.
+
+`rl-dry-run` validates the locked entry-only RL experiment without training or
+reading the sealed holdout. It rehashes the source, dependency lock, corpus,
+embeddings, foundation export, and foundation weights before atomically writing
+a no-overwrite identity manifest. Use `configs/rl-entry-topstep-100k.toml` for
+the production contract; the smoke config reduces budgets only.
 
 ## Training recipe
 
