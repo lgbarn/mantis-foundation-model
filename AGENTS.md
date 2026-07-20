@@ -91,6 +91,25 @@ start a second command with the same run identity; and do not kill, signal,
 suspend, or restart its processes. Documentation-only work must remain outside
 active data and artifact paths.
 
+## Agent skills
+
+### Issue tracker
+
+Track implementation work in GitHub Issues for `lgbarn/mantis-foundation-model`.
+External pull requests are not a triage request surface. See
+`docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the canonical `needs-triage`, `needs-info`, `ready-for-agent`,
+`ready-for-human`, and `wontfix` states plus the orthogonal `tdd` modifier. See
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Use a single repository context with root ADRs in `docs/adr/`. See
+`docs/agents/domain.md`.
+
 ## Scope discipline
 
 - Build MantisV2 first. Do not populate `mantis/` or `mantis-plus/` by copying MantisV2.
@@ -104,7 +123,10 @@ active data and artifact paths.
 The map at `.scratch/mantis-family-repo/map.md` is historical decision context,
 not an implementation backlog or operating guide. Current commands and behavior
 are defined by `justfile`, committed TOML configs, package tests,
-`docs/workflow.md`, and `mantis-v2/README.md`. The qualified production path is
-Apple MPS with local JSON/provenance artifacts; paths and future run identities
-remain machine-specific configuration. CPU and CUDA production recipes are not
+`docs/workflow.md`, and `mantis-v2/README.md`. The qualified foundation-model
+production path is Apple MPS with local JSON/provenance artifacts; paths and
+future run identities remain machine-specific configuration. The accepted
+Topstep RL specification qualifies its policy-training path on CPU separately;
+do not treat MPS as an RL target without its own determinism and throughput
+qualification. CPU and CUDA foundation-model production recipes are not
 qualified end to end.
