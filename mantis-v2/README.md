@@ -155,7 +155,6 @@ Run one stage at a time for bounded failure recovery and inspection:
 just downstream-prepare mantis-v2/configs/trend-magic-topstep-100k.toml
 just downstream-embed mantis-v2/configs/trend-magic-topstep-100k.toml
 just downstream-walk-forward mantis-v2/configs/trend-magic-topstep-100k-head-c0001-v2.toml
-just downstream-simulate mantis-v2/configs/trend-magic-topstep-100k-head-c0001-v2.toml
 ```
 
 The head-only config pins the completed production embeddings and their producer
@@ -166,6 +165,11 @@ is retained as evidence. Do not use the all-stage chain for this consumer config
 No all-stage Trend Magic command is currently qualified. Use the separate
 producer and head-consumer commands above; this prevents the known-failing head
 settings from triggering another expensive embed run.
+
+The completed `head-c0001-v2` walk-forward converged on all eight folds but
+failed both primary proper-score gates (weighted log loss 0.695306 and weighted
+Brier 0.251044). Do not run `downstream-simulate` or unlock the holdout for this
+head. A future candidate must use a new run identity and pass the same gates.
 
 All locations and parameters live in TOML. A command can record a one-off
 scalar override without changing code, for example:

@@ -79,7 +79,6 @@ Run each recoverable stage separately:
 just downstream-prepare mantis-v2/configs/trend-magic-topstep-100k.toml
 just downstream-embed mantis-v2/configs/trend-magic-topstep-100k.toml
 just downstream-walk-forward mantis-v2/configs/trend-magic-topstep-100k-head-c0001-v2.toml
-just downstream-simulate mantis-v2/configs/trend-magic-topstep-100k-head-c0001-v2.toml
 ```
 
 The original `C=1.0`, 500-iteration head failed closed on fold 0. An exact-fold
@@ -89,6 +88,12 @@ The production consumer therefore pins `C=0.0001`, a 1,000-iteration safety
 ceiling, and the exact completed embed and producer-config hashes under a new
 run identity. This repairs optimizer conditioning only. It does not relax the
 full-fold proper-score gate or establish strategy quality.
+
+The completed eight-fold production run converged in every fold but failed both
+primary test gates: mean class-balanced log loss was 0.695306 versus the
+0.693147 constant baseline, and mean class-balanced Brier was 0.251044 versus
+0.250000. Test ROC AUC ranged from 0.507711 to 0.518689. Under this spec,
+Topstep simulation and sealed-holdout evaluation are prohibited for this head.
 
 ## Validation and interpretation
 
@@ -100,5 +105,6 @@ writes candidates. Every later stage must verify the prior manifest and hashes.
 The chosen parameters establish reproducibility, not profitability. No rigorous
 public evidence validates Trend Magic on 3-minute futures. Primary model metrics
 remain class-balanced log loss and Brier score; ROC AUC and PR AUC are
-diagnostics. The sealed 2026 holdout stays unavailable until the strategy,
-classifier, threshold, and acceptance criteria are frozen.
+diagnostics. The sealed 2026 holdout stays unavailable. This candidate failed
+before the holdout decision point, so tuning must not use January-July 2026
+outcomes.

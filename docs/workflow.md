@@ -361,6 +361,11 @@ for any changed head parameters. Never patch an old manifest or copy embeddings
 into a new directory. Reuse requires exact embed-manifest and producer-config
 paths and SHA-256 values in the consumer TOML.
 
+The Trend Magic `head-c0001-v2` production run is a recorded rejection, not a
+simulation candidate: all eight folds converged, but mean test weighted log loss
+0.695306 and Brier 0.251044 failed their 0.693147 and 0.250000 baselines. Do not
+run simulation or holdout evaluation for that run identity.
+
 Verify:
 
 - Training, validation, and test windows are chronological.

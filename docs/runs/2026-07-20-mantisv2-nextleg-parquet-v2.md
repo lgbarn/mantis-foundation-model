@@ -127,10 +127,33 @@ requiring the exact manifest SHA-256, producer-config SHA-256, embedding contrac
 foundation weights, feature width, and row-count checks. Regression coverage
 exercises both current and legacy manifests. No artifact was modified.
 
+## Walk-forward result
+
+The corrected consumer completed all eight chronological folds. Every LBFGS
+head converged without warnings in 47-61 iterations, so the convergence gate
+passed. The proper-score quality gate failed:
+
+| Metric | Model mean | Constant baseline | Result |
+| --- | ---: | ---: | --- |
+| Class-balanced test log loss | 0.695306 | 0.693147 | Fail |
+| Class-balanced test Brier | 0.251044 | 0.250000 | Fail |
+
+Test ROC AUC ranged from 0.507711 to 0.518689 across folds. This is diagnostic
+near-chance ranking and is consistent with the failed proper-score gate. The
+walk-forward manifest SHA-256 is
+`f0b73c480e56481827a50af1014e27d938c4ce4352174a724b1059543bd2ec73`.
+All 16 recorded head and prediction files matched their manifest sizes and
+SHA-256 values during the completion audit.
+
+Topstep simulation was not run. The simulator requires both convergence and
+quality gates to pass, so running it on these predictions would violate the
+production workflow. The January-July 2026 holdout remains sealed and unused.
+
 ## Evidence boundary
 
 This record proves repaired-corpus binding, completed foundation adaptation,
 checkpoint-bound validation, safetensors parity, pre-holdout candidate
-preparation, embedding completeness, and the isolated convergence diagnosis. It
-does not prove full-fold classifier quality, Topstep success, sealed-holdout
-performance, or profitability.
+preparation, embedding completeness, and the completed pre-holdout walk-forward
+rejection. It proves that this exact linear-head configuration does not beat the
+constant proper-score baselines. It does not prove Topstep success,
+sealed-holdout performance, or profitability.
