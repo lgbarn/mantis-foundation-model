@@ -136,21 +136,44 @@ def test_dry_run_rejects_each_modified_upstream_identity(tmp_path: Path, identit
         write_rl_dry_run_manifest(config, repository)
 
 
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    (
+        (
+            'force_flat = "15:10"',
+            'force_flat = "15:11"',
+            r"rule contract value mismatch: session.force_flat",
+        ),
+        (
+            "minimum_trading_days = 2",
+            "minimum_trading_days = true",
+            r"rule contract type mismatch: account.minimum_trading_days",
+        ),
+        (
+            'force_flat = "15:10"',
+            'force_flat = "15:10"\nsurprise = true',
+            r"rule contract unknown keys at session: surprise",
+        ),
+        (
+            'force_flat = "15:10"\n',
+            "",
+            r"rule contract missing keys at session: force_flat",
+        ),
+    ),
+)
 def test_dry_run_rejects_incompatible_rule_contract_with_refreshed_digest(
-    tmp_path: Path,
+    tmp_path: Path, old: str, new: str, message: str
 ) -> None:
     config, repository, inputs, _source, _lock, _sealed = _configured_fixture(tmp_path)
     rules = inputs["rule_contract"]
-    rules.write_text(rules.read_text().replace('force_flat = "15:10"', 'force_flat = "15:11"'))
+    rules.write_text(rules.read_text().replace(old, new, 1))
     digest = hashlib.sha256(rules.read_bytes()).hexdigest()
     config = replace(
         config,
         upstream=replace(config.upstream, rule_contract_sha256=digest),
     )
 
-    with pytest.raises(
-        RlProvenanceError, match=r"rule contract value mismatch: session.force_flat"
-    ):
+    with pytest.raises(RlProvenanceError, match=message):
         write_rl_dry_run_manifest(config, repository)
 
 
