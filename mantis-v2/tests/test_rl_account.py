@@ -37,6 +37,7 @@ def test_mll_starts_at_97k_ratchets_at_eod_only_and_locks_at_100k() -> None:
     fixture = {
         "schema_version": 1,
         "fixture_id": "mll-ratchet",
+        "ticker": "ES",
         "bars": [
             _bar("2026-07-20T19:00:00+00:00"),
             _bar("2026-07-20T20:10:00+00:00"),
@@ -68,6 +69,7 @@ def test_mll_touch_on_realized_or_unrealized_equity_blows_immediately() -> None:
     realized = {
         "schema_version": 1,
         "fixture_id": "realized-mll-touch",
+        "ticker": "ES",
         "bars": [
             _bar("2026-07-20T19:00:00+00:00", realized_pnl="-3000.00"),
         ],
@@ -75,6 +77,7 @@ def test_mll_touch_on_realized_or_unrealized_equity_blows_immediately() -> None:
     unrealized = {
         "schema_version": 1,
         "fixture_id": "unrealized-mll-touch",
+        "ticker": "NQ",
         "bars": [
             _bar(
                 "2026-07-20T19:00:00+00:00",
@@ -103,6 +106,7 @@ def test_dll_touch_flattens_cancels_and_locks_until_5pm_without_blowing() -> Non
     fixture = {
         "schema_version": 1,
         "fixture_id": "dll-lockout-reset",
+        "ticker": "ES",
         "bars": [
             _bar(
                 "2026-07-20T19:00:00+00:00",
@@ -110,7 +114,8 @@ def test_dll_touch_flattens_cancels_and_locks_until_5pm_without_blowing() -> Non
                 contract="ES",
                 quantity=1,
                 side="long",
-                mark_ticks="-158",
+                mark_ticks="0",
+                realized_pnl="-1971.22",
                 pending_orders=3,
             ),
             _bar(
@@ -135,6 +140,7 @@ def test_dll_touch_flattens_cancels_and_locks_until_5pm_without_blowing() -> Non
     path = result["account_path"]
 
     assert path[0]["event"] == "DLL_LOCKOUT"
+    assert path[0]["marked_equity"] == "98000.00"
     assert path[0]["position"] is None
     assert path[0]["pending_orders"] == 0
     assert path[1]["entry_accepted"] is False
@@ -149,11 +155,13 @@ def test_profit_consistency_two_day_minimum_and_timeout_match_oracles() -> None:
     one_day = {
         "schema_version": 1,
         "fixture_id": "one-day-target",
+        "ticker": "ES",
         "bars": [_bar("2026-07-20T20:10:00+00:00", realized_pnl="6000.00")],
     }
     balanced_two_days = {
         "schema_version": 1,
         "fixture_id": "balanced-pass",
+        "ticker": "ES",
         "bars": [
             _bar("2026-07-20T20:10:00+00:00", realized_pnl="3000.00"),
             _bar("2026-07-21T20:10:00+00:00", realized_pnl="3000.00"),
@@ -162,6 +170,7 @@ def test_profit_consistency_two_day_minimum_and_timeout_match_oracles() -> None:
     inconsistent = {
         "schema_version": 1,
         "fixture_id": "inconsistent",
+        "ticker": "ES",
         "bars": [
             _bar("2026-07-20T20:10:00+00:00", realized_pnl="4000.00"),
             _bar("2026-07-21T20:10:00+00:00", realized_pnl="2000.00"),
@@ -170,6 +179,7 @@ def test_profit_consistency_two_day_minimum_and_timeout_match_oracles() -> None:
     timeout = {
         "schema_version": 1,
         "fixture_id": "twenty-day-timeout",
+        "ticker": "ES",
         "bars": [_bar(f"2026-07-{day:02d}T20:10:00+00:00") for day in range(1, 21)],
     }
 
@@ -216,6 +226,14 @@ def test_each_contract_tick_economics_fee_and_one_time_cost_oracle(
     fixture = {
         "schema_version": 1,
         "fixture_id": contract,
+        "ticker": {
+            "MES": "ES",
+            "MNQ": "NQ",
+            "M2K": "RTY",
+            "MYM": "YM",
+            "MGC": "GC",
+            "MCL": "CL",
+        }.get(contract, contract),
         "bars": [
             _bar(
                 "2026-07-20T19:00:00+00:00",
@@ -237,19 +255,20 @@ def test_each_contract_tick_economics_fee_and_one_time_cost_oracle(
 
 
 @pytest.mark.parametrize(
-    ("contract", "quantity", "message"),
+    ("ticker", "contract", "quantity", "message"),
     (
-        ("MZB", 10, "unsupported contract mapping"),
-        ("ZB", 10, "configured mini profile"),
-        ("MES", 1, "configured micro profile"),
+        ("ZB", "MZB", 10, "unsupported contract mapping"),
+        ("ZB", "ZB", 10, "configured mini profile"),
+        ("ES", "MES", 1, "configured micro profile"),
     ),
 )
 def test_unsupported_mappings_and_profile_quantities_fail_closed(
-    contract: str, quantity: int, message: str
+    ticker: str, contract: str, quantity: int, message: str
 ) -> None:
     fixture = {
         "schema_version": 1,
         "fixture_id": "invalid-contract",
+        "ticker": ticker,
         "bars": [
             _bar(
                 "2026-07-20T19:00:00+00:00",
@@ -272,6 +291,7 @@ def test_replay_manifest_is_atomic_no_overwrite_and_byte_deterministic(tmp_path:
             {
                 "schema_version": 1,
                 "fixture_id": "deterministic",
+                "ticker": "ES",
                 "bars": [_bar("2026-07-20T19:00:00+00:00", realized_pnl="1.25")],
             },
             sort_keys=True,
@@ -296,6 +316,7 @@ def test_input_identity_hashes_the_same_bytes_that_are_replayed(
         {
             "schema_version": 1,
             "fixture_id": "immutable-read",
+            "ticker": "ES",
             "bars": [_bar("2026-07-20T19:00:00+00:00", realized_pnl="1.25")],
         },
         sort_keys=True,
@@ -304,6 +325,7 @@ def test_input_identity_hashes_the_same_bytes_that_are_replayed(
         {
             "schema_version": 1,
             "fixture_id": "replacement",
+            "ticker": "ES",
             "bars": [_bar("2026-07-20T19:00:00+00:00", realized_pnl="9.99")],
         },
         sort_keys=True,
@@ -324,6 +346,71 @@ def test_input_identity_hashes_the_same_bytes_that_are_replayed(
 
     assert result["fixture_id"] == "immutable-read"
     assert result["identities"]["input"] == hashlib.sha256(original).hexdigest()
+
+
+def test_replay_rejects_switching_ticker_mid_combine() -> None:
+    fixture = {
+        "schema_version": 1,
+        "fixture_id": "ticker-switch",
+        "ticker": "ES",
+        "bars": [
+            _bar(
+                "2026-07-20T19:00:00+00:00",
+                action="enter",
+                contract="ES",
+                quantity=1,
+                side="long",
+            ),
+            _bar("2026-07-20T19:03:00+00:00", action="exit", mark_ticks="4"),
+            _bar(
+                "2026-07-20T19:06:00+00:00",
+                action="enter",
+                contract="NQ",
+                quantity=1,
+                side="long",
+            ),
+        ],
+    }
+
+    with pytest.raises(RlAccountError, match="fixture ticker ES cannot trade NQ"):
+        replay_account_fixture(_config(), fixture, ROOT.parent)
+
+
+def test_first_bar_after_310pm_flattens_an_open_position() -> None:
+    fixture = {
+        "schema_version": 1,
+        "fixture_id": "post-cutoff-flatten",
+        "ticker": "ES",
+        "bars": [
+            _bar(
+                "2026-07-20T20:09:00+00:00",
+                action="enter",
+                contract="ES",
+                quantity=1,
+                side="long",
+            ),
+            _bar("2026-07-20T20:11:00+00:00", mark_ticks="2", pending_orders=2),
+        ],
+    }
+
+    result = replay_account_fixture(_config(), fixture, ROOT.parent)
+
+    assert result["account_path"][-1]["event"] == "SESSION_FLATTEN"
+    assert result["account_path"][-1]["position"] is None
+    assert result["account_path"][-1]["pending_orders"] == 0
+
+
+def test_numeric_zero_realized_pnl_does_not_create_a_trading_day() -> None:
+    fixture = {
+        "schema_version": 1,
+        "fixture_id": "negative-zero",
+        "ticker": "ES",
+        "bars": [_bar("2026-07-20T20:10:00+00:00", realized_pnl="-0")],
+    }
+
+    result = replay_account_fixture(_config(), fixture, ROOT.parent)
+
+    assert result["terminal"]["trading_days"] == 0
 
 
 def test_cli_exposes_bounded_account_replay(monkeypatch: pytest.MonkeyPatch, capsys) -> None:

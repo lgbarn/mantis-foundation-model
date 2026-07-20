@@ -106,8 +106,10 @@ loads the pinned rule and fee identities from the RL config, and atomically
 publishes a no-overwrite JSON manifest. It does not read market data,
 embeddings, policy outputs, or the sealed holdout.
 
-Each fixture has exactly `schema_version`, `fixture_id`, and `bars`. Bars are
-strictly increasing and use these fields:
+Each fixture has exactly `schema_version`, `fixture_id`, `ticker`, and `bars`.
+`ticker` binds the entire Combine attempt to one underlying; mini and micro
+contracts for another underlying fail closed. Bars are strictly increasing and
+use these fields:
 
 - `timestamp`: timezone-aware ISO-8601 bar timestamp;
 - `action`: `none`, `enter`, or `exit`;

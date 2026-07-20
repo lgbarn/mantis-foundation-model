@@ -26,6 +26,7 @@ class RlAccountError(ValueError):
 @dataclass(frozen=True)
 class _Contract:
     symbol: str
+    underlying: str
     contract_class: Literal["mini", "micro"]
     tick_value: Decimal
     position_units: int
@@ -110,6 +111,7 @@ def _load_contracts(
             raise RlAccountError(f"unsupported contract mapping: {symbol}")
         contracts[symbol] = _Contract(
             symbol=symbol,
+            underlying=str(raw.get("underlying")),
             contract_class=raw["contract_class"],
             tick_value=_decimal(raw.get("tick_value"), f"contracts.{symbol}.tick_value"),
             position_units=_integer(
@@ -132,11 +134,9 @@ def _timestamp(value: Any) -> datetime:
     return result.astimezone(UTC)
 
 
-def _session_day(timestamp: datetime, zone: ZoneInfo, start: time, force_flat: time) -> date | None:
+def _session_day(timestamp: datetime, zone: ZoneInfo, start: time) -> date:
     local = timestamp.astimezone(zone)
     clock = local.time().replace(tzinfo=None)
-    if force_flat < clock < start:
-        return None
     if clock >= start:
         return (local.date()).fromordinal(local.date().toordinal() + 1)
     return local.date()
@@ -154,17 +154,23 @@ def _position_pnl(position: _Position, mark_ticks: Decimal, config: RlConfig) ->
     return gross - slippage - fees
 
 
-def _validate_fixture(fixture: dict[str, Any]) -> list[dict[str, Any]]:
-    if set(fixture) != {"schema_version", "fixture_id", "bars"}:
-        raise RlAccountError("fixture must contain only schema_version, fixture_id, and bars")
+def _validate_fixture(fixture: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    expected = {"schema_version", "fixture_id", "ticker", "bars"}
+    if set(fixture) != expected:
+        raise RlAccountError(
+            "fixture must contain only schema_version, fixture_id, ticker, and bars"
+        )
     if type(fixture["schema_version"]) is not int or fixture["schema_version"] != 1:
         raise RlAccountError("fixture.schema_version must be integer 1")
     if not isinstance(fixture["fixture_id"], str) or not fixture["fixture_id"]:
         raise RlAccountError("fixture.fixture_id must be a non-empty string")
+    ticker = fixture["ticker"]
+    if not isinstance(ticker, str) or not ticker:
+        raise RlAccountError("fixture.ticker must be a non-empty string")
     bars = fixture["bars"]
     if not isinstance(bars, list) or not bars or any(not isinstance(bar, dict) for bar in bars):
         raise RlAccountError("fixture.bars must be a non-empty object array")
-    return bars
+    return ticker, bars
 
 
 def replay_account_fixture(
@@ -173,8 +179,11 @@ def replay_account_fixture(
     repository_root: Path,
 ) -> dict[str, Any]:
     """Replay deterministic marked-equity bars under the pinned account rules."""
-    bars = _validate_fixture(fixture)
+    ticker, bars = _validate_fixture(fixture)
     rules, contracts = _load_contracts(config, repository_root)
+    supported_tickers = {contract.underlying for contract in contracts.values()}
+    if ticker not in supported_tickers:
+        raise RlAccountError(f"unsupported fixture ticker: {ticker}")
     account = rules["account"]
     session = rules["session"]
     try:
@@ -208,6 +217,7 @@ def replay_account_fixture(
     trading_days = 0
     day_profits: list[Decimal] = []
     entry_locked = False
+    closed_session: date | None = None
     last_timestamp: datetime | None = None
     path: list[dict[str, Any]] = []
 
@@ -270,13 +280,14 @@ def replay_account_fixture(
         if last_timestamp is not None and timestamp <= last_timestamp:
             raise RlAccountError("bar timestamps must be strictly increasing")
         last_timestamp = timestamp
-        session_day = _session_day(timestamp, zone, start_clock, flat_clock)
-        if session_day is None:
-            raise RlAccountError("bar timestamp is outside the trading session")
+        session_day = _session_day(timestamp, zone, start_clock)
+        if current_session is None and session_day == closed_session:
+            raise RlAccountError("bar occurs after the session was finalized")
         if current_session is not None and session_day != current_session:
             if position is not None:
                 raise RlAccountError("fixture carries a position across the session boundary")
             finish_session()
+            closed_session = current_session
             current_session = None
             if status != "ACTIVE":
                 break
@@ -291,8 +302,9 @@ def replay_account_fixture(
             raise RlAccountError(f"unsupported bar action: {action}")
         pending_orders = _integer(bar.get("pending_orders", 0), "bar.pending_orders")
         mark_ticks = _decimal(bar.get("mark_ticks", "0"), "bar.mark_ticks")
-        balance += _decimal(bar.get("realized_pnl", "0"), "bar.realized_pnl")
-        if bar.get("realized_pnl") not in {None, "0", "0.00", 0}:
+        realized_pnl = _decimal(bar.get("realized_pnl", "0"), "bar.realized_pnl")
+        balance += realized_pnl
+        if realized_pnl != Decimal("0"):
             session_had_activity = True
 
         local_clock = timestamp.astimezone(zone).time().replace(tzinfo=None)
@@ -304,6 +316,8 @@ def replay_account_fixture(
             if not isinstance(symbol, str) or symbol not in contracts:
                 raise RlAccountError(f"unsupported contract mapping: {symbol}")
             contract = contracts[symbol]
+            if contract.underlying != ticker:
+                raise RlAccountError(f"fixture ticker {ticker} cannot trade {symbol}")
             quantity = _integer(bar.get("quantity"), "bar.quantity", 1)
             expected_quantity = (
                 config.sizing.mini_quantity
@@ -387,8 +401,9 @@ def replay_account_fixture(
                 **state_fields(),
             }
         )
-        if local_clock == flat_clock and status == "ACTIVE":
+        if flat_clock <= local_clock < start_clock and status == "ACTIVE":
             finish_session()
+            closed_session = current_session
             current_session = None
             path[-1].update(state_fields())
             path[-1]["mll_floor"] = _money(mll_floor)
@@ -406,6 +421,7 @@ def replay_account_fixture(
     return {
         "schema_version": 1,
         "fixture_id": fixture["fixture_id"],
+        "ticker": ticker,
         "identities": {
             "config": config.digest,
             "rule": config.rule_digest,
