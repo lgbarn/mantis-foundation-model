@@ -25,17 +25,14 @@ def _configured_fixture(tmp_path: Path):
     lock = repository / "uv.lock"
     lock.write_text("locked\n")
     inputs = {}
-    for name in (
-        "rule_contract",
-        "downstream",
-        "corpus",
-        "embedding",
-        "foundation",
-        "weights",
-    ):
+    for name in ("downstream", "corpus", "embedding", "foundation", "weights"):
         path = tmp_path / f"{name}.json"
         path.write_text(json.dumps({"identity": name}) + "\n")
         inputs[name] = path
+    inputs["rule_contract"] = tmp_path / "topstep-rules.toml"
+    inputs["rule_contract"].write_text(
+        (ROOT / "configs" / "topstep-100k-2026-07-20.toml").read_text()
+    )
     weights_digest = hashlib.sha256(inputs["weights"].read_bytes()).hexdigest()
     corpus_digest = hashlib.sha256(inputs["corpus"].read_bytes()).hexdigest()
     inputs["embedding"].write_text(json.dumps({"foundation_weights_sha256": weights_digest}) + "\n")
@@ -136,6 +133,24 @@ def test_dry_run_rejects_each_modified_upstream_identity(tmp_path: Path, identit
     target.write_text(target.read_text() + "modified\n")
 
     with pytest.raises(RlProvenanceError, match=f"{identity}.*digest mismatch"):
+        write_rl_dry_run_manifest(config, repository)
+
+
+def test_dry_run_rejects_incompatible_rule_contract_with_refreshed_digest(
+    tmp_path: Path,
+) -> None:
+    config, repository, inputs, _source, _lock, _sealed = _configured_fixture(tmp_path)
+    rules = inputs["rule_contract"]
+    rules.write_text(rules.read_text().replace('force_flat = "15:10"', 'force_flat = "15:11"'))
+    digest = hashlib.sha256(rules.read_bytes()).hexdigest()
+    config = replace(
+        config,
+        upstream=replace(config.upstream, rule_contract_sha256=digest),
+    )
+
+    with pytest.raises(
+        RlProvenanceError, match=r"rule contract value mismatch: session.force_flat"
+    ):
         write_rl_dry_run_manifest(config, repository)
 
 

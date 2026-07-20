@@ -32,26 +32,37 @@ def test_topstep_rule_contract_pins_account_and_instrument_economics() -> None:
         "maximum_minis": 10,
         "maximum_micros": 100,
     }
-    expected_ticks = {
-        "ES": (0.25, 12.50),
-        "MES": (0.25, 1.25),
-        "NQ": (0.25, 5.00),
-        "MNQ": (0.25, 0.50),
-        "RTY": (0.10, 5.00),
-        "M2K": (0.10, 0.50),
-        "YM": (1.00, 5.00),
-        "MYM": (1.00, 0.50),
-        "GC": (0.10, 10.00),
-        "MGC": (0.10, 1.00),
-        "CL": (0.01, 10.00),
-        "MCL": (0.01, 1.00),
-        "ZB": (0.03125, 31.25),
+    assert rules["session"] == {
+        "timezone": "America/Chicago",
+        "start": "17:00",
+        "force_flat": "15:10",
+    }
+    expected_contracts = {
+        "ES": ("mini", "ES", 0.25, 12.50, 10, False),
+        "MES": ("micro", "ES", 0.25, 1.25, 1, False),
+        "NQ": ("mini", "NQ", 0.25, 5.00, 10, False),
+        "MNQ": ("micro", "NQ", 0.25, 0.50, 1, False),
+        "RTY": ("mini", "RTY", 0.10, 5.00, 10, False),
+        "M2K": ("micro", "RTY", 0.10, 0.50, 1, False),
+        "YM": ("mini", "YM", 1.00, 5.00, 10, False),
+        "MYM": ("micro", "YM", 1.00, 0.50, 1, False),
+        "GC": ("mini", "GC", 0.10, 10.00, 10, False),
+        "MGC": ("micro", "GC", 0.10, 1.00, 1, False),
+        "CL": ("mini", "CL", 0.01, 10.00, 10, False),
+        "MCL": ("micro", "CL", 0.01, 1.00, 1, False),
+        "ZB": ("mini", "ZB", 0.03125, 31.25, 10, True),
     }
     assert {
-        symbol: (contract["tick_size"], contract["tick_value"])
+        symbol: (
+            contract["contract_class"],
+            contract["underlying"],
+            contract["tick_size"],
+            contract["tick_value"],
+            contract["position_units"],
+            contract.get("mini_only", False),
+        )
         for symbol, contract in rules["contracts"].items()
-    } == expected_ticks
-    assert rules["contracts"]["ZB"]["mini_only"] is True
+    } == expected_contracts
 
 
 def test_production_rl_config_loads_locked_entry_contract() -> None:

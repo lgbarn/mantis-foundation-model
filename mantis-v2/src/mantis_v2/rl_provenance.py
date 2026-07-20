@@ -18,6 +18,160 @@ class RlProvenanceError(RuntimeError):
     """Raised when an RL dry run cannot prove its immutable inputs."""
 
 
+_EXPECTED_RULE_CONTRACT: dict[str, Any] = {
+    "schema_version": 1,
+    "snapshot": "topstep-100k-2026-07-20",
+    "effective_date": "2026-07-20",
+    "account": {
+        "starting_balance": 100000.0,
+        "initial_mll_floor": 97000.0,
+        "mll_distance": 3000.0,
+        "profit_target": 6000.0,
+        "consistency_limit": 0.50,
+        "minimum_trading_days": 2,
+        "maximum_position_equivalence": 10,
+        "mll_lock_balance": 100000.0,
+        "mll_ratchet": "end_of_day_high_water",
+        "mll_enforcement": "continuous_realized_and_unrealized",
+        "overnight_holding": False,
+    },
+    "session": {
+        "timezone": "America/Chicago",
+        "start": "17:00",
+        "force_flat": "15:10",
+    },
+    "position_equivalence": {
+        "micros_per_mini": 10,
+        "maximum_minis": 10,
+        "maximum_micros": 100,
+    },
+    "contracts": {
+        "ES": {
+            "contract_class": "mini",
+            "underlying": "ES",
+            "tick_size": 0.25,
+            "tick_value": 12.50,
+            "position_units": 10,
+        },
+        "MES": {
+            "contract_class": "micro",
+            "underlying": "ES",
+            "tick_size": 0.25,
+            "tick_value": 1.25,
+            "position_units": 1,
+        },
+        "NQ": {
+            "contract_class": "mini",
+            "underlying": "NQ",
+            "tick_size": 0.25,
+            "tick_value": 5.00,
+            "position_units": 10,
+        },
+        "MNQ": {
+            "contract_class": "micro",
+            "underlying": "NQ",
+            "tick_size": 0.25,
+            "tick_value": 0.50,
+            "position_units": 1,
+        },
+        "RTY": {
+            "contract_class": "mini",
+            "underlying": "RTY",
+            "tick_size": 0.10,
+            "tick_value": 5.00,
+            "position_units": 10,
+        },
+        "M2K": {
+            "contract_class": "micro",
+            "underlying": "RTY",
+            "tick_size": 0.10,
+            "tick_value": 0.50,
+            "position_units": 1,
+        },
+        "YM": {
+            "contract_class": "mini",
+            "underlying": "YM",
+            "tick_size": 1.00,
+            "tick_value": 5.00,
+            "position_units": 10,
+        },
+        "MYM": {
+            "contract_class": "micro",
+            "underlying": "YM",
+            "tick_size": 1.00,
+            "tick_value": 0.50,
+            "position_units": 1,
+        },
+        "GC": {
+            "contract_class": "mini",
+            "underlying": "GC",
+            "tick_size": 0.10,
+            "tick_value": 10.00,
+            "position_units": 10,
+        },
+        "MGC": {
+            "contract_class": "micro",
+            "underlying": "GC",
+            "tick_size": 0.10,
+            "tick_value": 1.00,
+            "position_units": 1,
+        },
+        "CL": {
+            "contract_class": "mini",
+            "underlying": "CL",
+            "tick_size": 0.01,
+            "tick_value": 10.00,
+            "position_units": 10,
+        },
+        "MCL": {
+            "contract_class": "micro",
+            "underlying": "CL",
+            "tick_size": 0.01,
+            "tick_value": 1.00,
+            "position_units": 1,
+        },
+        "ZB": {
+            "contract_class": "mini",
+            "underlying": "ZB",
+            "tick_size": 0.03125,
+            "tick_value": 31.25,
+            "position_units": 10,
+            "mini_only": True,
+        },
+    },
+}
+
+
+def _validate_exact(actual: Any, expected: Any, field: str) -> None:
+    if type(actual) is not type(expected):
+        raise RlProvenanceError(f"rule contract type mismatch: {field}")
+    if isinstance(expected, dict):
+        unknown = set(actual) - set(expected)
+        missing = set(expected) - set(actual)
+        if unknown:
+            raise RlProvenanceError(
+                f"rule contract unknown keys at {field}: {', '.join(sorted(unknown))}"
+            )
+        if missing:
+            raise RlProvenanceError(
+                f"rule contract missing keys at {field}: {', '.join(sorted(missing))}"
+            )
+        for key, expected_value in expected.items():
+            _validate_exact(actual[key], expected_value, f"{field}.{key}".lstrip("."))
+    elif actual != expected:
+        raise RlProvenanceError(f"rule contract value mismatch: {field}")
+
+
+def _validate_rule_contract(path: Path) -> str:
+    try:
+        raw = tomllib.loads(path.read_text())
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise RlProvenanceError("rule contract is not valid TOML") from exc
+    _validate_exact(raw, _EXPECTED_RULE_CONTRACT, "")
+    canonical = json.dumps(raw, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -159,6 +313,9 @@ def _build_manifest(config: RlConfig, repository_root: Path, output: Path) -> di
         config.upstream.rule_contract_path,
         config.upstream.rule_contract_sha256,
         repository_root,
+    )
+    rule_contract["canonical_sha256"] = _validate_rule_contract(
+        _resolved(config.upstream.rule_contract_path, repository_root)
     )
     _file_identity(
         "downstream",
