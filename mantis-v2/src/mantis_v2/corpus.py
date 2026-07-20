@@ -474,15 +474,9 @@ def _roll_date(
 
 
 def _roll_ratio(old: pd.DataFrame, new: pd.DataFrame, date: pd.Timestamp) -> float:
-    old_before = old.loc[old.index <= date]
-    new_after = new.loc[new.index >= date]
-    if old_before.empty or new_after.empty:
-        raise CorpusRepairError(f"cannot price roll at {date}")
-    if date - old_before.index[-1] > timedelta(days=3):
-        raise CorpusRepairError(f"old contract is stale at roll {date}")
-    if new_after.index[0] - date > timedelta(days=3):
-        raise CorpusRepairError(f"new contract is stale at roll {date}")
-    ratio = float(new_after["close"].iloc[0]) / float(old_before["close"].iloc[-1])
+    if date not in old.index or date not in new.index:
+        raise CorpusRepairError(f"roll requires both contracts at exact timestamp {date}")
+    ratio = float(new.loc[date, "close"]) / float(old.loc[date, "close"])
     if not np.isfinite(ratio) or ratio <= 0:
         raise CorpusRepairError(f"invalid ratio at roll {date}")
     return ratio
@@ -793,7 +787,7 @@ def repair_corpus(config: CorpusRepairConfig) -> dict[str, object]:
     outputs: list[dict[str, object]] = []
     quality: list[dict[str, object]] = []
     accepted_lookup = {
-        (item.symbol, pd.Timestamp(item.timestamp).tz_convert("UTC")): item.reason
+        (item.symbol, pd.Timestamp(item.timestamp).tz_convert("UTC")): item
         for item in config.accepted_dislocations
     }
     used_acceptances: set[tuple[str, pd.Timestamp]] = set()
@@ -881,31 +875,67 @@ def repair_corpus(config: CorpusRepairConfig) -> dict[str, object]:
             )[1:].tolist()
         )
         roll_dislocations = [event for event in events if event.row in transition_rows]
-        if roll_dislocations:
-            raise CorpusRepairError(
-                f"{symbol}: {len(roll_dislocations)} adjusted roll boundaries still exceed "
-                "the dislocation threshold"
-            )
         classified_rows = set(
             np.flatnonzero(continuous.adjusted["quality_flag"].to_numpy(dtype=bool)).tolist()
         )
         unclassified: list[str] = []
-        accepted_events: list[dict[str, str]] = []
+        unclassified_rolls: list[str] = []
+        accepted_events: list[dict[str, object]] = []
+        accepted_roll_events: list[dict[str, object]] = []
         for event in events:
-            if event.row in transition_rows or event.row in classified_rows:
-                continue
             timestamp = pd.Timestamp(event.timestamp)
             if timestamp.tzinfo is None:
                 timestamp = timestamp.tz_localize("UTC")
             else:
                 timestamp = timestamp.tz_convert("UTC")
             key = (symbol, timestamp)
-            if key not in accepted_lookup:
+            acceptance = accepted_lookup.get(key)
+            if event.row in transition_rows:
+                roll_contracts = (
+                    str(continuous.raw["contract"].iloc[event.row - 1]),
+                    str(continuous.raw["contract"].iloc[event.row]),
+                )
+                if (
+                    acceptance is None
+                    or acceptance.kind != "roll"
+                    or acceptance.contracts != roll_contracts
+                ):
+                    unclassified_rolls.append(f"{symbol}@{timestamp.isoformat()}")
+                    continue
+                used_acceptances.add(key)
+                accepted_roll_events.append(
+                    {
+                        "timestamp": timestamp.isoformat(),
+                        "kind": acceptance.kind,
+                        "contracts": list(acceptance.contracts),
+                        "reason": acceptance.reason,
+                    }
+                )
+                continue
+            if event.row in classified_rows:
+                continue
+            event_contracts = (str(continuous.raw["contract"].iloc[event.row]),)
+            if (
+                acceptance is None
+                or acceptance.kind != "same_contract"
+                or acceptance.contracts != event_contracts
+            ):
                 unclassified.append(f"{symbol}@{timestamp.isoformat()}")
                 continue
             used_acceptances.add(key)
             accepted_events.append(
-                {"timestamp": timestamp.isoformat(), "reason": accepted_lookup[key]}
+                {
+                    "timestamp": timestamp.isoformat(),
+                    "kind": acceptance.kind,
+                    "contracts": list(acceptance.contracts),
+                    "reason": acceptance.reason,
+                }
+            )
+        if unclassified_rolls:
+            preview = ", ".join(unclassified_rolls[:10])
+            raise CorpusRepairError(
+                f"{symbol}: unclassified adjusted roll dislocations: {preview}; "
+                "review both contracts and add explicit accepted_dislocations entries"
             )
         if unclassified:
             preview = ", ".join(unclassified[:10])
@@ -919,9 +949,10 @@ def repair_corpus(config: CorpusRepairConfig) -> dict[str, object]:
                 "rolls": len(continuous.rolls),
                 "repairs": len(continuous.repairs),
                 "remaining_dislocations": int(boundaries.sum()),
-                "roll_dislocations": 0,
+                "roll_dislocations": len(roll_dislocations),
                 "classified_anomaly_rows": len(classified_rows),
                 "accepted_same_contract_dislocations": accepted_events,
+                "accepted_roll_dislocations": accepted_roll_events,
                 "dislocations": stream_report(f"{symbol}_1min", events),
             }
         )

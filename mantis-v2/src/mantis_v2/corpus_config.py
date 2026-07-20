@@ -23,6 +23,8 @@ class CorpusSource:
 class AcceptedDislocation:
     symbol: str
     timestamp: datetime
+    kind: str
+    contracts: tuple[str, ...]
     reason: str
 
 
@@ -165,21 +167,33 @@ def load_corpus_repair_config(path: str | Path) -> CorpusRepairConfig:
         item = _mapping(value, f"corpus.accepted_dislocations[{index}]")
         _exact_keys(
             item,
-            {"symbol", "timestamp", "reason"},
+            {"symbol", "timestamp", "kind", "contracts", "reason"},
             f"corpus.accepted_dislocations[{index}]",
         )
         accepted_symbol = str(item["symbol"])
         accepted_timestamp = _timestamp(
             item["timestamp"], f"corpus.accepted_dislocations[{index}].timestamp"
         )
+        kind = str(item["kind"])
+        contracts = _strings(item["contracts"], f"corpus.accepted_dislocations[{index}].contracts")
         reason = str(item["reason"]).strip()
         if accepted_symbol not in symbols or not reason:
             raise ConfigError("accepted dislocations require a configured symbol and reason")
+        expected_contracts = 1 if kind == "same_contract" else 2 if kind == "roll" else 0
+        if len(contracts) != expected_contracts or any(
+            not contract.startswith(accepted_symbol) for contract in contracts
+        ):
+            raise ConfigError(
+                "accepted dislocations require kind same_contract with one matching contract "
+                "or kind roll with two matching contracts"
+            )
         key = (accepted_symbol, accepted_timestamp)
         if key in accepted_keys:
             raise ConfigError("corpus.accepted_dislocations must not contain duplicates")
         accepted_keys.add(key)
-        accepted.append(AcceptedDislocation(accepted_symbol, accepted_timestamp, reason))
+        accepted.append(
+            AcceptedDislocation(accepted_symbol, accepted_timestamp, kind, contracts, reason)
+        )
     if not isinstance(corpus["allow_overwrite"], bool):
         raise ConfigError("corpus.allow_overwrite must be true or false")
     if not all(source.path.is_file() for source in sources):

@@ -22,6 +22,7 @@ from mantis_v2.corpus import (
     _json_digest,
     _load_contracts,
     _resample,
+    _roll_ratio,
     _validate_coverage,
     _validate_persisted_aggregation,
     _write_frame,
@@ -102,6 +103,18 @@ symbols = ["ES"]
 
     assert config.symbols == ("ES",)
     assert config.timeframes == ("1min", "3min", "5min", "15min")
+    reviewed_path = tmp_path / "reviewed-corpus.toml"
+    reviewed_path.write_text(
+        config_path.read_text().replace(
+            "accepted_dislocations = []",
+            'accepted_dislocations = [{ symbol = "ES", timestamp = '
+            '"2025-01-04T00:00:00+00:00", kind = "roll", contracts = '
+            '["ESF25", "ESH25"], reason = "Reviewed roll." }]',
+        )
+    )
+    reviewed = load_corpus_repair_config(reviewed_path)
+    assert reviewed.accepted_dislocations[0].kind == "roll"
+    assert reviewed.accepted_dislocations[0].contracts == ("ESF25", "ESH25")
     source.unlink()
     with pytest.raises(ConfigError, match="missing corpus source archives"):
         load_corpus_repair_config(config_path)
@@ -120,6 +133,16 @@ def test_roll_requires_two_liquidity_wins_and_activates_next_session(tmp_path: P
     assert continuous.raw.loc[index[3], "contract"] == "ESM25"
     assert continuous.raw.loc[index[2], "adjustment_factor"] == pytest.approx(1.2)
     assert continuous.adjusted.loc[index[2], "close"] == pytest.approx(120.0)
+
+
+def test_roll_ratio_requires_both_contracts_at_exact_activation_timestamp() -> None:
+    old_index = pd.date_range("2025-01-01", periods=3, freq="1D", tz="UTC")
+    new_index = old_index.delete(1)
+    old = _bars(old_index, np.full(3, 100.0), np.ones(3))
+    new = _bars(new_index, np.full(2, 110.0), np.ones(2))
+
+    with pytest.raises(CorpusRepairError, match="both contracts at exact timestamp"):
+        _roll_ratio(old, new, old_index[1])
 
 
 def test_roll_chain_skips_an_illiquid_delivery_month(tmp_path: Path) -> None:
@@ -399,6 +422,25 @@ def _mock_corpus_source(
     )
 
 
+def _mock_roll_gap_source(
+    monkeypatch: pytest.MonkeyPatch, config: CorpusRepairConfig
+) -> pd.Timestamp:
+    index = pd.date_range("2025-01-01", periods=10, freq="1D", tz="UTC")
+    old_close = np.asarray([100.0] * 3 + [120.0] * 7)
+    new_close = np.asarray([110.0] * 3 + [132.0] * 7)
+    old = _Contract(
+        "ESF25",
+        _bars(index, old_close, np.asarray([100, 40, 30, 20, 10, 10, 10, 10, 10, 10])),
+    )
+    new = _Contract(
+        "ESH25",
+        _bars(index, new_close, np.asarray([50, 60, 70, 80, 90, 90, 90, 90, 90, 90])),
+    )
+    _mock_corpus_source(monkeypatch, config)
+    monkeypatch.setattr(corpus_module, "_load_contracts", lambda *_args: [old, new])
+    return index[3]
+
+
 def test_repair_self_audits_before_atomic_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -442,6 +484,83 @@ def test_unclassified_persistent_dislocation_blocks_publication(
     assert not config.output_path.exists()
 
 
+def test_unreviewed_market_gap_at_roll_blocks_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    _mock_roll_gap_source(monkeypatch, config)
+
+    with pytest.raises(CorpusRepairError, match="unclassified adjusted roll dislocations"):
+        corpus_module.repair_corpus(config)
+
+    assert not config.output_path.exists()
+
+
+def test_exact_reviewed_roll_dislocation_is_recorded_in_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    event_time = pd.Timestamp("2025-01-04", tz="UTC")
+    reason = "Reviewed market-wide gap coinciding with a valid roll."
+    config = replace(
+        _config(tmp_path),
+        accepted_dislocations=(
+            AcceptedDislocation(
+                "ES", event_time.to_pydatetime(), "roll", ("ESF25", "ESH25"), reason
+            ),
+        ),
+    )
+    assert _mock_roll_gap_source(monkeypatch, config) == event_time
+
+    manifest = corpus_module.repair_corpus(config)
+
+    quality_rows = manifest["quality"]
+    assert isinstance(quality_rows, list)
+    quality = next(item for item in quality_rows if item["symbol"] == "ES")
+    assert quality["roll_dislocations"] == 1
+    assert quality["accepted_roll_dislocations"] == [
+        {
+            "timestamp": event_time.isoformat(),
+            "kind": "roll",
+            "contracts": ["ESF25", "ESH25"],
+            "reason": reason,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("kind", "contracts"),
+    [
+        ("same_contract", ("ESH25",)),
+        ("roll", ("ESG25", "ESH25")),
+    ],
+)
+def test_roll_acceptance_rejects_wrong_event_class_or_contract_pair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    contracts: tuple[str, ...],
+) -> None:
+    event_time = pd.Timestamp("2025-01-04", tz="UTC")
+    config = replace(
+        _config(tmp_path),
+        accepted_dislocations=(
+            AcceptedDislocation(
+                "ES",
+                event_time.to_pydatetime(),
+                kind,
+                contracts,
+                "A mismatched review must not be consumed.",
+            ),
+        ),
+    )
+    _mock_roll_gap_source(monkeypatch, config)
+
+    with pytest.raises(CorpusRepairError, match="unclassified adjusted roll dislocations"):
+        corpus_module.repair_corpus(config)
+
+    assert not config.output_path.exists()
+
+
 def test_exact_reviewed_dislocation_is_recorded_in_published_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -449,7 +568,11 @@ def test_exact_reviewed_dislocation_is_recorded_in_published_manifest(
     reason = "Reviewed persistent same-contract market repricing."
     config = replace(
         _config(tmp_path),
-        accepted_dislocations=(AcceptedDislocation("ES", event_time.to_pydatetime(), reason),),
+        accepted_dislocations=(
+            AcceptedDislocation(
+                "ES", event_time.to_pydatetime(), "same_contract", ("ESH25",), reason
+            ),
+        ),
     )
     close = np.asarray([100.0] * 5 + [80.0] * 5)
     _mock_corpus_source(monkeypatch, config, close)
@@ -460,7 +583,12 @@ def test_exact_reviewed_dislocation_is_recorded_in_published_manifest(
     assert isinstance(quality_rows, list)
     quality = next(item for item in quality_rows if item["symbol"] == "ES")
     assert quality["accepted_same_contract_dislocations"] == [
-        {"timestamp": event_time.isoformat(), "reason": reason}
+        {
+            "timestamp": event_time.isoformat(),
+            "kind": "same_contract",
+            "contracts": ["ESH25"],
+            "reason": reason,
+        }
     ]
 
 
@@ -473,6 +601,8 @@ def test_stale_reviewed_dislocation_blocks_publication(
             AcceptedDislocation(
                 "ES",
                 pd.Timestamp("2025-01-07", tz="UTC").to_pydatetime(),
+                "same_contract",
+                ("ESH25",),
                 "Wrong timestamp must not waive the observed event.",
             ),
         ),

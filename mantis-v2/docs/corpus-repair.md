@@ -89,11 +89,12 @@ row count of every published file. The repair stage also verifies:
 - a discontinuity report for every adjusted 1-minute stream;
 - exact higher-timeframe derivation from the repaired 1-minute source.
 
-Every same-contract price dislocation above the configured threshold must be
-either a classified isolated anomaly or an explicit config entry with symbol,
-UTC timestamp, and review reason. Unclassified dislocations fail publication.
-Stale allowlist entries also fail, so an acceptance cannot silently carry into
-a different corpus.
+Every price dislocation above the configured threshold must be either a
+classified isolated anomaly or an explicit config entry with symbol, UTC
+timestamp, event kind, exact contract identity, and review reason. Roll events
+bind both the old and new contracts; same-contract events bind the active
+contract. Unclassified, wrong-kind, wrong-contract, and stale entries fail
+publication, so an acceptance cannot silently carry into a different event.
 
 ### Reviewed market dislocations
 
@@ -107,6 +108,17 @@ margin increase ([S&P Global](https://www.spglobal.com/market-intelligence/en/ne
 [BIS Quarterly Review](https://www.bis.org/publ/qtrpdf/r_qt2603.pdf)). The source
 bar remains unchanged in Parquet. Its exact timestamp and review reason are
 recorded in the manifest quality report; stale acceptances fail publication.
+
+The version 1 config also accepts the CLK6-to-CLM6 boundary at 2026-04-19
+22:00 UTC. The same-time roll ratio correctly removes the calendar spread:
+CLK6 closed 90.91 while CLM6 closed 89.46. Both contracts independently rose
+from their Friday closes at the Sunday reopen, so using prior-session prices
+would incorrectly erase a real market move. CME reported WTI approaching $86
+as geopolitical tensions escalated, and S&P Global recorded the April 20 rise
+after renewed Strait of Hormuz disruption
+([CME Group](https://www.cmegroup.com/videos/2026/04/20/geopolitical-tensions-push-crude-higher-4-20-26.html),
+[S&P Global](https://www.spglobal.com/energy/en/news-research/latest-news/crude-oil/042026-factbox-oil-prices-rise-on-us-iran-hormuz-standoff-ahead-of-ceasefire-expiry)).
+The manifest records this separately as an accepted roll dislocation.
 
 The repair function runs that complete audit against its partial directory
 before the atomic rename. A failed audit never creates the final immutable
