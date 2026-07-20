@@ -36,6 +36,29 @@ class IndexDataset(Dataset[dict[str, torch.Tensor]]):
         return {"index": torch.tensor(index)}
 
 
+class NonFiniteBackward(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx: Any, value: torch.Tensor) -> torch.Tensor:
+        del ctx
+        return value.clone()
+
+    @staticmethod
+    def backward(ctx: Any, gradient: torch.Tensor) -> torch.Tensor:
+        del ctx
+        return torch.full_like(gradient, float("nan"))
+
+
+class NonFiniteGradientModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.tensor(1.0))
+
+    def forward(self, context: torch.Tensor) -> dict[str, torch.Tensor]:
+        del context
+        value = NonFiniteBackward.apply(self.weight)
+        return {"candle": value, "leg": value}
+
+
 def test_loader_order_is_deterministic_per_epoch() -> None:
     base = load_config(ROOT / "configs" / "smoke.toml")
     config = replace(base, training=replace(base.training, batch_size=8))
@@ -102,6 +125,55 @@ def test_non_finite_validation_loss_reports_validation_phase(
         pipeline_module._run_epoch(
             torch.nn.Identity(), loader, config, torch.device("cpu"), None, 1
         )
+
+
+def test_non_finite_training_gradient_fails_before_optimizer_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_config(ROOT / "configs" / "smoke.toml")
+    loader = DataLoader(
+        [
+            {
+                "context": torch.zeros(5, config.model.input_length),
+                "candle_target": torch.zeros(5, len(config.target.horizons)),
+                "leg_target": torch.zeros(2),
+            }
+        ],
+        batch_size=1,
+    )
+    model = NonFiniteGradientModel()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    stepped = False
+    original_step = optimizer.step
+
+    def track_step(*args: Any, **kwargs: Any) -> Any:
+        nonlocal stepped
+        stepped = True
+        return original_step(*args, **kwargs)
+
+    def finite_loss(
+        output: dict[str, torch.Tensor], *args: Any, **kwargs: Any
+    ) -> dict[str, torch.Tensor]:
+        del args, kwargs
+        return {
+            "total": output["candle"],
+            "candle": output["candle"],
+            "leg": output["leg"],
+        }
+
+    monkeypatch.setattr(optimizer, "step", track_step)
+    monkeypatch.setattr(pipeline_module, "nextleg_loss", finite_loss)
+    with pytest.raises(PipelineError, match="non-finite training gradient norm"):
+        pipeline_module._run_epoch(
+            model,
+            loader,
+            config,
+            torch.device("cpu"),
+            optimizer,
+            1,
+        )
+    assert stepped is False
+    assert torch.isfinite(model.weight)
 
 
 def test_terminal_epoch_is_checkpointed_and_collision_is_rejected(tmp_path: Path) -> None:
@@ -287,7 +359,7 @@ def test_validated_export_reuses_one_loaded_checkpoint(
     ],
 )
 def test_probe_rejects_each_unbounded_setting(training_change: dict[str, Any]) -> None:
-    base = load_config(ROOT / "configs" / "nextleg-mps-probe.toml")
+    base = load_config(ROOT / "configs" / "nextleg-parquet-v2-probe.toml")
     config = replace(base, training=replace(base.training, **training_change))
     with pytest.raises(PipelineError, match="probe requires real data"):
         probe(config)
@@ -331,8 +403,10 @@ def test_best_checkpoint_and_early_stopping_follow_validation_loss(
         device: Any,
         optimizer: torch.optim.Optimizer | None,
         max_steps: int,
+        *,
+        completed_steps: int = 0,
     ) -> tuple[dict[str, float], int]:
-        del model, loader, pipeline_config, device, max_steps
+        del model, loader, pipeline_config, device, max_steps, completed_steps
         total = 1.0 if optimizer is not None else next(validation_losses)
         return {"total": total, "candle": total / 2, "leg": total / 2}, 1
 
@@ -385,8 +459,10 @@ def test_resumed_training_restores_early_stopping_patience(
         device: Any,
         optimizer: torch.optim.Optimizer | None,
         max_steps: int,
+        *,
+        completed_steps: int = 0,
     ) -> tuple[dict[str, float], int]:
-        del model, loader, pipeline_config, device, max_steps
+        del model, loader, pipeline_config, device, max_steps, completed_steps
         total = 1.0 if optimizer is not None else next(validation_losses)
         return {"total": total, "candle": total / 2, "leg": total / 2}, 1
 
@@ -426,6 +502,7 @@ def test_interrupted_resume_matches_uninterrupted_training(
         max_steps_per_epoch=1,
         checkpoint_every=1,
         resume=True,
+        warmup_epochs=1,
     )
     interrupted = replace(
         base,

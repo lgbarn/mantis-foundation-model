@@ -89,6 +89,16 @@ class MantisV2Adapter(nn.Module):
             raise ModelContractError("unexpected upstream embedding shape")
         return embedding.reshape(batch, channels * self.embedding_dim)
 
+    def freeze_outside_transformer(self) -> None:
+        """Freeze every upstream encoder component except its transformer."""
+        transformer = getattr(self.backbone, "transf_unit", None)
+        if not isinstance(transformer, nn.Module):
+            raise ModelContractError("upstream MantisV2 has no compatible transformer")
+        for parameter in self.backbone.parameters():
+            parameter.requires_grad = False
+        for parameter in transformer.parameters():
+            parameter.requires_grad = True
+
 
 class NextLegModel(nn.Module):
     """MantisV2 encoder with candle and two-leg prediction heads."""
@@ -125,6 +135,8 @@ class NextLegModel(nn.Module):
         if self.mode in {"head_only", "adapter_head"}:
             for parameter in self.encoder.parameters():
                 parameter.requires_grad = False
+        elif self.mode == "transformer_finetune":
+            self.encoder.freeze_outside_transformer()
         if self.mode != "adapter_head":
             for parameter in self.adapter.parameters():
                 parameter.requires_grad = False

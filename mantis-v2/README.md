@@ -44,13 +44,23 @@ Run commands from the repository root:
 just sync
 just gate
 just verify-upstream
-just inspect-data
+just inspect-data mantis-v2/configs/nextleg-parquet-v2.toml
 just probe-mps
-just train mantis-v2/configs/nextleg.toml
-just validated-export mantis-v2/configs/nextleg.toml
+just train mantis-v2/configs/nextleg-parquet-v2.toml
+just validated-export mantis-v2/configs/nextleg-parquet-v2.toml
 ```
 
-`gate` includes deterministic synthetic smoke training, evaluation, checkpoint, and export parity. `verify-upstream` downloads or reuses the pinned official weights, checks their digest, constructs the real upstream MantisV2 on CPU, and verifies its embedding contract. `inspect-data` validates all configured files and computes legal anchor counts. `probe-mps` is guarded to exactly one real-data train batch and one validation batch of 36, so every configured stream is represented once. `validated-export` is the normal release path: it evaluates the validation-selected checkpoint and then exports only if the evaluation gate passes. Production training starts from the pinned official MantisV2 weights and runs on Apple MPS.
+`gate` includes deterministic synthetic smoke training, evaluation, checkpoint,
+and export parity. `verify-upstream`
+downloads or reuses the pinned official weights, checks their digest, constructs
+the real upstream MantisV2 on CPU, and verifies its embedding contract.
+`inspect-data` validates all configured files and computes legal anchor counts.
+The probe is guarded to exactly 32 real-data optimizer updates and one
+validation batch, with configured validation coverage across all streams.
+`validated-export` is the normal release path: it evaluates the
+validation-selected checkpoint and then exports only if the evaluation gate
+passes. The qualified production path starts from pinned official MantisV2
+weights and runs on Apple MPS.
 
 For diagnosis, `just evaluate <config>` and `just export <config>` expose the individual stages. Direct export still enforces the same evaluation gate.
 
@@ -58,7 +68,7 @@ For diagnosis, `just evaluate <config>` and `just export <config>` expose the in
 
 This is supervised NextLeg fine-tuning, not a reproduction of MantisV2 contrastive foundation pretraining. It combines the strongest compatible parts of the authoritative sources:
 
-- Upstream MantisV2: official pretrained weights, linear resizing to 512, channel-independent encoding, concatenated 256-dimensional embeddings, full-model fine-tuning, AdamW weight decay `0.05`, 10-epoch linear warmup, and cosine decay.
+- Upstream MantisV2: official pretrained weights, linear resizing to 512, channel-independent encoding, concatenated 256-dimensional embeddings, transformer fine-tuning with the MPS-unstable token generator and unused projection frozen, AdamW weight decay `0.05`, per-update 10-epoch linear warmup, and cosine decay.
 - FFM NextLeg: 120 epochs, 200 sampled training batches per epoch, 20 validation batches, learning rate `0.0001188117389055629`, horizons 5/10/20/25, two pivot legs, cap 256, and validation-loss model selection.
 - Local MPS: batch 128 and zero data-loader workers. A local throughput sweep showed batch 192 was fastest, but 128 preserves memory headroom while the 1.4 GiB corpus and optimizer state are resident.
 

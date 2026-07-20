@@ -30,6 +30,13 @@ def test_production_config_is_valid() -> None:
     assert config.run.allow_overwrite is False
 
 
+def test_transformer_finetune_mode_is_configurable(tmp_path: Path) -> None:
+    source = (ROOT / "configs" / "nextleg.toml").read_text()
+    path = tmp_path / "transformer-finetune.toml"
+    path.write_text(source.replace('mode = "full_finetune"', 'mode = "transformer_finetune"'))
+    assert load_config(path).model.mode == "transformer_finetune"
+
+
 def test_legacy_production_config_defaults_to_unbound_csv() -> None:
     config = load_config(ROOT / "configs" / "nextleg.toml")
     assert config.data.file_format == "csv"
@@ -63,26 +70,39 @@ def test_parquet_config_requires_manifest_binding(tmp_path: Path) -> None:
         load_config(path)
 
 
-def test_learning_rate_uses_warmup_then_cosine_decay() -> None:
+def test_learning_rate_uses_per_step_warmup_then_cosine_decay() -> None:
     training = load_config(ROOT / "configs" / "nextleg.toml").training
-    assert training.learning_rate_for_epoch(0) == pytest.approx(training.learning_rate / 10)
-    assert training.learning_rate_for_epoch(9) == pytest.approx(training.learning_rate)
-    assert training.learning_rate_for_epoch(10) == pytest.approx(training.learning_rate)
-    assert training.learning_rate_for_epoch(119) == pytest.approx(0.0)
+    steps_per_epoch = 200
+    assert training.learning_rate_for_step(1, steps_per_epoch) == pytest.approx(
+        training.learning_rate / 2000
+    )
+    assert training.learning_rate_for_step(1999, steps_per_epoch) == pytest.approx(
+        training.learning_rate * 1999 / 2000
+    )
+    assert training.learning_rate_for_step(2000, steps_per_epoch) == pytest.approx(
+        training.learning_rate
+    )
+    assert training.learning_rate_for_step(24000, steps_per_epoch) == pytest.approx(0.0)
 
 
 def test_probe_config_is_strictly_bounded() -> None:
-    config = load_config(ROOT / "configs" / "nextleg-mps-probe.toml")
+    config = load_config(ROOT / "configs" / "nextleg-parquet-v2-probe.toml")
+    production = load_config(ROOT / "configs" / "nextleg-parquet-v2.toml")
     assert config.run.device == "mps"
     assert config.training.epochs == 1
     assert config.training.batch_size == 36
-    assert config.training.max_steps_per_epoch == 1
+    assert config.training.max_steps_per_epoch == 32
     assert config.training.validation_max_steps == 1
     assert config.training.resume is False
+    assert config.data == production.data
+    assert config.model == production.model
+    assert config.target == production.target
+    assert config.evaluation == production.evaluation
+    assert config.export == production.export
 
 
 def test_bounded_validation_must_cover_every_stream(tmp_path: Path) -> None:
-    source = (ROOT / "configs" / "nextleg-mps-probe.toml").read_text()
+    source = (ROOT / "configs" / "nextleg-parquet-v2-probe.toml").read_text()
     path = tmp_path / "under-sampled.toml"
     path.write_text(source.replace("batch_size = 36", "batch_size = 8"))
     with pytest.raises(ConfigError, match="at least one sample per configured stream"):

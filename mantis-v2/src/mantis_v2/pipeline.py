@@ -251,16 +251,25 @@ def _run_epoch(
     device: torch.device,
     optimizer: torch.optim.Optimizer | None,
     max_steps: int,
+    *,
+    completed_steps: int = 0,
 ) -> tuple[dict[str, float], int]:
     training = optimizer is not None
     model.train(training)
     totals = {"total": 0.0, "candle": 0.0, "leg": 0.0}
     batches = 0
+    steps_per_epoch = max_steps or len(loader)
     context = torch.enable_grad() if training else torch.inference_mode()
     with context:
         for batch in loader:
             moved = _move(batch, device)
             if optimizer is not None:
+                learning_rate = config.training.learning_rate_for_step(
+                    completed_steps + batches + 1,
+                    steps_per_epoch,
+                )
+                for parameter_group in optimizer.param_groups:
+                    parameter_group["lr"] = learning_rate
                 optimizer.zero_grad(set_to_none=True)
             output = model(moved["context"])
             losses = nextleg_loss(
@@ -274,7 +283,15 @@ def _run_epoch(
                 raise PipelineError(f"non-finite {phase} loss")
             if optimizer is not None:
                 losses["total"].backward()  # type: ignore[no-untyped-call]
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                gradient_norm = torch.nn.utils.clip_grad_norm_(
+                    model.parameters(),
+                    max_norm=1.0,
+                )
+                if not torch.isfinite(gradient_norm):
+                    raise PipelineError(
+                        "non-finite training gradient norm at global step "
+                        f"{completed_steps + batches + 1}"
+                    )
                 optimizer.step()
             for key in ("total", "candle", "leg"):
                 totals[key] += float(losses[key].detach().cpu())
@@ -333,9 +350,6 @@ def train(config: PipelineConfig) -> dict[str, Any]:
     for epoch in range(start_epoch, config.training.epochs):
         if stopped_early:
             break
-        learning_rate = config.training.learning_rate_for_epoch(epoch)
-        for parameter_group in optimizer.param_groups:
-            parameter_group["lr"] = learning_rate
         train_loader = _loader(train_dataset, config, shuffle=True, epoch=epoch)
         validation_loader = _loader(validation_dataset, config, shuffle=False, epoch=epoch)
         train_metrics, steps = _run_epoch(
@@ -345,6 +359,7 @@ def train(config: PipelineConfig) -> dict[str, Any]:
             device,
             optimizer,
             config.training.max_steps_per_epoch,
+            completed_steps=global_step,
         )
         validation_metrics, _ = _run_epoch(
             model,
@@ -355,6 +370,7 @@ def train(config: PipelineConfig) -> dict[str, Any]:
             config.training.validation_max_steps,
         )
         global_step += steps
+        learning_rate = float(optimizer.param_groups[0]["lr"])
         improved = validation_metrics["total"] < best_validation
         if improved:
             best_validation = validation_metrics["total"]
@@ -657,16 +673,16 @@ def smoke(config: PipelineConfig) -> dict[str, Any]:
 
 
 def probe(config: PipelineConfig) -> dict[str, Any]:
-    """Run one real-data train and validation batch behind a strict scale guard."""
+    """Run a bounded real-data optimizer stress test and one validation batch."""
     if (
         config.data.root == "synthetic"
         or config.training.epochs != 1
-        or config.training.max_steps_per_epoch != 1
+        or config.training.max_steps_per_epoch != 32
         or config.training.validation_max_steps != 1
         or config.training.resume
     ):
         raise PipelineError(
-            "probe requires real data, one epoch, one train step, one validation step, "
+            "probe requires real data, one epoch, 32 train steps, one validation step, "
             "and resume=false"
         )
     return train(config)

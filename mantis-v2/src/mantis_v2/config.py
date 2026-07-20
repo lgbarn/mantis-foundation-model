@@ -17,7 +17,13 @@ class ConfigError(ValueError):
 
 
 Device = Literal["auto", "cpu", "mps", "cuda"]
-ModelMode = Literal["scratch", "head_only", "adapter_head", "full_finetune"]
+ModelMode = Literal[
+    "scratch",
+    "head_only",
+    "adapter_head",
+    "transformer_finetune",
+    "full_finetune",
+]
 
 
 @dataclass(frozen=True)
@@ -73,16 +79,23 @@ class TrainingConfig:
     warmup_epochs: int
     early_stopping_patience: int
 
-    def learning_rate_for_epoch(self, epoch: int) -> float:
-        """Return the upstream-style linear-warmup and cosine-decay rate."""
-        if not 0 <= epoch < self.epochs:
-            raise ValueError(f"epoch must be in [0, {self.epochs})")
-        if self.warmup_epochs and epoch < self.warmup_epochs:
-            return self.learning_rate * (epoch + 1) / self.warmup_epochs
-        decay_epochs = self.epochs - self.warmup_epochs
-        if decay_epochs <= 1:
-            return self.learning_rate
-        progress = (epoch - self.warmup_epochs) / (decay_epochs - 1)
+    def learning_rate_for_step(self, step: int, steps_per_epoch: int) -> float:
+        """Return the upstream per-update linear-warmup and cosine-decay rate."""
+        if steps_per_epoch <= 0:
+            raise ValueError("steps_per_epoch must be positive")
+        total_steps = self.epochs * steps_per_epoch
+        if not 1 <= step <= total_steps:
+            raise ValueError(f"step must be in [1, {total_steps}]")
+        warmup_steps = self.warmup_epochs * steps_per_epoch
+        if warmup_steps and step < warmup_steps:
+            return self.learning_rate * step / warmup_steps
+        if not warmup_steps:
+            if total_steps == 1:
+                return self.learning_rate
+            progress = (step - 1) / (total_steps - 1)
+            return self.learning_rate * 0.5 * (1.0 + math.cos(math.pi * progress))
+        decay_steps = total_steps - warmup_steps
+        progress = (step - warmup_steps) / decay_steps
         return self.learning_rate * 0.5 * (1.0 + math.cos(math.pi * progress))
 
 
@@ -298,7 +311,13 @@ def load_config(path: str | Path) -> PipelineConfig:
     mode = _choice(
         model["mode"],
         "model.mode",
-        {"scratch", "head_only", "adapter_head", "full_finetune"},
+        {
+            "scratch",
+            "head_only",
+            "adapter_head",
+            "transformer_finetune",
+            "full_finetune",
+        },
     )
     validation_fraction = _number(data["validation_fraction"], "data.validation_fraction")
     if not 0.0 < validation_fraction < 1.0:

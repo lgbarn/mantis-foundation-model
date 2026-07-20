@@ -30,7 +30,7 @@ smoke:
     uv run mantis-v2 smoke --config mantis-v2/configs/smoke.toml
 
 probe-mps:
-    uv run mantis-v2 probe --config mantis-v2/configs/nextleg-mps-probe.toml
+    uv run mantis-v2 probe --config mantis-v2/configs/nextleg-parquet-v2-probe.toml
 
 verify-upstream:
     uv run mantis-v2 verify-upstream --config mantis-v2/configs/nextleg.toml

@@ -80,3 +80,42 @@ def test_pretrained_adapter_uses_pinned_hub_revision(monkeypatch: pytest.MonkeyP
     output = adapter(torch.zeros(2, 5, 512))
     assert calls == [(config.model.hub_model, config.model.hub_revision)]
     assert output.shape == (2, 5 * 256)
+
+
+def test_transformer_finetune_freezes_only_upstream_token_generator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_config(ROOT / "configs" / "nextleg.toml")
+
+    class FakeMantisV2(nn.Module):
+        def __init__(self, **_: object) -> None:
+            super().__init__()
+            self.tokgen_unit = nn.Linear(1, 1)
+            self.transf_unit = nn.Linear(1, 1)
+            self.prj = nn.Linear(1, 1)
+
+        def from_pretrained(self, *_: object, **__: object) -> nn.Module:
+            return self
+
+        def forward(self, value: torch.Tensor) -> torch.Tensor:
+            return torch.zeros((len(value), 256), dtype=value.dtype, device=value.device)
+
+    monkeypatch.setattr(model_module, "MantisV2", FakeMantisV2)
+    monkeypatch.setattr(model_module, "download_verified_weights", lambda _: Path("verified"))
+    model = NextLegModel(
+        replace(config.model, mode="transformer_finetune"),
+        config.target,
+        5,
+        torch.device("cpu"),
+    )
+
+    assert all(
+        not parameter.requires_grad for parameter in model.encoder.backbone.tokgen_unit.parameters()
+    )
+    assert all(
+        parameter.requires_grad for parameter in model.encoder.backbone.transf_unit.parameters()
+    )
+    assert all(not parameter.requires_grad for parameter in model.encoder.backbone.prj.parameters())
+    assert all(not parameter.requires_grad for parameter in model.adapter.parameters())
+    assert all(parameter.requires_grad for parameter in model.candle_head.parameters())
+    assert all(parameter.requires_grad for parameter in model.leg_head.parameters())
