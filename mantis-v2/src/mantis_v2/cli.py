@@ -53,6 +53,7 @@ from mantis_v2.pipeline import (
     validated_export,
     verify_upstream,
 )
+from mantis_v2.rl_account import RlAccountError, write_account_replay_manifest
 from mantis_v2.rl_config import load_rl_config
 from mantis_v2.rl_episodes import EpisodeContractError, build_episode_manifest
 from mantis_v2.rl_provenance import RlProvenanceError, write_rl_dry_run_manifest
@@ -87,6 +88,7 @@ def _parser() -> argparse.ArgumentParser:
         "verify-upstream",
         "rl-dry-run",
         "rl-build-episodes",
+        "rl-account-replay",
         *_CORPUS_COMMANDS,
         *_DOWNSTREAM_COMMANDS,
     ):
@@ -98,6 +100,9 @@ def _parser() -> argparse.ArgumentParser:
                 "--partition", required=True, choices=("training", "validation", "test")
             )
             child.add_argument("--episodes", required=True, type=int)
+        if command == "rl-account-replay":
+            child.add_argument("--input", required=True, type=Path)
+            child.add_argument("--output", required=True, type=Path)
         if command in _DOWNSTREAM_COMMANDS:
             child.add_argument(
                 "--set",
@@ -135,7 +140,11 @@ def main() -> None:
         "verify-upstream": verify_upstream,
     }
     try:
-        if args.command == "rl-dry-run":
+        if args.command == "rl-account-replay":
+            result = write_account_replay_manifest(
+                load_rl_config(args.config), args.input, args.output
+            )
+        elif args.command == "rl-dry-run":
             result = write_rl_dry_run_manifest(load_rl_config(args.config))
         elif args.command == "rl-build-episodes":
             result = build_episode_manifest(
@@ -182,6 +191,7 @@ def main() -> None:
         ModelContractError,
         PipelineError,
         RuntimeContractError,
+        RlAccountError,
         RlProvenanceError,
         EpisodeContractError,
         DownstreamPipelineError,

@@ -65,6 +65,7 @@ just train mantis-v2/configs/nextleg-parquet-v2.toml
 just validated-export mantis-v2/configs/nextleg-parquet-v2.toml
 just rl-dry-run mantis-v2/configs/rl-entry-smoke.toml
 just rl-build-episodes mantis-v2/configs/rl-entry-smoke.toml 0 training 21
+just rl-account-replay fixture.json replay.json mantis-v2/configs/rl-entry-smoke.toml
 ```
 
 `gate` includes deterministic synthetic smoke training, evaluation, checkpoint,
@@ -96,6 +97,43 @@ mini-only. The manifest stores shard row spans for memory-mapped observation
 lookup plus all upstream identities. Repeating the same command resumes by
 accepting an identical completed manifest; changed inputs or parameters fail
 without replacing it. Use a new RL run name for a different schedule contract.
+
+### Bar-level Topstep account replay
+
+`rl-account-replay` is the deterministic qualification seam for the Topstep
+100K account rules. It consumes a schema-versioned JSON marked-equity fixture,
+loads the pinned rule and fee identities from the RL config, and atomically
+publishes a no-overwrite JSON manifest. It does not read market data,
+embeddings, policy outputs, or the sealed holdout.
+
+Each fixture has exactly `schema_version`, `fixture_id`, `ticker`, and `bars`.
+`ticker` binds the entire Combine attempt to one underlying; mini and micro
+contracts for another underlying fail closed. Bars are strictly increasing and
+use these fields:
+
+- `timestamp`: timezone-aware ISO-8601 bar timestamp;
+- `action`: `none`, `enter`, or `exit`;
+- `contract`, `quantity`, and `side`: required by `enter`; supported profiles
+  are one mini or 10 micros, while ZB is mini-only;
+- `mark_ticks`: signed P&L ticks for the open position, not a raw price move;
+- `realized_pnl`: optional deterministic dollar adjustment for independent
+  hand-calculated account fixtures;
+- `pending_orders`: non-negative count used to prove cancellation behavior.
+
+Open-position marked equity includes gross tick P&L, one adverse tick per side,
+and the pinned product round-turn fee. Balance receives that net amount only
+when the fixture exits or the account forces a flatten, so friction is booked
+once. MLL touch uses `<=` for both realized and unrealized equity and terminates
+as `BLOW`. DLL touch uses `<=`, flattens, cancels, and locks entry until the next
+5 PM CT session without failing the Combine. Positions are forced flat at 3:10
+PM CT. EOD balance alone ratchets MLL; the floor never falls and locks at
+$100,000. Pass requires $6,000 profit, best-day consistency at or below 50%, and
+two trading days. An active attempt becomes `TIMEOUT` after 20 session days.
+
+The manifest records the complete account path, terminal state, input SHA-256,
+and config/rule/fee digests. Replaying identical input with identical pinned
+configuration produces byte-identical output. An existing destination fails
+closed instead of being replaced.
 
 ## Training recipe
 
