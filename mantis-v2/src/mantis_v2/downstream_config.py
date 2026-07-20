@@ -555,7 +555,7 @@ def load_downstream_config(path: str | Path, overrides: tuple[str, ...] = ()) ->
             ),
             embed_manifest_sha256=str(walk.get("embed_manifest_sha256", "")),
             embed_producer_config_path=(
-                Path(str(walk["embed_producer_config_path"]))
+                _resolve_config_path(walk["embed_producer_config_path"], config_path.parent)
                 if walk.get("embed_producer_config_path")
                 else None
             ),
@@ -599,6 +599,11 @@ def load_downstream_config(path: str | Path, overrides: tuple[str, ...] = ()) ->
     )
     _validate(config)
     return config
+
+
+def _resolve_config_path(value: Any, config_directory: Path) -> Path:
+    path = Path(str(value))
+    return path if path.is_absolute() else (config_directory / path).resolve()
 
 
 def _strategy_config(raw: dict[str, Any]) -> StrategyConfig | TrendMagicStrategyConfig:

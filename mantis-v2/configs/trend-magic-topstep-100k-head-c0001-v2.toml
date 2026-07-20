@@ -62,7 +62,7 @@ tolerance = 0.0001
 convergence_policy = "fail"
 embed_manifest_path = "/Volumes/Storage/trading-research/artifacts/mantis-foundation-model/mantisv2-trend-magic-topstep-100k/embed/manifest.json"
 embed_manifest_sha256 = "bffb74988497aec1c1c51821188e9c77b8a028c3016ddab30a843cbd785eea35"
-embed_producer_config_path = "/Users/lgbarn/Personal/Trading/mantis-foundation-model/mantis-v2/configs/trend-magic-topstep-100k.toml"
+embed_producer_config_path = "trend-magic-topstep-100k.toml"
 embed_producer_config_sha256 = "e27d6c499a2df6ae259c93ac38376fab64f8bf26bb764452e6dc1739ee0dcdb6"
 
 [topstep]

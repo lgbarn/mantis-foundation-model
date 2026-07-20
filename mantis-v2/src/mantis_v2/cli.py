@@ -53,6 +53,8 @@ from mantis_v2.pipeline import (
     validated_export,
     verify_upstream,
 )
+from mantis_v2.rl_config import load_rl_config
+from mantis_v2.rl_provenance import RlProvenanceError, write_rl_dry_run_manifest
 from mantis_v2.runtime import RuntimeContractError
 from mantis_v2.strategy import StrategyContractError
 from mantis_v2.topstep import TopstepContractError
@@ -82,6 +84,7 @@ def _parser() -> argparse.ArgumentParser:
         "smoke",
         "probe",
         "verify-upstream",
+        "rl-dry-run",
         *_CORPUS_COMMANDS,
         *_DOWNSTREAM_COMMANDS,
     ):
@@ -124,7 +127,9 @@ def main() -> None:
         "verify-upstream": verify_upstream,
     }
     try:
-        if args.command in _CORPUS_COMMANDS:
+        if args.command == "rl-dry-run":
+            result = write_rl_dry_run_manifest(load_rl_config(args.config))
+        elif args.command in _CORPUS_COMMANDS:
             corpus_config = load_corpus_repair_config(args.config)
             if args.command == "repair-corpus":
                 manifest = repair_corpus(corpus_config)
@@ -162,6 +167,7 @@ def main() -> None:
         ModelContractError,
         PipelineError,
         RuntimeContractError,
+        RlProvenanceError,
         DownstreamPipelineError,
         EmbeddingContractError,
         StrategyContractError,

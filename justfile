@@ -76,3 +76,6 @@ downstream-trend-magic-smoke:
 
 downstream-holdout config unlock="":
     uv run mantis-v2 downstream-holdout --config {{config}} --unlock {{unlock}}
+
+rl-dry-run config="mantis-v2/configs/rl-entry-smoke.toml":
+    uv run mantis-v2 rl-dry-run --config {{config}}

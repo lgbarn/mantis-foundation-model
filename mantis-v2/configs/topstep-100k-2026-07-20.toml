@@ -1,0 +1,118 @@
+schema_version = 1
+snapshot = "topstep-100k-2026-07-20"
+effective_date = "2026-07-20"
+
+[account]
+starting_balance = 100000.0
+initial_mll_floor = 97000.0
+mll_distance = 3000.0
+profit_target = 6000.0
+consistency_limit = 0.50
+minimum_trading_days = 2
+maximum_position_equivalence = 10
+mll_lock_balance = 100000.0
+mll_ratchet = "end_of_day_high_water"
+mll_enforcement = "continuous_realized_and_unrealized"
+overnight_holding = false
+
+[session]
+timezone = "America/Chicago"
+start = "17:00"
+force_flat = "15:10"
+
+[position_equivalence]
+micros_per_mini = 10
+maximum_minis = 10
+maximum_micros = 100
+
+[contracts.ES]
+contract_class = "mini"
+underlying = "ES"
+tick_size = 0.25
+tick_value = 12.50
+position_units = 10
+
+[contracts.MES]
+contract_class = "micro"
+underlying = "ES"
+tick_size = 0.25
+tick_value = 1.25
+position_units = 1
+
+[contracts.NQ]
+contract_class = "mini"
+underlying = "NQ"
+tick_size = 0.25
+tick_value = 5.00
+position_units = 10
+
+[contracts.MNQ]
+contract_class = "micro"
+underlying = "NQ"
+tick_size = 0.25
+tick_value = 0.50
+position_units = 1
+
+[contracts.RTY]
+contract_class = "mini"
+underlying = "RTY"
+tick_size = 0.10
+tick_value = 5.00
+position_units = 10
+
+[contracts.M2K]
+contract_class = "micro"
+underlying = "RTY"
+tick_size = 0.10
+tick_value = 0.50
+position_units = 1
+
+[contracts.YM]
+contract_class = "mini"
+underlying = "YM"
+tick_size = 1.00
+tick_value = 5.00
+position_units = 10
+
+[contracts.MYM]
+contract_class = "micro"
+underlying = "YM"
+tick_size = 1.00
+tick_value = 0.50
+position_units = 1
+
+[contracts.GC]
+contract_class = "mini"
+underlying = "GC"
+tick_size = 0.10
+tick_value = 10.00
+position_units = 10
+
+[contracts.MGC]
+contract_class = "micro"
+underlying = "GC"
+tick_size = 0.10
+tick_value = 1.00
+position_units = 1
+
+[contracts.CL]
+contract_class = "mini"
+underlying = "CL"
+tick_size = 0.01
+tick_value = 10.00
+position_units = 10
+
+[contracts.MCL]
+contract_class = "micro"
+underlying = "CL"
+tick_size = 0.01
+tick_value = 1.00
+position_units = 1
+
+[contracts.ZB]
+contract_class = "mini"
+underlying = "ZB"
+tick_size = 0.03125
+tick_value = 31.25
+position_units = 10
+mini_only = true

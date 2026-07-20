@@ -56,7 +56,7 @@ tolerance = 0.0001
 convergence_policy = "fail"
 embed_manifest_path = "/Volumes/Storage/trading-research/artifacts/mantis-foundation-model/mantisv2-supertrend-topstep-100k/embed/manifest.json"
 embed_manifest_sha256 = "0b489575db78173d8cfb9f3ae30d661f656d6a701b3e8c2b4d4ca11bd5d4d4df"
-embed_producer_config_path = "/Users/lgbarn/Personal/Trading/mantis-foundation-model/mantis-v2/configs/supertrend-topstep-100k.toml"
+embed_producer_config_path = "supertrend-topstep-100k.toml"
 embed_producer_config_sha256 = "7b3308ab08aebddc6c69bc04a99ff229dd614e5ab5f0f569d1b41100670e1afb"
 
 [topstep]
