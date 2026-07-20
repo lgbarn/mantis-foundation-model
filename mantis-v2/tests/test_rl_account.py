@@ -400,6 +400,39 @@ def test_first_bar_after_310pm_flattens_an_open_position() -> None:
     assert result["account_path"][-1]["pending_orders"] == 0
 
 
+def test_session_flatten_entry_lock_clears_at_next_5pm() -> None:
+    fixture = {
+        "schema_version": 1,
+        "fixture_id": "session-reset-after-flatten",
+        "ticker": "ES",
+        "bars": [
+            _bar(
+                "2026-07-20T20:09:00+00:00",
+                action="enter",
+                contract="ES",
+                quantity=1,
+                side="long",
+            ),
+            _bar("2026-07-20T20:10:00+00:00"),
+            _bar(
+                "2026-07-20T22:00:00+00:00",
+                action="enter",
+                contract="ES",
+                quantity=1,
+                side="long",
+            ),
+            _bar("2026-07-21T20:10:00+00:00"),
+        ],
+    }
+
+    result = replay_account_fixture(_config(), fixture, ROOT.parent)
+    path = result["account_path"]
+
+    assert path[1]["event"] == "SESSION_FLATTEN"
+    assert path[2]["entry_accepted"] is True
+    assert path[2]["entry_locked"] is False
+
+
 def test_numeric_zero_realized_pnl_does_not_create_a_trading_day() -> None:
     fixture = {
         "schema_version": 1,

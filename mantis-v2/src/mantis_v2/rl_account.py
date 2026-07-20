@@ -291,11 +291,11 @@ def replay_account_fixture(
             current_session = None
             if status != "ACTIVE":
                 break
-            entry_locked = False
         if current_session is None:
             current_session = session_day
             session_start_balance = balance
             session_had_activity = False
+            entry_locked = False
 
         action = bar.get("action", "none")
         if action not in {"none", "enter", "exit"}:
