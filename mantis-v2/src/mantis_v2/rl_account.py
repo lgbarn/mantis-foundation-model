@@ -281,8 +281,7 @@ def replay_account_fixture(
             raise RlAccountError("bar timestamps must be strictly increasing")
         last_timestamp = timestamp
         session_day = _session_day(timestamp, zone, start_clock)
-        if current_session is None and session_day == closed_session:
-            raise RlAccountError("bar occurs after the session was finalized")
+        session_is_closed = current_session is None and session_day == closed_session
         if current_session is not None and session_day != current_session:
             if position is not None:
                 raise RlAccountError("fixture carries a position across the session boundary")
@@ -291,7 +290,7 @@ def replay_account_fixture(
             current_session = None
             if status != "ACTIVE":
                 break
-        if current_session is None:
+        if current_session is None and not session_is_closed:
             current_session = session_day
             session_start_balance = balance
             session_had_activity = False
@@ -401,7 +400,11 @@ def replay_account_fixture(
                 **state_fields(),
             }
         )
-        if flat_clock <= local_clock < start_clock and status == "ACTIVE":
+        if (
+            current_session is not None
+            and flat_clock <= local_clock < start_clock
+            and status == "ACTIVE"
+        ):
             finish_session()
             closed_session = current_session
             current_session = None
