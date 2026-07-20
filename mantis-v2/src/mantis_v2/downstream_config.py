@@ -1,4 +1,4 @@
-"""Strict configuration for downstream Supertrend and Topstep workflows."""
+"""Strict configuration for downstream strategy and Topstep workflows."""
 
 from __future__ import annotations
 
@@ -69,6 +69,22 @@ class StrategyConfig:
 
 
 @dataclass(frozen=True)
+class TrendMagicStrategyConfig:
+    kind: Literal["trend_magic"]
+    atr_period: int
+    cci_period: int
+    trend_magic_atr_period: int
+    trend_magic_multiplier: float
+    stop_atr: float
+    target_r: float
+    analysis_targets_r: tuple[float, ...]
+    horizon_bars: int
+    round_trip_cost_r: float
+    cooldown_bars: int
+    same_bar_policy: Literal["stop_first"]
+
+
+@dataclass(frozen=True)
 class WalkForwardConfig:
     train_months: int
     validation_months: int
@@ -119,7 +135,7 @@ class DownstreamConfig:
     run: DownstreamRunConfig
     data: DownstreamDataConfig
     foundation: FoundationConfig
-    strategy: StrategyConfig
+    strategy: StrategyConfig | TrendMagicStrategyConfig
     walk_forward: WalkForwardConfig
     topstep: TopstepConfig
     evaluation: DownstreamEvaluationConfig
@@ -216,9 +232,13 @@ _EXPECTED: dict[str, set[str]] = {
         "storage_dtype",
     },
     "strategy": {
+        "kind",
         "atr_period",
         "supertrend_period",
         "supertrend_multiplier",
+        "cci_period",
+        "trend_magic_atr_period",
+        "trend_magic_multiplier",
         "stop_atr",
         "target_r",
         "analysis_targets_r",
@@ -290,8 +310,43 @@ def _section(raw: dict[str, Any], name: str) -> dict[str, Any]:
     value = raw.get(name)
     if not isinstance(value, dict):
         raise ConfigError(f"missing or invalid [{name}] section")
-    unknown = set(value) - _EXPECTED[name]
-    missing = _EXPECTED[name] - _OPTIONAL.get(name, set()) - set(value)
+    expected = _EXPECTED[name]
+    if name == "strategy":
+        kind = value.get("kind", "supertrend")
+        if kind == "trend_magic":
+            expected = {
+                "kind",
+                "atr_period",
+                "cci_period",
+                "trend_magic_atr_period",
+                "trend_magic_multiplier",
+                "stop_atr",
+                "target_r",
+                "analysis_targets_r",
+                "horizon_bars",
+                "round_trip_cost_r",
+                "cooldown_bars",
+                "same_bar_policy",
+            }
+        elif kind == "supertrend":
+            expected = {
+                "atr_period",
+                "supertrend_period",
+                "supertrend_multiplier",
+                "stop_atr",
+                "target_r",
+                "analysis_targets_r",
+                "horizon_bars",
+                "round_trip_cost_r",
+                "cooldown_bars",
+                "same_bar_policy",
+            }
+            if "kind" in value:
+                expected.add("kind")
+        else:
+            raise ConfigError("strategy.kind must be one of: supertrend, trend_magic")
+    unknown = set(value) - expected
+    missing = expected - _OPTIONAL.get(name, set()) - set(value)
     if unknown:
         raise ConfigError(f"unknown [{name}] keys: {', '.join(sorted(unknown))}")
     if missing:
@@ -458,28 +513,7 @@ def load_downstream_config(path: str | Path, overrides: tuple[str, ...] = ()) ->
                 {"float16", "float32"},
             ),
         ),
-        strategy=StrategyConfig(
-            atr_period=_int(strategy["atr_period"], "strategy.atr_period", minimum=1),
-            supertrend_period=_int(
-                strategy["supertrend_period"], "strategy.supertrend_period", minimum=1
-            ),
-            supertrend_multiplier=_float(
-                strategy["supertrend_multiplier"],
-                "strategy.supertrend_multiplier",
-                minimum=1e-12,
-            ),
-            stop_atr=_float(strategy["stop_atr"], "strategy.stop_atr", minimum=1e-12),
-            target_r=_float(strategy["target_r"], "strategy.target_r", minimum=1e-12),
-            analysis_targets_r=_floats(
-                strategy["analysis_targets_r"], "strategy.analysis_targets_r"
-            ),
-            horizon_bars=_int(strategy["horizon_bars"], "strategy.horizon_bars", minimum=1),
-            round_trip_cost_r=_float(strategy["round_trip_cost_r"], "strategy.round_trip_cost_r"),
-            cooldown_bars=_int(strategy["cooldown_bars"], "strategy.cooldown_bars"),
-            same_bar_policy=_choice(
-                strategy["same_bar_policy"], "strategy.same_bar_policy", {"stop_first"}
-            ),
-        ),
+        strategy=_strategy_config(strategy),
         walk_forward=WalkForwardConfig(
             train_months=_int(walk["train_months"], "walk_forward.train_months", minimum=1),
             validation_months=_int(
@@ -565,6 +599,58 @@ def load_downstream_config(path: str | Path, overrides: tuple[str, ...] = ()) ->
     )
     _validate(config)
     return config
+
+
+def _strategy_config(raw: dict[str, Any]) -> StrategyConfig | TrendMagicStrategyConfig:
+    atr_period = _int(raw["atr_period"], "strategy.atr_period", minimum=1)
+    stop_atr = _float(raw["stop_atr"], "strategy.stop_atr", minimum=1e-12)
+    target_r = _float(raw["target_r"], "strategy.target_r", minimum=1e-12)
+    analysis_targets_r = _floats(raw["analysis_targets_r"], "strategy.analysis_targets_r")
+    horizon_bars = _int(raw["horizon_bars"], "strategy.horizon_bars", minimum=1)
+    round_trip_cost_r = _float(raw["round_trip_cost_r"], "strategy.round_trip_cost_r")
+    cooldown_bars = _int(raw["cooldown_bars"], "strategy.cooldown_bars")
+    same_bar_policy: Literal["stop_first"] = _choice(
+        raw["same_bar_policy"], "strategy.same_bar_policy", {"stop_first"}
+    )
+    if raw.get("kind", "supertrend") == "trend_magic":
+        return TrendMagicStrategyConfig(
+            kind="trend_magic",
+            atr_period=atr_period,
+            cci_period=_int(raw["cci_period"], "strategy.cci_period", minimum=2),
+            trend_magic_atr_period=_int(
+                raw["trend_magic_atr_period"],
+                "strategy.trend_magic_atr_period",
+                minimum=1,
+            ),
+            trend_magic_multiplier=_float(
+                raw["trend_magic_multiplier"],
+                "strategy.trend_magic_multiplier",
+                minimum=1e-12,
+            ),
+            stop_atr=stop_atr,
+            target_r=target_r,
+            analysis_targets_r=analysis_targets_r,
+            horizon_bars=horizon_bars,
+            round_trip_cost_r=round_trip_cost_r,
+            cooldown_bars=cooldown_bars,
+            same_bar_policy=same_bar_policy,
+        )
+    return StrategyConfig(
+        atr_period=atr_period,
+        supertrend_period=_int(raw["supertrend_period"], "strategy.supertrend_period", minimum=1),
+        supertrend_multiplier=_float(
+            raw["supertrend_multiplier"],
+            "strategy.supertrend_multiplier",
+            minimum=1e-12,
+        ),
+        stop_atr=stop_atr,
+        target_r=target_r,
+        analysis_targets_r=analysis_targets_r,
+        horizon_bars=horizon_bars,
+        round_trip_cost_r=round_trip_cost_r,
+        cooldown_bars=cooldown_bars,
+        same_bar_policy=same_bar_policy,
+    )
 
 
 def _validate(config: DownstreamConfig) -> None:

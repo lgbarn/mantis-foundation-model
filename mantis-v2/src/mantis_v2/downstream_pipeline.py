@@ -206,7 +206,11 @@ def prepare(config: DownstreamConfig) -> dict[str, Any]:
         "inputs": inputs,
         "outputs": outputs,
         "rows": total_rows,
-        "candidate_semantics": "every_eligible_3min_supertrend_state_bar",
+        "candidate_semantics": (
+            "every_eligible_3min_trend_magic_state_bar"
+            if getattr(config.strategy, "kind", "supertrend") == "trend_magic"
+            else "every_eligible_3min_supertrend_state_bar"
+        ),
         "holdout_locked": not config.evaluation.allow_holdout,
         "contamination": _file_identity(contamination_path),
         "contamination_digest": contamination["digest"],

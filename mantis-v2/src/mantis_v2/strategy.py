@@ -1,4 +1,4 @@
-"""Causal Supertrend candidates and next-open barrier labels."""
+"""Causal strategy candidates and next-open barrier labels."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import pandas as pd
 
 from mantis_v2.contamination import detect_discontinuities, stream_report
 from mantis_v2.corpus import CorpusRepairError, validate_corpus_binding
-from mantis_v2.downstream_config import DownstreamConfig
+from mantis_v2.downstream_config import DownstreamConfig, TrendMagicStrategyConfig
 
 
 class StrategyContractError(ValueError):
@@ -160,6 +160,68 @@ def supertrend_state(frame: pd.DataFrame, period: int, multiplier: float) -> np.
     return direction
 
 
+def trend_magic_state(
+    frame: pd.DataFrame,
+    cci_period: int,
+    atr_period: int,
+    multiplier: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return the pinned close-CCI/SMA-TR Trend Magic line and state."""
+    high = frame["high"].to_numpy(dtype=np.float64)
+    low = frame["low"].to_numpy(dtype=np.float64)
+    close = frame["close"].to_numpy(dtype=np.float64)
+    line = np.full(len(frame), np.nan, dtype=np.float64)
+    direction = np.zeros(len(frame), dtype=np.int8)
+    for start, end in _segments(frame):
+        length = end - start
+        if length < max(cci_period, atr_period):
+            continue
+        segment_close = close[start:end]
+        segment_high = high[start:end]
+        segment_low = low[start:end]
+        previous_close = np.concatenate(([segment_close[0]], segment_close[:-1]))
+        true_range = np.maximum(
+            segment_high - segment_low,
+            np.maximum(
+                np.abs(segment_high - previous_close),
+                np.abs(segment_low - previous_close),
+            ),
+        )
+        tr_series = pd.Series(true_range)
+        range_sma = tr_series.rolling(atr_period, min_periods=atr_period).mean().to_numpy()
+        close_series = pd.Series(segment_close)
+        close_sma = close_series.rolling(cci_period, min_periods=cci_period).mean()
+        mean_deviation = close_series.rolling(cci_period, min_periods=cci_period).apply(
+            lambda values: float(np.mean(np.abs(values - values.mean()))),
+            raw=True,
+        )
+        denominator = 0.015 * mean_deviation.to_numpy()
+        cci = np.divide(
+            segment_close - close_sma.to_numpy(),
+            denominator,
+            out=np.full(length, np.nan, dtype=np.float64),
+            where=denominator > 0,
+        )
+        first = max(cci_period, atr_period) - 1
+        for local in range(first, length):
+            index = start + local
+            if not np.isfinite(cci[local]) or not np.isfinite(range_sma[local]):
+                continue
+            bullish = cci[local] >= 0
+            raw_line = (
+                segment_low[local] - multiplier * range_sma[local]
+                if bullish
+                else segment_high[local] + multiplier * range_sma[local]
+            )
+            if local > first and np.isfinite(line[index - 1]):
+                raw_line = (
+                    max(raw_line, line[index - 1]) if bullish else min(raw_line, line[index - 1])
+                )
+            line[index] = raw_line
+            direction[index] = 1 if bullish else -1
+    return line, direction
+
+
 def causal_context_indices(
     decision_close_ns: np.ndarray,
     context_close_ns: np.ndarray,
@@ -251,7 +313,7 @@ def build_symbol_candidates(
     symbol: str,
     split: Literal["pre_holdout", "holdout", "all"] = "pre_holdout",
 ) -> pd.DataFrame:
-    """Create every eligible 3-minute state candidate with causal context indices."""
+    """Create every eligible 3-minute strategy state with causal context indices."""
     frames = {
         timeframe: load_market_frame(config, symbol, timeframe)
         for timeframe in config.data.timeframes
@@ -259,9 +321,17 @@ def build_symbol_candidates(
     decision = frames[config.data.decision_timeframe]
     strategy = config.strategy
     atr = wilder_atr(decision, strategy.atr_period)
-    direction = supertrend_state(
-        decision, strategy.supertrend_period, strategy.supertrend_multiplier
-    )
+    if isinstance(strategy, TrendMagicStrategyConfig):
+        _, direction = trend_magic_state(
+            decision,
+            strategy.cci_period,
+            strategy.trend_magic_atr_period,
+            strategy.trend_magic_multiplier,
+        )
+    else:
+        direction = supertrend_state(
+            decision, strategy.supertrend_period, strategy.supertrend_multiplier
+        )
     decision_ns = decision["close_timestamp"].to_numpy(dtype="datetime64[ns]")
     aligned = {
         timeframe: causal_context_indices(

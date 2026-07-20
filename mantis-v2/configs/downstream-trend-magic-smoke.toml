@@ -1,0 +1,75 @@
+[run]
+name = "downstream-trend-magic-smoke"
+seed = 7
+artifact_root = "artifacts/mantis-v2"
+device = "cpu"
+allow_overwrite = true
+
+[data]
+root = "synthetic"
+symbols = ["NQ"]
+contract_multipliers = [20.0]
+timeframes = ["1min", "3min", "15min"]
+decision_timeframe = "3min"
+timestamp_column = "datetime"
+timestamp_semantics = "bar_open"
+feature_columns = ["open", "high", "low", "close", "volume"]
+context_bars = 32
+holdout_start = "2026-01-01T00:00:00+00:00"
+
+[foundation]
+manifest_path = "synthetic"
+weights_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+return_transf_layer = -1
+output_token = "cls_token"
+preprocessing = "nextleg_standardized"
+input_length = 512
+batch_size = 4
+shard_rows = 8
+storage_dtype = "float32"
+
+[strategy]
+kind = "trend_magic"
+atr_period = 3
+cci_period = 3
+trend_magic_atr_period = 3
+trend_magic_multiplier = 1.0
+stop_atr = 0.5
+target_r = 3.0
+analysis_targets_r = [2.0, 3.0]
+horizon_bars = 4
+round_trip_cost_r = 0.03
+cooldown_bars = 0
+same_bar_policy = "stop_first"
+
+[walk_forward]
+train_months = 1
+validation_months = 1
+test_months = 1
+stride_months = 1
+embargo_bars = 0
+threshold_percentile = 50.0
+max_fit_rows = 8
+max_iter = 100
+class_weight = "balanced"
+
+[topstep]
+starting_balance = 100000.0
+profit_target = 6000.0
+mll_distance = 3000.0
+mll_lock_balance = 100000.0
+consistency_limit = 0.50
+consistency_comparator = "strict"
+max_mini_equivalents = 10.0
+contracts = 1
+minimum_trading_days = 2
+session_timezone = "America/Chicago"
+session_start_hour = 17
+session_end_hour = 15
+session_end_minute = 10
+daily_loss_limit_enabled = false
+daily_loss_limit = 2000.0
+
+[evaluation]
+allow_holdout = false
+holdout_unlock = "LOCKED"

@@ -21,7 +21,7 @@ typecheck:
 test:
     uv run pytest
 
-gate: format-check lint typecheck test smoke downstream-smoke
+gate: format-check lint typecheck test smoke downstream-smoke downstream-trend-magic-smoke
 
 inspect-data config:
     uv run mantis-v2 inspect-data --config {{config}}
@@ -70,6 +70,9 @@ downstream-run config:
 
 downstream-smoke:
     uv run mantis-v2 downstream-smoke --config mantis-v2/configs/downstream-smoke.toml
+
+downstream-trend-magic-smoke:
+    uv run mantis-v2 downstream-smoke --config mantis-v2/configs/downstream-trend-magic-smoke.toml
 
 downstream-holdout config unlock="":
     uv run mantis-v2 downstream-holdout --config {{config}} --unlock {{unlock}}

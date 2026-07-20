@@ -30,6 +30,7 @@ from mantis_v2.strategy import (
     causal_context_indices,
     load_market_frame,
     supertrend_state,
+    trend_magic_state,
 )
 from mantis_v2.topstep import TopstepContractError, simulate_topstep
 from mantis_v2.walk_forward import (
@@ -44,6 +45,7 @@ from mantis_v2.walk_forward import (
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "configs" / "supertrend-topstep-100k.toml"
 TUNED_CONFIG = ROOT / "configs" / "supertrend-topstep-100k-head-c0001-v2.toml"
+TREND_MAGIC_CONFIG = ROOT / "configs" / "trend-magic-topstep-100k.toml"
 
 
 def test_downstream_config_is_strict_and_supports_recorded_overrides() -> None:
@@ -64,6 +66,25 @@ def test_downstream_config_is_strict_and_supports_recorded_overrides() -> None:
             CONFIG,
             ('walk_forward.embed_manifest_path="/tmp/embed.json"',),
         )
+
+
+def test_trend_magic_config_is_strict_and_has_distinct_embedding_identity(
+    tmp_path: Path,
+) -> None:
+    supertrend = load_downstream_config(CONFIG)
+    trend_magic = load_downstream_config(TREND_MAGIC_CONFIG)
+    assert trend_magic.strategy.kind == "trend_magic"
+    assert trend_magic.strategy.cci_period == 20
+    assert trend_magic.strategy.trend_magic_atr_period == 5
+    assert trend_magic.embedding_contract_digest != supertrend.embedding_contract_digest
+    invalid = TREND_MAGIC_CONFIG.read_text().replace(
+        "trend_magic_multiplier = 1.0",
+        "trend_magic_multiplier = 1.0\nsupertrend_period = 10",
+    )
+    path = tmp_path / "invalid-trend-magic.toml"
+    path.write_text(invalid)
+    with pytest.raises(ConfigError, match=r"unknown \[strategy\] keys: supertrend_period"):
+        load_downstream_config(path)
 
 
 @pytest.mark.parametrize("value", ["nan", "inf"])
@@ -290,6 +311,101 @@ def test_supertrend_emits_state_on_each_warmed_bar_not_only_flips() -> None:
     state = supertrend_state(frame, period=3, multiplier=2.0)
     assert np.all(state[2:] == 1)
     assert len(state[2:]) > 1
+
+
+def test_trend_magic_matches_pinned_close_cci_sma_tr_fixture() -> None:
+    close = np.array([10.0, 11.0, 12.0, 11.0, 10.0, 9.0])
+    frame = pd.DataFrame(
+        {
+            "open": close,
+            "high": close + 0.5,
+            "low": close - 0.5,
+            "close": close,
+            "volume": np.ones_like(close),
+        }
+    )
+    line, state = trend_magic_state(frame, cci_period=3, atr_period=2, multiplier=1.0)
+    np.testing.assert_allclose(line[2:], [10.0, 10.0, 10.0, 10.0])
+    np.testing.assert_array_equal(state, [0, 0, 1, -1, -1, -1])
+
+
+def test_trend_magic_is_append_invariant_and_resets_at_discontinuities() -> None:
+    close = np.array([10.0, 11.0, 12.0, 11.0, 10.0, 9.0, 10.0, 11.0])
+    frame = pd.DataFrame(
+        {
+            "open": close,
+            "high": close + 0.5,
+            "low": close - 0.5,
+            "close": close,
+            "volume": np.ones_like(close),
+            "_discontinuity": np.arange(len(close)) == 4,
+        }
+    )
+    prefix_line, prefix_state = trend_magic_state(
+        frame.iloc[:7], cci_period=3, atr_period=2, multiplier=1.0
+    )
+    full_line, full_state = trend_magic_state(frame, cci_period=3, atr_period=2, multiplier=1.0)
+    np.testing.assert_allclose(full_line[:7], prefix_line, equal_nan=True)
+    np.testing.assert_array_equal(full_state[:7], prefix_state)
+    assert np.isnan(full_line[4:7]).all()
+    np.testing.assert_array_equal(full_state[4:7], 0)
+    assert np.isfinite(full_line[7])
+
+
+def test_candidate_builder_dispatches_trend_magic_parameters_and_uses_next_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_downstream_config(TREND_MAGIC_CONFIG)
+    config = replace(
+        config,
+        data=replace(config.data, context_bars=1),
+        strategy=replace(
+            config.strategy,
+            atr_period=3,
+            cci_period=4,
+            trend_magic_atr_period=5,
+            trend_magic_multiplier=1.25,
+            horizon_bars=2,
+            analysis_targets_r=(3.0,),
+        ),
+    )
+    close = np.linspace(100.0, 120.0, 30)
+    timestamps = pd.date_range("2025-01-01T14:00:00Z", periods=30, freq="3min")
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "close_timestamp": timestamps + timedelta(minutes=3),
+            "open": close,
+            "high": close + 1,
+            "low": close - 1,
+            "close": close,
+            "volume": np.ones_like(close),
+        }
+    )
+    observed: list[tuple[int, int, float]] = []
+
+    def fake_trend_magic(
+        candidate_frame: pd.DataFrame,
+        cci_period: int,
+        atr_period: int,
+        multiplier: float,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        observed.append((cci_period, atr_period, multiplier))
+        return np.zeros(len(candidate_frame)), np.ones(len(candidate_frame), dtype=np.int8)
+
+    monkeypatch.setattr(strategy_module, "load_market_frame", lambda *_: frame.copy())
+    monkeypatch.setattr(strategy_module, "trend_magic_state", fake_trend_magic)
+    monkeypatch.setattr(
+        strategy_module,
+        "supertrend_state",
+        lambda *_: pytest.fail("Trend Magic config dispatched to Supertrend"),
+    )
+
+    candidates = build_symbol_candidates(config, "NQ")
+
+    assert observed == [(4, 5, 1.25)]
+    assert (candidates["direction"] == 1).all()
+    assert (candidates["entry_ts"] == candidates["decision_ts"]).all()
 
 
 def test_candidate_builder_emits_each_eligible_state_bar(

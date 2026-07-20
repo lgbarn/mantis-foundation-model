@@ -1,0 +1,79 @@
+[run]
+name = "mantisv2-trend-magic-topstep-100k"
+seed = 42
+artifact_root = "/Volumes/Storage/trading-research/artifacts/mantis-foundation-model"
+device = "mps"
+allow_overwrite = false
+
+[data]
+root = "/Volumes/Storage/trading-research/data/MANTIS_NEXTLEG_PARQUET_V1/market"
+file_format = "parquet"
+corpus_manifest_path = "/Volumes/Storage/trading-research/data/MANTIS_NEXTLEG_PARQUET_V1/manifest.json"
+corpus_manifest_sha256 = "2d8cf8b708c7c743c849059410b3654bc44f9fe4f7d795928de82526e120d703"
+symbols = ["ES", "NQ", "RTY", "YM", "GC", "CL", "ZB"]
+contract_multipliers = [50.0, 20.0, 50.0, 5.0, 100.0, 1000.0, 1000.0]
+timeframes = ["1min", "3min", "15min"]
+decision_timeframe = "3min"
+timestamp_column = "datetime"
+timestamp_semantics = "bar_open"
+feature_columns = ["open", "high", "low", "close", "volume"]
+context_bars = 200
+holdout_start = "2026-01-01T00:00:00+00:00"
+max_relative_close_jump = 0.05
+
+[foundation]
+manifest_path = "/Volumes/Storage/trading-research/artifacts/mantis-foundation-model/mantisv2-nextleg-parquet-v2/export/manifest.json"
+weights_sha256 = "aab5bac1459a3cf0b08663d1d327e79ee3c1337dd51a30e16def53b8f563c1b9"
+return_transf_layer = -1
+output_token = "cls_token"
+preprocessing = "nextleg_standardized"
+input_length = 512
+batch_size = 128
+shard_rows = 8192
+storage_dtype = "float16"
+
+[strategy]
+kind = "trend_magic"
+atr_period = 20
+cci_period = 20
+trend_magic_atr_period = 5
+trend_magic_multiplier = 1.0
+stop_atr = 0.5
+target_r = 3.0
+analysis_targets_r = [2.0, 3.0, 4.0, 6.0]
+horizon_bars = 120
+round_trip_cost_r = 0.03
+cooldown_bars = 20
+same_bar_policy = "stop_first"
+
+[walk_forward]
+train_months = 24
+validation_months = 3
+test_months = 3
+stride_months = 3
+embargo_bars = 1000
+threshold_percentile = 50.0
+max_fit_rows = 25000
+max_iter = 500
+class_weight = "balanced"
+
+[topstep]
+starting_balance = 100000.0
+profit_target = 6000.0
+mll_distance = 3000.0
+mll_lock_balance = 100000.0
+consistency_limit = 0.50
+consistency_comparator = "strict"
+max_mini_equivalents = 10.0
+contracts = 1
+minimum_trading_days = 2
+session_timezone = "America/Chicago"
+session_start_hour = 17
+session_end_hour = 15
+session_end_minute = 10
+daily_loss_limit_enabled = false
+daily_loss_limit = 2000.0
+
+[evaluation]
+allow_holdout = false
+holdout_unlock = "REVIEWED-ONE-TIME-HOLDOUT"
