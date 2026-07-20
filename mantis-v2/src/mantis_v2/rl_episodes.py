@@ -18,7 +18,7 @@ import pandas as pd
 from mantis_v2.downstream_config import DownstreamConfig, load_downstream_config
 from mantis_v2.rl_config import RlConfig
 from mantis_v2.rl_provenance import _build_manifest, sha256_file
-from mantis_v2.walk_forward import build_folds
+from mantis_v2.walk_forward import build_folds, fold_masks
 
 
 class EpisodeContractError(RuntimeError):
@@ -96,6 +96,9 @@ def _valid_windows(
         "lookback_start_ts",
         "terminal_ts",
         "session_complete",
+        "session_ordinal",
+        "rollover_safe",
+        "horizon_complete",
         "shard",
         "row",
     }
@@ -106,8 +109,6 @@ def _valid_windows(
         )
     if set(rows["symbol"].unique()) != {ticker}:
         raise EpisodeContractError(f"episode metadata does not match owning stream: {ticker}")
-    if not rows["session_complete"].map(lambda value: value is True).all():
-        raise EpisodeContractError(f"episode metadata contains a missing session: {ticker}")
     frame = rows.copy()
     for column in ("decision_ts", "label_end_ts", "lookback_start_ts", "terminal_ts"):
         frame[column] = pd.to_datetime(frame[column], utc=True, errors="raise")
@@ -141,6 +142,17 @@ def _valid_windows(
         if len(indices) == 0:
             continue
         selected_rows = owned.iloc[indices]
+        ordinals = (
+            selected_rows.groupby("session", sort=False)["session_ordinal"].first().to_numpy()
+        )
+        if len(ordinals) > 1 and not np.all(np.diff(ordinals) == 1):
+            continue
+        if not selected_rows["session_complete"].astype(bool).all():
+            continue
+        if not selected_rows["rollover_safe"].astype(bool).all():
+            continue
+        if not selected_rows["horizon_complete"].astype(bool).all():
+            continue
         windows.append(
             (
                 selected[0],
@@ -278,7 +290,12 @@ def _verified_path(identity: object, root: Path, label: str) -> Path:
 
 def _validate_corpus(
     config: RlConfig, downstream: DownstreamConfig, repository_root: Path
-) -> dict[tuple[str, str], np.ndarray]:
+) -> tuple[
+    dict[tuple[str, str], np.ndarray],
+    dict[str, set[date]],
+    dict[str, dict[date, int]],
+    dict[str, set[date]],
+]:
     path = config.upstream.corpus_manifest_path
     if not path.is_absolute():
         path = repository_root / path
@@ -288,6 +305,7 @@ def _validate_corpus(
     quality_rows = manifest.get("quality")
     if not isinstance(quality_rows, list):
         raise EpisodeContractError("corpus quality identity is invalid")
+    reviewed_roll_sessions: dict[str, set[date]] = {}
     for quality in quality_rows:
         if not isinstance(quality, dict):
             raise EpisodeContractError("corpus quality identity is invalid")
@@ -299,7 +317,18 @@ def _validate_corpus(
             "remaining_dislocations"
         ) != len(accepted_rolls) + len(accepted_same):
             raise EpisodeContractError("corpus contains an unreviewed rollover discontinuity")
+        symbol = str(quality.get("symbol"))
+        reviewed_roll_sessions[symbol] = {
+            _session_id(pd.Timestamp(str(event["timestamp"])))
+            for event in accepted_rolls
+            if isinstance(event, dict) and "timestamp" in event
+        }
     timestamps: dict[tuple[str, str], np.ndarray] = {}
+    rollover_sessions = {
+        symbol: set(reviewed_roll_sessions.get(symbol, set())) for symbol in downstream.data.symbols
+    }
+    session_ordinals: dict[str, dict[date, int]] = {}
+    complete_sessions: dict[str, set[date]] = {}
     outputs = manifest.get("outputs")
     if not isinstance(outputs, list):
         raise EpisodeContractError("corpus manifest has no outputs")
@@ -315,14 +344,34 @@ def _validate_corpus(
         if key not in wanted:
             continue
         stream_path = _verified_path(identity, path.parent, f"corpus stream {key[0]} {key[1]}")
-        frame = pd.read_parquet(stream_path, columns=[downstream.data.timestamp_column])
+        columns = [downstream.data.timestamp_column]
+        if key[1] == "3min":
+            columns.append("segment")
+        frame = pd.read_parquet(stream_path, columns=columns)
         values = pd.to_datetime(frame[downstream.data.timestamp_column], utc=True, errors="raise")
         if not values.is_monotonic_increasing or values.duplicated().any():
             raise EpisodeContractError(f"corpus stream is not chronological: {key[0]} {key[1]}")
         timestamps[key] = values.to_numpy()
+        if key[1] == "3min":
+            sessions = values.map(_session_id)
+            ordered_sessions = list(dict.fromkeys(sessions.tolist()))
+            session_ordinals[key[0]] = {
+                session: ordinal for ordinal, session in enumerate(ordered_sessions)
+            }
+            complete: set[date] = set()
+            for session, group in values.groupby(sessions):
+                gaps = group.sort_values().diff().dropna()
+                if len(group) >= 2 and (gaps.empty or gaps.max() <= pd.Timedelta("3min")):
+                    complete.add(session)
+            complete_sessions[key[0]] = complete
+            segments = frame["segment"].to_numpy()
+            changes = np.flatnonzero(segments[1:] != segments[:-1]) + 1
+            rollover_sessions[key[0]].update(
+                _session_id(pd.Timestamp(values.iloc[i])) for i in changes
+            )
     if set(timestamps) != wanted:
         raise EpisodeContractError("corpus manifest is missing an owned stream")
-    return timestamps
+    return timestamps, rollover_sessions, session_ordinals, complete_sessions
 
 
 def _load_embeddings(
@@ -330,6 +379,9 @@ def _load_embeddings(
     timestamps: Mapping[tuple[str, str], np.ndarray],
     downstream: DownstreamConfig,
     repository_root: Path,
+    rollover_sessions: Mapping[str, set[date]],
+    session_ordinals: Mapping[str, Mapping[date, int]],
+    complete_sessions: Mapping[str, set[date]],
 ) -> tuple[pd.DataFrame, list[dict[str, object]], int]:
     manifest_path = config.upstream.embedding_manifest_path
     if not manifest_path.is_absolute():
@@ -390,21 +442,31 @@ def _load_embeddings(
         nanos = np.minimum.reduce([values.asi8 for values in starts])
         lookbacks.loc[group.index] = pd.to_datetime(nanos, utc=True)
     metadata["lookback_start_ts"] = lookbacks
-    metadata["terminal_ts"] = pd.to_datetime(metadata["label_end_ts"], utc=True)
-    complete_sessions: dict[str, set[date]] = {}
-    for symbol in downstream.data.symbols:
-        bars = pd.Series(pd.to_datetime(timestamps[(symbol, "3min")], utc=True))
-        sessions = bars.map(_session_id)
-        complete: set[date] = set()
-        for session, group in bars.groupby(sessions):
-            gaps = group.sort_values().diff().dropna()
-            if gaps.empty or gaps.max() <= pd.Timedelta("63min"):
-                complete.add(session)
-        complete_sessions[symbol] = complete
+    terminal = pd.Series(pd.NaT, index=metadata.index, dtype="datetime64[ns, UTC]")
+    horizon_complete = pd.Series(False, index=metadata.index, dtype=bool)
+    for symbol, group in metadata.groupby("symbol", sort=False):
+        indices = group["3min_index"].to_numpy(dtype=np.int64) + int(config.exit.horizon_bars)
+        valid = indices < len(timestamps[(str(symbol), "3min")])
+        if np.any(valid):
+            terminal.loc[group.index[valid]] = pd.to_datetime(
+                timestamps[(str(symbol), "3min")][indices[valid]], utc=True
+            )
+        horizon_complete.loc[group.index] = valid
+    metadata["terminal_ts"] = terminal
+    sessions = [_session_id(pd.Timestamp(timestamp)) for timestamp in metadata["decision_ts"]]
     metadata["session_complete"] = [
-        _session_id(pd.Timestamp(timestamp)) in complete_sessions[str(symbol)]
-        for symbol, timestamp in zip(metadata["symbol"], metadata["decision_ts"], strict=True)
+        session in complete_sessions[str(symbol)]
+        for symbol, session in zip(metadata["symbol"], sessions, strict=True)
     ]
+    metadata["session_ordinal"] = [
+        session_ordinals[str(symbol)].get(session, -1)
+        for symbol, session in zip(metadata["symbol"], sessions, strict=True)
+    ]
+    metadata["rollover_safe"] = [
+        session not in rollover_sessions[str(symbol)]
+        for symbol, session in zip(metadata["symbol"], sessions, strict=True)
+    ]
+    metadata["horizon_complete"] = horizon_complete
     return metadata, output_records, width
 
 
@@ -451,8 +513,18 @@ def build_episode_manifest(
     if not downstream_path.is_absolute():
         downstream_path = root / downstream_path
     downstream = load_downstream_config(downstream_path)
-    timestamps = _validate_corpus(config, downstream, root)
-    metadata, embedding_outputs, width = _load_embeddings(config, timestamps, downstream, root)
+    timestamps, rollover_sessions, session_ordinals, complete_sessions = _validate_corpus(
+        config, downstream, root
+    )
+    metadata, embedding_outputs, width = _load_embeddings(
+        config,
+        timestamps,
+        downstream,
+        root,
+        rollover_sessions,
+        session_ordinals,
+        complete_sessions,
+    )
     folds = build_folds(metadata, downstream)
     if fold_number < 0 or fold_number >= len(folds):
         raise EpisodeContractError("fold number is out of range")
@@ -464,8 +536,13 @@ def build_episode_manifest(
     }
     start, end = boundaries[partition_name]
     partition = Partition(partition_name, start, end)
+    partition_masks = dict(
+        zip(("training", "validation", "test"), fold_masks(metadata, fold, downstream), strict=True)
+    )
+    owned_metadata = metadata.loc[partition_masks[partition_name]].copy()
     sources = {
-        symbol: metadata[metadata["symbol"] == symbol].copy() for symbol in downstream.data.symbols
+        symbol: owned_metadata[owned_metadata["symbol"] == symbol].copy()
+        for symbol in downstream.data.symbols
     }
     episodes = build_episode_schedule(
         sources,

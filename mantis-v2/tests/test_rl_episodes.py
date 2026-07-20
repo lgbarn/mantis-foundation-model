@@ -32,6 +32,9 @@ def _rows(symbol: str, first: str, sessions: int = 22) -> pd.DataFrame:
                 "lookback_start_ts": decision - timedelta(hours=1),
                 "terminal_ts": decision + timedelta(minutes=9),
                 "session_complete": True,
+                "session_ordinal": index,
+                "rollover_safe": True,
+                "horizon_complete": True,
                 "shard": index // 8,
                 "row": index % 8,
             }
@@ -111,8 +114,24 @@ def test_schedule_rejects_missing_session_before_sampling() -> None:
         end=pd.Timestamp("2025-03-01", tz="UTC"),
     )
 
-    with pytest.raises(EpisodeContractError, match="missing session"):
+    with pytest.raises(EpisodeContractError, match="no complete episode"):
         build_episode_schedule({"ES": rows}, partition, seed=5, episode_count=1)
+
+
+def test_schedule_does_not_bridge_absent_or_rollover_sessions() -> None:
+    partition = Partition(
+        name="training",
+        start=pd.Timestamp("2025-01-01", tz="UTC"),
+        end=pd.Timestamp("2025-06-01", tz="UTC"),
+    )
+    absent = _rows("ES", "2025-01-02").drop(index=10).reset_index(drop=True)
+    rollover = _rows("ES", "2025-01-02")
+    rollover["rollover_safe"] = False
+
+    with pytest.raises(EpisodeContractError, match="no complete episode"):
+        build_episode_schedule({"ES": absent}, partition, seed=5, episode_count=1)
+    with pytest.raises(EpisodeContractError, match="no complete episode"):
+        build_episode_schedule({"ES": rollover}, partition, seed=5, episode_count=1)
 
 
 def test_schedule_contains_complete_lookback_exit_and_terminal_horizons() -> None:
