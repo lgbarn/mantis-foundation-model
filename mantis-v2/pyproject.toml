@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Reproducible MantisV2 training pipeline"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+  "databento>=0.81,<1",
   "huggingface-hub>=0.23,<2",
   "mantis-tsfm==1.0.0",
   "numpy>=1.26,<3",

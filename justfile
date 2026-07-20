@@ -23,7 +23,7 @@ test:
 
 gate: format-check lint typecheck test smoke downstream-smoke
 
-inspect-data config="mantis-v2/configs/nextleg.toml":
+inspect-data config:
     uv run mantis-v2 inspect-data --config {{config}}
 
 smoke:
@@ -35,35 +35,41 @@ probe-mps:
 verify-upstream:
     uv run mantis-v2 verify-upstream --config mantis-v2/configs/nextleg.toml
 
-train config="mantis-v2/configs/nextleg.toml":
+repair-corpus config="mantis-v2/configs/corpus-repair-v1.toml":
+    uv run mantis-v2 repair-corpus --config {{config}}
+
+validate-corpus config="mantis-v2/configs/corpus-repair-v1.toml":
+    uv run mantis-v2 validate-corpus --config {{config}}
+
+train config:
     uv run mantis-v2 train --config {{config}}
 
-evaluate config="mantis-v2/configs/nextleg.toml":
+evaluate config:
     uv run mantis-v2 evaluate --config {{config}}
 
-export config="mantis-v2/configs/nextleg.toml":
+export config:
     uv run mantis-v2 export --config {{config}}
 
-validated-export config="mantis-v2/configs/nextleg.toml":
+validated-export config:
     uv run mantis-v2 validated-export --config {{config}}
 
-downstream-prepare config="mantis-v2/configs/supertrend-topstep-100k.toml":
+downstream-prepare config:
     uv run mantis-v2 downstream-prepare --config {{config}}
 
-downstream-embed config="mantis-v2/configs/supertrend-topstep-100k.toml":
+downstream-embed config:
     uv run mantis-v2 downstream-embed --config {{config}}
 
-downstream-walk-forward config="mantis-v2/configs/supertrend-topstep-100k.toml":
+downstream-walk-forward config:
     uv run mantis-v2 downstream-walk-forward --config {{config}}
 
-downstream-simulate config="mantis-v2/configs/supertrend-topstep-100k.toml":
+downstream-simulate config:
     uv run mantis-v2 downstream-simulate --config {{config}}
 
-downstream-run config="mantis-v2/configs/supertrend-topstep-100k.toml":
+downstream-run config:
     uv run mantis-v2 downstream-run --config {{config}}
 
 downstream-smoke:
     uv run mantis-v2 downstream-smoke --config mantis-v2/configs/downstream-smoke.toml
 
-downstream-holdout config="mantis-v2/configs/supertrend-topstep-100k.toml" unlock="":
+downstream-holdout config unlock="":
     uv run mantis-v2 downstream-holdout --config {{config}} --unlock {{unlock}}

@@ -82,6 +82,10 @@ def simulate_topstep(
         raise TopstepContractError("predictions contain non-finite simulation values")
     if ((frame["probability"] < 0) | (frame["probability"] > 1)).any():
         raise TopstepContractError("probabilities must be in [0, 1]")
+    exact_stop = -(1.0 + config.strategy.round_trip_cost_r)
+    stopped = np.isclose(frame["reward_r"], exact_stop, rtol=0.0, atol=1e-9)
+    if (stopped & (frame["mae_r"] < frame["reward_r"] - 1e-9)).any():
+        raise TopstepContractError("exact-stop MAE cannot be below the stopped outcome")
     frame = frame[frame["probability"] >= frame["threshold"]]
     frame = frame.sort_values(
         ["decision_ts", "probability", "symbol"], ascending=[True, False, True]
@@ -182,9 +186,10 @@ def simulate_topstep(
                 "account_status": status,
             }
         )
-    if current_day is not None and status == "active":
+    if current_day is not None:
         day_profit[current_day] = balance - day_start_balance
-        close_day(current_day)
+        if status == "active":
+            close_day(current_day)
     net_profit = balance - config.topstep.starting_balance
     best_day = max([value for value in day_profit.values() if value > 0], default=0.0)
     consistency = best_day / net_profit if net_profit > 0 else float("inf")

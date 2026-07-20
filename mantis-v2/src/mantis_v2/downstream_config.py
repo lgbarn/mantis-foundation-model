@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import tomllib
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -25,6 +26,9 @@ class DownstreamRunConfig:
 @dataclass(frozen=True)
 class DownstreamDataConfig:
     root: Path
+    file_format: Literal["csv", "parquet"]
+    corpus_manifest_path: Path | None
+    corpus_manifest_sha256: str
     symbols: tuple[str, ...]
     contract_multipliers: tuple[float, ...]
     timeframes: tuple[str, ...]
@@ -34,6 +38,7 @@ class DownstreamDataConfig:
     feature_columns: tuple[str, ...]
     context_bars: int
     holdout_start: datetime
+    max_relative_close_jump: float
 
 
 @dataclass(frozen=True)
@@ -185,6 +190,9 @@ _EXPECTED: dict[str, set[str]] = {
     "run": {"name", "seed", "artifact_root", "device", "allow_overwrite"},
     "data": {
         "root",
+        "file_format",
+        "corpus_manifest_path",
+        "corpus_manifest_sha256",
         "symbols",
         "contract_multipliers",
         "timeframes",
@@ -194,6 +202,7 @@ _EXPECTED: dict[str, set[str]] = {
         "feature_columns",
         "context_bars",
         "holdout_start",
+        "max_relative_close_jump",
     },
     "foundation": {
         "manifest_path",
@@ -258,6 +267,12 @@ _EXPECTED: dict[str, set[str]] = {
 }
 
 _OPTIONAL: dict[str, set[str]] = {
+    "data": {
+        "max_relative_close_jump",
+        "file_format",
+        "corpus_manifest_path",
+        "corpus_manifest_sha256",
+    },
     "walk_forward": {
         "solver",
         "regularization_c",
@@ -267,7 +282,7 @@ _OPTIONAL: dict[str, set[str]] = {
         "embed_manifest_sha256",
         "embed_producer_config_path",
         "embed_producer_config_sha256",
-    }
+    },
 }
 
 
@@ -291,9 +306,14 @@ def _int(value: Any, field: str, *, minimum: int = 0) -> int:
 
 
 def _float(value: Any, field: str, *, minimum: float = 0.0) -> float:
-    if not isinstance(value, int | float) or isinstance(value, bool) or float(value) < minimum:
+    if not isinstance(value, int | float) or isinstance(value, bool):
         raise ConfigError(f"{field} must be numeric and >= {minimum}")
-    return float(value)
+    result = float(value)
+    if not math.isfinite(result):
+        raise ConfigError(f"{field} must be finite")
+    if result < minimum:
+        raise ConfigError(f"{field} must be numeric and >= {minimum}")
+    return result
 
 
 def _bool(value: Any, field: str) -> bool:
@@ -381,6 +401,17 @@ def load_downstream_config(path: str | Path, overrides: tuple[str, ...] = ()) ->
         ),
         data=DownstreamDataConfig(
             root=Path(str(data["root"])),
+            file_format=_choice(
+                data.get("file_format", "csv"),
+                "data.file_format",
+                {"csv", "parquet"},
+            ),
+            corpus_manifest_path=(
+                Path(str(data["corpus_manifest_path"]))
+                if data.get("corpus_manifest_path")
+                else None
+            ),
+            corpus_manifest_sha256=str(data.get("corpus_manifest_sha256", "")),
             symbols=_strings(data["symbols"], "data.symbols"),
             contract_multipliers=_floats(data["contract_multipliers"], "data.contract_multipliers"),
             timeframes=_strings(data["timeframes"], "data.timeframes"),
@@ -394,6 +425,11 @@ def load_downstream_config(path: str | Path, overrides: tuple[str, ...] = ()) ->
             feature_columns=_strings(data["feature_columns"], "data.feature_columns"),
             context_bars=_int(data["context_bars"], "data.context_bars", minimum=2),
             holdout_start=_timestamp(data["holdout_start"], "data.holdout_start"),
+            max_relative_close_jump=_float(
+                data.get("max_relative_close_jump", 0.05),
+                "data.max_relative_close_jump",
+                minimum=1e-12,
+            ),
         ),
         foundation=FoundationConfig(
             manifest_path=Path(str(foundation["manifest_path"])),
@@ -532,6 +568,15 @@ def load_downstream_config(path: str | Path, overrides: tuple[str, ...] = ()) ->
 
 
 def _validate(config: DownstreamConfig) -> None:
+    has_manifest_path = config.data.corpus_manifest_path is not None
+    has_manifest_sha = bool(config.data.corpus_manifest_sha256)
+    if config.data.file_format == "parquet":
+        if not has_manifest_path or len(config.data.corpus_manifest_sha256) != 64:
+            raise ConfigError(
+                "Parquet data requires data.corpus_manifest_path and a full SHA-256 digest"
+            )
+    elif has_manifest_path or has_manifest_sha:
+        raise ConfigError("CSV and synthetic data cannot bind a Parquet corpus manifest")
     if config.data.timeframes != ("1min", "3min", "15min"):
         raise ConfigError("data.timeframes must be ordered exactly as 1min, 3min, 15min")
     if config.data.decision_timeframe != "3min":

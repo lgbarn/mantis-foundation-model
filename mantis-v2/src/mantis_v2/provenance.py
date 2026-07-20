@@ -33,6 +33,7 @@ class Provenance:
     upstream_source_revision: str
     upstream_hub_revision: str
     upstream_weights_sha256: str
+    contamination_digest: str
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -92,7 +93,11 @@ def _source_digest(root: Path) -> str:
     return digest.hexdigest()
 
 
-def build_provenance(config: PipelineConfig, repository_root: Path) -> Provenance:
+def build_provenance(
+    config: PipelineConfig,
+    repository_root: Path,
+    contamination: dict[str, object],
+) -> Provenance:
     dataset_digest, files = dataset_identity(config)
     source_revision, source_dirty = _git_state(repository_root)
     lock_path = repository_root / "uv.lock"
@@ -110,4 +115,5 @@ def build_provenance(config: PipelineConfig, repository_root: Path) -> Provenanc
         upstream_source_revision=config.model.source_revision,
         upstream_hub_revision=config.model.hub_revision,
         upstream_weights_sha256=config.model.weights_sha256,
+        contamination_digest=str(contamination["digest"]),
     )

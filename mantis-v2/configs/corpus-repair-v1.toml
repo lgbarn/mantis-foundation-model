@@ -1,0 +1,29 @@
+[corpus]
+corpus_id = "MANTIS_NEXTLEG_PARQUET_V1"
+output_root = "/Volumes/Storage/trading-research/data"
+symbols = ["ES", "NQ", "RTY", "YM", "GC", "SI", "CL", "ZB", "ZN"]
+timeframes = ["1min", "3min", "5min", "15min"]
+start = "2021-07-14T00:00:00+00:00"
+end = "2026-07-14T00:00:00+00:00"
+roll_confirmation_sessions = 2
+session_timezone = "America/Chicago"
+session_start_hour = 17
+adjustment = "ratio_back_adjusted"
+max_relative_price_dislocation = 0.05
+accepted_dislocations = []
+allow_overwrite = false
+
+[[sources]]
+path = "/Volumes/Storage/trading-research/data/FFM_NEXTLEG_RAW/es/glbx-mdp3-20210714-20260713.ohlcv-1m.dbn.zst"
+sha256 = "d06bb609e2feaf84132cd66a79f2c075492c1302d92ee9ca6877b3c7640a95d9"
+symbols = ["ES"]
+
+[[sources]]
+path = "/Volumes/Storage/trading-research/data/FFM_NEXTLEG_RAW/nq/glbx-mdp3-20210714-20260713.ohlcv-1m.dbn.zst"
+sha256 = "f31b6000f0726a0cb96b926e296ca034bcc087c77aa0d9556980e7a171e08b88"
+symbols = ["NQ"]
+
+[[sources]]
+path = "/Volumes/Storage/trading-research/data/FFM_NEXTLEG_RAW/multi7/glbx-mdp3-20210714-20260713.ohlcv-1m.dbn.zst"
+sha256 = "f73b379bf353cf6f9ffa4be1a6dd1b6d4e618f4e4b51eb20daf2badf2b91b0aa"
+symbols = ["RTY", "YM", "GC", "SI", "CL", "ZB", "ZN"]

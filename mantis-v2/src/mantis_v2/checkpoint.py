@@ -83,6 +83,7 @@ def load_checkpoint(
             "upstream_source_revision",
             "upstream_hub_revision",
             "upstream_weights_sha256",
+            "contamination_digest",
         ):
             if not isinstance(recorded, dict) or recorded.get(key) != expected[key]:
                 raise CheckpointError(f"checkpoint provenance mismatch: {key}")

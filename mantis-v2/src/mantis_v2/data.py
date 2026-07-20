@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC
 from pathlib import Path
 from typing import Literal
@@ -15,6 +15,13 @@ from torch.nn import functional as F
 from torch.utils.data import Dataset
 
 from mantis_v2.config import DataConfig, ModelConfig, TargetConfig
+from mantis_v2.contamination import (
+    Discontinuity,
+    detect_discontinuities,
+    report_digest,
+    stream_report,
+)
+from mantis_v2.corpus import CorpusRepairError, validate_corpus_binding
 
 Split = Literal["train", "validation", "holdout"]
 
@@ -28,6 +35,8 @@ class Stream:
     name: str
     timestamps: np.ndarray
     values: np.ndarray
+    discontinuities: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=bool))
+    discontinuity_events: tuple[Discontinuity, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -53,15 +62,33 @@ def discover_paths(config: DataConfig) -> list[Path]:
     root = Path(config.root)
     if not root.is_dir():
         raise DataContractError(f"data root does not exist: {root}")
+    extension = config.file_format
     paths = [
-        root / f"{symbol}_{interval}.csv"
+        root / f"{symbol}_{interval}.{extension}"
         for symbol in config.symbols
         for interval in config.intervals
     ]
     missing = [str(path) for path in paths if not path.is_file()]
     if missing:
         raise DataContractError("missing configured streams: " + ", ".join(missing))
+    if config.file_format == "parquet":
+        assert config.corpus_manifest_path is not None
+        try:
+            validate_corpus_binding(
+                root,
+                config.corpus_manifest_path,
+                config.corpus_manifest_sha256,
+                paths,
+            )
+        except CorpusRepairError as exc:
+            raise DataContractError(str(exc)) from exc
     return paths
+
+
+def _read_columns(path: Path, columns: list[str], file_format: str) -> pd.DataFrame:
+    if file_format == "parquet":
+        return pd.read_parquet(path, columns=columns)
+    return pd.read_csv(path, usecols=columns)
 
 
 def inspect_streams(config: DataConfig) -> list[StreamSummary]:
@@ -71,7 +98,7 @@ def inspect_streams(config: DataConfig) -> list[StreamSummary]:
         return [_summarize(stream)]
     summaries: list[StreamSummary] = []
     for path in discover_paths(config):
-        frame = pd.read_csv(path, usecols=[config.timestamp_column])
+        frame = _read_columns(path, [config.timestamp_column], config.file_format)
         if frame.empty:
             raise DataContractError(f"empty stream: {path}")
         timestamps = pd.to_datetime(frame[config.timestamp_column], utc=True, errors="raise")
@@ -95,7 +122,8 @@ def load_streams(config: DataConfig) -> list[Stream]:
     required = [config.timestamp_column, *config.feature_columns]
     streams: list[Stream] = []
     for path in discover_paths(config):
-        frame = pd.read_csv(path, usecols=required)
+        columns = [*required, "quality_flag"] if config.file_format == "parquet" else required
+        frame = _read_columns(path, columns, config.file_format)
         if frame.empty:
             raise DataContractError(f"empty stream: {path}")
         timestamps = pd.to_datetime(frame[config.timestamp_column], utc=True, errors="raise")
@@ -104,11 +132,20 @@ def load_streams(config: DataConfig) -> list[Stream]:
         values = frame.loc[:, config.feature_columns].to_numpy(dtype=np.float32, copy=True)
         if not np.isfinite(values).all():
             raise DataContractError(f"non-finite feature value: {path}")
+        boundaries, events = detect_discontinuities(
+            timestamps.to_numpy(dtype="datetime64[ns]"),
+            values[:, [1, 2, 3]],
+            config.max_relative_close_jump,
+        )
+        if config.file_format == "parquet":
+            boundaries |= frame["quality_flag"].to_numpy(dtype=bool)
         streams.append(
             Stream(
                 name=path.stem,
                 timestamps=timestamps.to_numpy(dtype="datetime64[ns]"),
                 values=values,
+                discontinuities=boundaries,
+                discontinuity_events=events,
             )
         )
     return streams
@@ -135,6 +172,17 @@ def _summarize(stream: Stream) -> StreamSummary:
         first_timestamp=str(stream.timestamps[0]),
         last_timestamp=str(stream.timestamps[-1]),
     )
+
+
+def contamination_report(streams: list[Stream], config: DataConfig) -> dict[str, object]:
+    """Return the canonical detector report bound into training provenance."""
+    report: dict[str, object] = {
+        "schema_version": 1,
+        "max_relative_close_jump": config.max_relative_close_jump,
+        "streams": [stream_report(stream.name, stream.discontinuity_events) for stream in streams],
+    }
+    report["digest"] = report_digest(report)
+    return report
 
 
 def split_bounds(stream: Stream, config: DataConfig, split: Split) -> tuple[int, int]:
@@ -192,21 +240,44 @@ def build_anchors(
     anchors: list[Anchor] = []
     for stream_index, stream in enumerate(streams):
         start, end = split_bounds(stream, data, split)
-        origins, confirmations, _ = alternating_pivots(stream.values, target.leg_k)
-        for index in range(len(origins) - 2):
-            confirmation = int(confirmations[index])
-            first_leg = int(origins[index + 1] - confirmation)
-            second_leg = int(origins[index + 2] - origins[index + 1])
-            complete_future = int(origins[index + 2])
-            if first_leg <= 0 or second_leg <= 0:
-                continue
-            if first_leg > target.leg_cap or second_leg > target.leg_cap:
-                continue
-            if confirmation - max_context + 1 < start:
-                continue
-            if max(complete_future, confirmation + max_horizon) >= end:
-                continue
-            anchors.append(Anchor(stream_index, confirmation, first_leg, second_leg))
+        boundaries = (
+            np.flatnonzero(stream.discontinuities).astype(np.int64)
+            if len(stream.discontinuities)
+            else np.array([], dtype=np.int64)
+        )
+        cuts: list[tuple[int, int]] = []
+        segment_start = 0
+        for boundary in boundaries:
+            if segment_start < boundary:
+                cuts.append((segment_start, int(boundary)))
+            segment_start = int(boundary) + 1
+        if segment_start < len(stream.values):
+            cuts.append((segment_start, len(stream.values)))
+        for segment_start, segment_end in cuts:
+            segment_values = (
+                stream.values
+                if segment_start == 0 and segment_end == len(stream.values)
+                else stream.values[segment_start:segment_end]
+            )
+            origins, confirmations, _ = alternating_pivots(segment_values, target.leg_k)
+            origins += segment_start
+            confirmations += segment_start
+            legal_start = max(start, int(segment_start))
+            legal_end = min(end, int(segment_end))
+            for index in range(len(origins) - 2):
+                confirmation = int(confirmations[index])
+                first_leg = int(origins[index + 1] - confirmation)
+                second_leg = int(origins[index + 2] - origins[index + 1])
+                complete_future = int(origins[index + 2])
+                if first_leg <= 0 or second_leg <= 0:
+                    continue
+                if first_leg > target.leg_cap or second_leg > target.leg_cap:
+                    continue
+                if confirmation - max_context + 1 < legal_start:
+                    continue
+                if max(complete_future, confirmation + max_horizon) >= legal_end:
+                    continue
+                anchors.append(Anchor(stream_index, confirmation, first_leg, second_leg))
     return anchors
 
 

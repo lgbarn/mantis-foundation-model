@@ -15,6 +15,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from mantis_v2.contamination import report_digest
 from mantis_v2.downstream_config import DownstreamConfig, load_downstream_config
 from mantis_v2.embedding import iter_symbol_embeddings, load_foundation
 from mantis_v2.model import sha256_file
@@ -175,9 +176,13 @@ def prepare(config: DownstreamConfig) -> dict[str, Any]:
         for timeframe in config.data.timeframes
     ]
     outputs: list[dict[str, Any]] = []
+    contamination_by_symbol: list[dict[str, Any]] = []
     total_rows = 0
     for symbol in config.data.symbols:
         candidates = build_symbol_candidates(config, symbol)
+        contamination_by_symbol.append(
+            {"symbol": symbol, **dict(candidates.attrs.get("contamination", {}))}
+        )
         candidates = candidates.loc[~candidates["is_holdout"]].reset_index(drop=True)
         if candidates.empty:
             raise DownstreamPipelineError(f"no pre-holdout candidates for {symbol}")
@@ -188,6 +193,14 @@ def prepare(config: DownstreamConfig) -> dict[str, Any]:
         identity["rows"] = len(candidates)
         outputs.append(identity)
         total_rows += len(candidates)
+    contamination: dict[str, Any] = {
+        "schema_version": 1,
+        "max_relative_close_jump": config.data.max_relative_close_jump,
+        "symbols": contamination_by_symbol,
+    }
+    contamination["digest"] = report_digest(contamination)
+    contamination_path = stage_root / "contamination.json"
+    _atomic_json(contamination_path, contamination)
     manifest = {
         **_manifest_base(config, "prepare"),
         "inputs": inputs,
@@ -195,6 +208,8 @@ def prepare(config: DownstreamConfig) -> dict[str, Any]:
         "rows": total_rows,
         "candidate_semantics": "every_eligible_3min_supertrend_state_bar",
         "holdout_locked": not config.evaluation.allow_holdout,
+        "contamination": _file_identity(contamination_path),
+        "contamination_digest": contamination["digest"],
     }
     _atomic_json(manifest_path, manifest)
     return manifest

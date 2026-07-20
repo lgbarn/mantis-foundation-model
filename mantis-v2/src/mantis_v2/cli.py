@@ -12,6 +12,8 @@ from typing import Any
 
 from mantis_v2.checkpoint import CheckpointError
 from mantis_v2.config import ConfigError, PipelineConfig, load_config
+from mantis_v2.corpus import CorpusRepairError, repair_corpus, validate_corpus
+from mantis_v2.corpus_config import load_corpus_repair_config
 from mantis_v2.data import DataContractError, inspect_streams
 from mantis_v2.downstream_config import DownstreamConfig, load_downstream_config
 from mantis_v2.downstream_pipeline import (
@@ -42,7 +44,7 @@ from mantis_v2.embedding import EmbeddingContractError
 from mantis_v2.model import ModelContractError
 from mantis_v2.pipeline import (
     PipelineError,
-    anchor_counts,
+    data_audit,
     evaluate,
     export,
     probe,
@@ -65,6 +67,7 @@ _DOWNSTREAM_COMMANDS = {
     "downstream-holdout",
     "downstream-smoke",
 }
+_CORPUS_COMMANDS = {"repair-corpus", "validate-corpus"}
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -79,6 +82,7 @@ def _parser() -> argparse.ArgumentParser:
         "smoke",
         "probe",
         "verify-upstream",
+        *_CORPUS_COMMANDS,
         *_DOWNSTREAM_COMMANDS,
     ):
         child = subparsers.add_parser(command)
@@ -98,11 +102,12 @@ def _parser() -> argparse.ArgumentParser:
 
 def _inspect(config: PipelineConfig) -> dict[str, Any]:
     summaries = [asdict(summary) for summary in inspect_streams(config.data)]
+    audit = data_audit(config)
     return {
         "root": config.data.root,
         "configured_streams": len(config.data.symbols) * len(config.data.intervals),
         "streams": summaries,
-        "anchors": anchor_counts(config),
+        **audit,
     }
 
 
@@ -119,7 +124,18 @@ def main() -> None:
         "verify-upstream": verify_upstream,
     }
     try:
-        if args.command in _DOWNSTREAM_COMMANDS:
+        if args.command in _CORPUS_COMMANDS:
+            corpus_config = load_corpus_repair_config(args.config)
+            if args.command == "repair-corpus":
+                manifest = repair_corpus(corpus_config)
+                result = {
+                    "output": corpus_config.output_path,
+                    "quality": manifest["quality"],
+                    **validate_corpus(corpus_config.output_path),
+                }
+            else:
+                result = validate_corpus(corpus_config.output_path)
+        elif args.command in _DOWNSTREAM_COMMANDS:
             downstream_config: DownstreamConfig = load_downstream_config(
                 args.config, tuple(args.set)
             )
@@ -141,6 +157,7 @@ def main() -> None:
     except (
         CheckpointError,
         ConfigError,
+        CorpusRepairError,
         DataContractError,
         ModelContractError,
         PipelineError,

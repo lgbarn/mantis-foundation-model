@@ -9,6 +9,8 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
+from mantis_v2.contamination import detect_discontinuities, stream_report
+from mantis_v2.corpus import CorpusRepairError, validate_corpus_binding
 from mantis_v2.downstream_config import DownstreamConfig
 
 
@@ -20,7 +22,7 @@ _TIMEFRAME_MINUTES = {"1min": 1, "3min": 3, "15min": 15}
 
 
 def market_path(config: DownstreamConfig, symbol: str, timeframe: str) -> Path:
-    return config.data.root / f"{symbol}_{timeframe}.csv"
+    return config.data.root / f"{symbol}_{timeframe}.{config.data.file_format}"
 
 
 def load_market_frame(config: DownstreamConfig, symbol: str, timeframe: str) -> pd.DataFrame:
@@ -28,8 +30,25 @@ def load_market_frame(config: DownstreamConfig, symbol: str, timeframe: str) -> 
     path = market_path(config, symbol, timeframe)
     if not path.is_file():
         raise StrategyContractError(f"missing configured stream: {path}")
+    if config.data.file_format == "parquet":
+        assert config.data.corpus_manifest_path is not None
+        try:
+            validate_corpus_binding(
+                config.data.root,
+                config.data.corpus_manifest_path,
+                config.data.corpus_manifest_sha256,
+                [path],
+            )
+        except CorpusRepairError as exc:
+            raise StrategyContractError(str(exc)) from exc
     columns = [config.data.timestamp_column, *config.data.feature_columns]
-    frame = pd.read_csv(path, usecols=columns)
+    if config.data.file_format == "parquet":
+        columns.append("quality_flag")
+    frame = (
+        pd.read_parquet(path, columns=columns)
+        if config.data.file_format == "parquet"
+        else pd.read_csv(path, usecols=columns)
+    )
     if frame.empty:
         raise StrategyContractError(f"empty stream: {path}")
     timestamp = pd.to_datetime(frame[config.data.timestamp_column], utc=True, errors="raise")
@@ -38,13 +57,50 @@ def load_market_frame(config: DownstreamConfig, symbol: str, timeframe: str) -> 
     values = frame.loc[:, config.data.feature_columns].to_numpy(dtype=np.float64, copy=False)
     if not np.isfinite(values).all():
         raise StrategyContractError(f"non-finite OHLCV value: {path}")
+    quality_flag = (
+        frame["quality_flag"].to_numpy(dtype=bool)
+        if config.data.file_format == "parquet"
+        else np.zeros(len(frame), dtype=bool)
+    )
     frame = frame.loc[:, config.data.feature_columns].astype(np.float64)
     frame.insert(0, "timestamp", timestamp)
     close_timestamp = timestamp
     if config.data.timestamp_semantics == "bar_open":
-        close_timestamp = timestamp + pd.Timedelta(minutes=_TIMEFRAME_MINUTES[timeframe])
+        close_timestamp = timestamp + np.timedelta64(_TIMEFRAME_MINUTES[timeframe], "m")
     frame.insert(1, "close_timestamp", close_timestamp)
+    boundaries, events = detect_discontinuities(
+        timestamp.to_numpy(dtype="datetime64[ns]"),
+        frame[["high", "low", "close"]].to_numpy(dtype=np.float64),
+        config.data.max_relative_close_jump,
+    )
+    boundaries |= quality_flag
+    frame["_discontinuity"] = boundaries
+    frame.attrs["contamination"] = stream_report(f"{symbol}_{timeframe}", events)
     return frame
+
+
+def _segments(frame: pd.DataFrame) -> list[tuple[int, int]]:
+    if "_discontinuity" not in frame:
+        return [(0, len(frame))]
+    boundaries = np.flatnonzero(frame["_discontinuity"].to_numpy(dtype=bool))
+    segments: list[tuple[int, int]] = []
+    start = 0
+    for boundary in boundaries:
+        if start < boundary:
+            segments.append((start, int(boundary)))
+        start = int(boundary) + 1
+    if start < len(frame):
+        segments.append((start, len(frame)))
+    return segments
+
+
+def _range_crosses_boundary(
+    frame: pd.DataFrame, starts: np.ndarray, ends: np.ndarray
+) -> np.ndarray:
+    if "_discontinuity" not in frame:
+        return np.zeros(len(starts), dtype=bool)
+    prefix = np.concatenate(([0], np.cumsum(frame["_discontinuity"].to_numpy(dtype=np.int64))))
+    return np.asarray((prefix[ends + 1] - prefix[starts]) > 0, dtype=bool)
 
 
 def wilder_atr(frame: pd.DataFrame, period: int) -> np.ndarray:
@@ -52,14 +108,22 @@ def wilder_atr(frame: pd.DataFrame, period: int) -> np.ndarray:
     high = frame["high"].to_numpy(dtype=np.float64)
     low = frame["low"].to_numpy(dtype=np.float64)
     close = frame["close"].to_numpy(dtype=np.float64)
-    previous = np.concatenate(([close[0]], close[:-1]))
-    true_range = np.maximum(high - low, np.maximum(np.abs(high - previous), np.abs(low - previous)))
     atr = np.full(len(frame), np.nan, dtype=np.float64)
-    if len(frame) < period:
-        return atr
-    atr[period - 1] = true_range[:period].mean()
-    for index in range(period, len(frame)):
-        atr[index] = (atr[index - 1] * (period - 1) + true_range[index]) / period
+    for start, end in _segments(frame):
+        if end - start < period:
+            continue
+        segment_high = high[start:end]
+        segment_low = low[start:end]
+        segment_close = close[start:end]
+        previous = np.concatenate(([segment_close[0]], segment_close[:-1]))
+        true_range = np.maximum(
+            segment_high - segment_low,
+            np.maximum(np.abs(segment_high - previous), np.abs(segment_low - previous)),
+        )
+        atr[start + period - 1] = true_range[:period].mean()
+        for index in range(start + period, end):
+            local = index - start
+            atr[index] = (atr[index - 1] * (period - 1) + true_range[local]) / period
     return atr
 
 
@@ -75,22 +139,24 @@ def supertrend_state(frame: pd.DataFrame, period: int, multiplier: float) -> np.
     final_upper = upper.copy()
     final_lower = lower.copy()
     direction = np.zeros(len(frame), dtype=np.int8)
-    if len(frame) < period:
-        return direction
-    direction[period - 1] = 1
-    for index in range(period, len(frame)):
-        if upper[index] < final_upper[index - 1] or close[index - 1] > final_upper[index - 1]:
-            final_upper[index] = upper[index]
-        else:
-            final_upper[index] = final_upper[index - 1]
-        if lower[index] > final_lower[index - 1] or close[index - 1] < final_lower[index - 1]:
-            final_lower[index] = lower[index]
-        else:
-            final_lower[index] = final_lower[index - 1]
-        if direction[index - 1] > 0:
-            direction[index] = -1 if close[index] < final_lower[index] else 1
-        else:
-            direction[index] = 1 if close[index] > final_upper[index] else -1
+    for start, end in _segments(frame):
+        if end - start < period:
+            continue
+        first = start + period - 1
+        direction[first] = 1
+        for index in range(first + 1, end):
+            if upper[index] < final_upper[index - 1] or close[index - 1] > final_upper[index - 1]:
+                final_upper[index] = upper[index]
+            else:
+                final_upper[index] = final_upper[index - 1]
+            if lower[index] > final_lower[index - 1] or close[index - 1] < final_lower[index - 1]:
+                final_lower[index] = lower[index]
+            else:
+                final_lower[index] = final_lower[index - 1]
+            if direction[index - 1] > 0:
+                direction[index] = -1 if close[index] < final_lower[index] else 1
+            else:
+                direction[index] = 1 if close[index] > final_upper[index] else -1
     return direction
 
 
@@ -151,6 +217,7 @@ def _label_chunk(
     )
     before_exit = offsets[None, :] <= exit_offset[:, None]
     mae_r = np.where(before_exit, path_r, np.inf).min(axis=1) - cost_r
+    mae_r = np.where(stopped, np.maximum(mae_r, reward_r), mae_r)
     return won.astype(np.int8), reward_r, exit_price, entry_indices + exit_offset, mae_r
 
 
@@ -213,6 +280,14 @@ def build_symbol_candidates(
         & (direction != 0)
         & np.logical_and.reduce([indices >= 0 for indices in aligned.values()])
     ]
+    before_context_filter = len(legal)
+    clean_context = np.ones(len(legal), dtype=bool)
+    for timeframe, frame in frames.items():
+        context_end = aligned[timeframe][legal]
+        context_start = context_end - config.data.context_bars + 1
+        clean_context &= ~_range_crosses_boundary(frame, context_start, context_end)
+    legal = legal[clean_context]
+    excluded_context = before_context_filter - len(legal)
     holdout_start = (
         pd.Timestamp(config.data.holdout_start).tz_convert("UTC").tz_localize(None).to_datetime64()
     )
@@ -236,6 +311,12 @@ def build_symbol_candidates(
     valid_session = effective_horizons > 0
     legal = legal[valid_session]
     effective_horizons = effective_horizons[valid_session]
+    entry_indices = legal + 1
+    label_end_indices = entry_indices + effective_horizons - 1
+    clean_label = ~_range_crosses_boundary(decision, legal, label_end_indices)
+    excluded_label = int((~clean_label).sum())
+    legal = legal[clean_label]
+    effective_horizons = effective_horizons[clean_label]
     if not len(legal):
         raise StrategyContractError(f"no legal candidates for {symbol}")
     labels: list[np.ndarray] = []
@@ -280,7 +361,9 @@ def build_symbol_candidates(
             target_labels.append(target_result[0])
     exit_index = np.concatenate(exit_indices)
     entry_index = legal + 1
-    entry_timestamp = entry_timestamps[valid_session].to_numpy()
+    entry_timestamp = decision["timestamp"].iloc[entry_index].to_numpy()
+    if config.data.timestamp_semantics == "bar_close":
+        entry_timestamp = decision["close_timestamp"].iloc[legal].to_numpy()
     output = pd.DataFrame(
         {
             "symbol": symbol,
@@ -303,4 +386,14 @@ def build_symbol_candidates(
     for target, labels_for_target in analysis_labels.items():
         output[f"label_target_{target:g}r"] = np.concatenate(labels_for_target)
     output["is_holdout"] = output["decision_ts"] >= pd.Timestamp(config.data.holdout_start)
+    output.attrs["contamination"] = {
+        "streams": [
+            frame.attrs.get(
+                "contamination", {"stream": f"{symbol}_{timeframe}", "count": 0, "events": []}
+            )
+            for timeframe, frame in frames.items()
+        ],
+        "excluded_context_candidates": excluded_context,
+        "excluded_label_candidates": excluded_label,
+    }
     return output

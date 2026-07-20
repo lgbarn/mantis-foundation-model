@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pytest
 import torch
 from mantis_v2.checkpoint import CheckpointError, load_checkpoint, save_checkpoint
 from mantis_v2.provenance import FileIdentity, Provenance
@@ -25,6 +26,7 @@ def provenance() -> Provenance:
         upstream_source_revision="upstream",
         upstream_hub_revision="hub",
         upstream_weights_sha256="weights",
+        contamination_digest="contamination",
     )
 
 
@@ -67,6 +69,10 @@ def test_checkpoint_restores_training_state_and_rejects_stale_data(tmp_path: Pat
         assert "dataset_digest" in str(exc)
     else:
         raise AssertionError("stale dataset provenance was accepted")
+
+    stale_contamination = replace(provenance(), contamination_digest="changed")
+    with pytest.raises(CheckpointError, match="contamination_digest"):
+        load_checkpoint(path, model, optimizer, stale_contamination)
 
 
 class UnsafeCheckpoint:

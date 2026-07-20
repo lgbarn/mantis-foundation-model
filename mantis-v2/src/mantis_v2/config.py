@@ -33,6 +33,9 @@ class RunConfig:
 @dataclass(frozen=True)
 class DataConfig:
     root: str
+    file_format: Literal["csv", "parquet"]
+    corpus_manifest_path: Path | None
+    corpus_manifest_sha256: str
     symbols: tuple[str, ...]
     intervals: tuple[str, ...]
     timestamp_column: str
@@ -41,6 +44,7 @@ class DataConfig:
     validation_fraction: float
     context_lengths: tuple[int, ...]
     target_reserve: int
+    max_relative_close_jump: float
 
 
 @dataclass(frozen=True)
@@ -160,6 +164,8 @@ def _number(value: Any, field: str, *, minimum: float = 0.0) -> float:
     if not isinstance(value, int | float) or isinstance(value, bool):
         raise ConfigError(f"{field} must be numeric")
     result = float(value)
+    if not math.isfinite(result):
+        raise ConfigError(f"{field} must be finite")
     if result < minimum:
         raise ConfigError(f"{field} must be >= {minimum}")
     return result
@@ -217,21 +223,28 @@ def load_config(path: str | Path) -> PipelineConfig:
         "run",
         {"name", "seed", "artifact_root", "device", "require_accelerator", "allow_overwrite"},
     )
-    data = _section(
-        raw,
-        "data",
-        {
-            "root",
-            "symbols",
-            "intervals",
-            "timestamp_column",
-            "feature_columns",
-            "holdout_start",
-            "validation_fraction",
-            "context_lengths",
-            "target_reserve",
-        },
-    )
+    data_expected = {
+        "root",
+        "file_format",
+        "corpus_manifest_path",
+        "corpus_manifest_sha256",
+        "symbols",
+        "intervals",
+        "timestamp_column",
+        "feature_columns",
+        "holdout_start",
+        "validation_fraction",
+        "context_lengths",
+        "target_reserve",
+        "max_relative_close_jump",
+    }
+    data_raw = raw.get("data")
+    if isinstance(data_raw, dict):
+        data_raw.setdefault("max_relative_close_jump", 0.05)
+        data_raw.setdefault("file_format", "csv")
+        data_raw.setdefault("corpus_manifest_path", "")
+        data_raw.setdefault("corpus_manifest_sha256", "")
+    data = _section(raw, "data", data_expected)
     model = _section(
         raw,
         "model",
@@ -305,6 +318,11 @@ def load_config(path: str | Path) -> PipelineConfig:
         ),
         data=DataConfig(
             root=str(data["root"]),
+            file_format=_choice(data["file_format"], "data.file_format", {"csv", "parquet"}),  # type: ignore[arg-type]
+            corpus_manifest_path=(
+                Path(str(data["corpus_manifest_path"])) if data["corpus_manifest_path"] else None
+            ),
+            corpus_manifest_sha256=str(data["corpus_manifest_sha256"]),
             symbols=_tuple_of(data["symbols"], str, "data.symbols"),
             intervals=_tuple_of(data["intervals"], str, "data.intervals"),
             timestamp_column=str(data["timestamp_column"]),
@@ -313,6 +331,11 @@ def load_config(path: str | Path) -> PipelineConfig:
             validation_fraction=validation_fraction,
             context_lengths=_tuple_of(data["context_lengths"], int, "data.context_lengths"),
             target_reserve=_positive(data["target_reserve"], "data.target_reserve"),
+            max_relative_close_jump=_number(
+                data["max_relative_close_jump"],
+                "data.max_relative_close_jump",
+                minimum=1e-12,
+            ),
         ),
         model=ModelConfig(
             source_repository=str(model["source_repository"]),
@@ -402,6 +425,15 @@ def load_config(path: str | Path) -> PipelineConfig:
 
 
 def _validate_cross_fields(config: PipelineConfig) -> None:
+    has_manifest_path = config.data.corpus_manifest_path is not None
+    has_manifest_sha = bool(config.data.corpus_manifest_sha256)
+    if config.data.file_format == "parquet":
+        if not has_manifest_path or len(config.data.corpus_manifest_sha256) != 64:
+            raise ConfigError(
+                "Parquet data requires data.corpus_manifest_path and a full SHA-256 digest"
+            )
+    elif has_manifest_path or has_manifest_sha:
+        raise ConfigError("CSV and synthetic data cannot bind a Parquet corpus manifest")
     if len(config.model.source_revision) != 40 or len(config.model.hub_revision) != 40:
         raise ConfigError("model source and Hub revisions must be full 40-character commits")
     if len(config.model.weights_sha256) != 64:

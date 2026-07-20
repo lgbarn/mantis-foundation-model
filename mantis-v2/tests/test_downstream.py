@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 from mantis_v2 import strategy as strategy_module
 from mantis_v2.config import ConfigError
+from mantis_v2.corpus import _json_digest, _write_frame
 from mantis_v2.downstream_config import DownstreamConfig, load_downstream_config
 from mantis_v2.downstream_pipeline import (
     DownstreamPipelineError,
@@ -27,6 +28,7 @@ from mantis_v2.strategy import (
     _label_chunk,
     build_symbol_candidates,
     causal_context_indices,
+    load_market_frame,
     supertrend_state,
 )
 from mantis_v2.topstep import TopstepContractError, simulate_topstep
@@ -62,6 +64,20 @@ def test_downstream_config_is_strict_and_supports_recorded_overrides() -> None:
             CONFIG,
             ('walk_forward.embed_manifest_path="/tmp/embed.json"',),
         )
+
+
+@pytest.mark.parametrize("value", ["nan", "inf"])
+def test_downstream_config_rejects_non_finite_discontinuity_threshold(
+    tmp_path: Path, value: str
+) -> None:
+    source = CONFIG.read_text().replace(
+        "context_bars = 200", f"context_bars = 200\nmax_relative_close_jump = {value}"
+    )
+    path = tmp_path / "invalid-threshold.toml"
+    path.write_text(source)
+
+    with pytest.raises(ConfigError, match="must be finite"):
+        load_downstream_config(path)
 
 
 def test_tuned_production_config_pins_reusable_embeddings_and_head_settings() -> None:
@@ -357,6 +373,112 @@ def test_pre_holdout_builder_never_evaluates_a_holdout_path(
     assert not candidates["is_holdout"].any()
 
 
+def test_candidates_never_cross_a_discontinuous_context_or_label_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_downstream_config(CONFIG)
+    config = replace(
+        config,
+        data=replace(config.data, context_bars=2),
+        strategy=replace(
+            config.strategy,
+            atr_period=3,
+            supertrend_period=3,
+            horizon_bars=2,
+            analysis_targets_r=(3.0,),
+        ),
+    )
+    close = np.linspace(100.0, 120.0, 40)
+    timestamps = pd.date_range("2025-01-01T14:00:00Z", periods=40, freq="3min")
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "close_timestamp": timestamps + timedelta(minutes=3),
+            "open": close,
+            "high": close + 1,
+            "low": close - 1,
+            "close": close,
+            "volume": np.ones_like(close),
+            "_discontinuity": np.arange(40) == 20,
+        }
+    )
+    monkeypatch.setattr(strategy_module, "load_market_frame", lambda *_: frame.copy())
+
+    candidates = build_symbol_candidates(config, "NQ")
+
+    assert len(candidates) > 0
+    for decision_index in candidates["decision_index"]:
+        assert not decision_index - 1 <= 20 <= decision_index + 2
+
+
+def test_downstream_loader_detects_intrabar_stitches_from_full_ohlc(tmp_path: Path) -> None:
+    config = load_downstream_config(CONFIG)
+    config = replace(
+        config,
+        data=replace(config.data, root=tmp_path, max_relative_close_jump=0.05),
+    )
+    pd.DataFrame(
+        {
+            "datetime": pd.date_range("2025-01-01", periods=3, freq="3min", tz="UTC"),
+            "open": [100.0, 100.0, 100.0],
+            "high": [100.5, 100.5, 100.5],
+            "low": [99.5, 80.0, 99.5],
+            "close": [100.0, 100.0, 100.0],
+            "volume": [1.0, 1.0, 1.0],
+        }
+    ).to_csv(tmp_path / "NQ_3min.csv", index=False)
+
+    frame = load_market_frame(config, "NQ", "3min")
+
+    assert np.flatnonzero(frame["_discontinuity"].to_numpy()).tolist() == [1]
+
+
+def test_downstream_loader_reads_manifest_bound_parquet(tmp_path: Path) -> None:
+    config = load_downstream_config(CONFIG)
+    corpus_root = tmp_path / "corpus"
+    source = pd.DataFrame(
+        {
+            "open": [100.0, 101.0, 102.0],
+            "high": [100.5, 101.5, 102.5],
+            "low": [99.5, 100.5, 101.5],
+            "close": [100.0, 101.0, 102.0],
+            "volume": [1.0, 2.0, 3.0],
+            "quality_flag": [False, True, False],
+        },
+        index=pd.date_range("2025-01-01", periods=3, freq="3min", tz="UTC"),
+    )
+    identity = {
+        "kind": "market",
+        "symbol": "NQ",
+        "timeframe": "3min",
+        **_write_frame(source, corpus_root / "market" / "NQ_3min.parquet", corpus_root),
+    }
+    manifest: dict[str, object] = {
+        "schema_version": 1,
+        "corpus_id": "test",
+        "outputs": [identity],
+        "validated": True,
+    }
+    manifest["manifest_digest"] = _json_digest(manifest)
+    manifest_path = corpus_root / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+    config = replace(
+        config,
+        data=replace(
+            config.data,
+            root=corpus_root / "market",
+            file_format="parquet",
+            corpus_manifest_path=manifest_path,
+            corpus_manifest_sha256=sha256_file(manifest_path),
+        ),
+    )
+
+    frame = load_market_frame(config, "NQ", "3min")
+
+    assert frame["close"].tolist() == [100.0, 101.0, 102.0]
+    assert np.flatnonzero(frame["_discontinuity"].to_numpy()).tolist() == [1]
+
+
 def test_next_open_label_resolves_same_bar_tie_as_stop() -> None:
     frame = pd.DataFrame(
         {
@@ -366,7 +488,7 @@ def test_next_open_label_resolves_same_bar_tie_as_stop() -> None:
             "close": [99.0, 100.0, 100.0],
         }
     )
-    label, reward, exit_price, exit_index, _ = _label_chunk(
+    label, reward, exit_price, exit_index, mae = _label_chunk(
         frame,
         np.array([0]),
         np.array([1]),
@@ -377,6 +499,7 @@ def test_next_open_label_resolves_same_bar_tie_as_stop() -> None:
     )
     assert label.tolist() == [0]
     assert reward[0] == pytest.approx(-1.03)
+    assert mae[0] == pytest.approx(-1.03)
     assert exit_price.tolist() == [99.0]
     assert exit_index.tolist() == [1]
 
@@ -649,7 +772,16 @@ def test_topstep_fails_when_intraday_equity_touches_mll() -> None:
     assert result.status == "failed"
     assert result.reason == "maximum loss limit touched intraday"
     assert result.ending_balance == pytest.approx(97_000)
+    assert result.trading_days == 1
     assert len(trades) == 1
+
+
+def test_topstep_rejects_stale_exact_stop_mae_below_the_stop_outcome() -> None:
+    config = load_downstream_config(CONFIG)
+    predictions = pd.DataFrame([_prediction(-1.03, -63.63, "2025-01-06T15:00:00Z")])
+
+    with pytest.raises(TopstepContractError, match="exact-stop MAE"):
+        simulate_topstep(predictions, config)
 
 
 def test_topstep_mll_ratchets_at_end_of_day_and_never_above_lock() -> None:

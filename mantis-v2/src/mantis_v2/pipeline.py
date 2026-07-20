@@ -18,7 +18,13 @@ from torch.utils.data import DataLoader, Dataset, RandomSampler
 
 from mantis_v2.checkpoint import load_checkpoint, save_checkpoint
 from mantis_v2.config import PipelineConfig
-from mantis_v2.data import Anchor, NextLegDataset, build_anchors, load_streams
+from mantis_v2.data import (
+    Anchor,
+    NextLegDataset,
+    build_anchors,
+    contamination_report,
+    load_streams,
+)
 from mantis_v2.model import MantisV2Adapter, NextLegModel, download_verified_weights, nextleg_loss
 from mantis_v2.provenance import Provenance, build_provenance, sha256_file
 from mantis_v2.runtime import seed_everything, select_device
@@ -48,6 +54,7 @@ _PROVENANCE_IDENTITY_KEYS = (
     "upstream_source_revision",
     "upstream_hub_revision",
     "upstream_weights_sha256",
+    "contamination_digest",
 )
 
 
@@ -113,8 +120,11 @@ def _load_history(root: Path, start_epoch: int) -> list[dict[str, Any]]:
     return history
 
 
-def _datasets(config: PipelineConfig) -> tuple[NextLegDataset, NextLegDataset]:
+def _datasets(
+    config: PipelineConfig,
+) -> tuple[NextLegDataset, NextLegDataset, dict[str, object]]:
     streams = load_streams(config.data)
+    contamination = contamination_report(streams, config.data)
     train_anchors = build_anchors(streams, config.data, config.target, "train")
     validation_anchors = build_anchors(streams, config.data, config.target, "validation")
     if len(train_anchors) < config.target.minimum_train_anchors:
@@ -130,6 +140,7 @@ def _datasets(config: PipelineConfig) -> tuple[NextLegDataset, NextLegDataset]:
     return (
         NextLegDataset(streams, train_anchors, config.data, config.model, config.target),
         NextLegDataset(streams, validation_anchors, config.data, config.model, config.target),
+        contamination,
     )
 
 
@@ -280,8 +291,10 @@ def train(config: PipelineConfig) -> dict[str, Any]:
     root = artifact_root(config)
     _assert_run_writable(config, root)
     device = select_device(config.run)
-    train_dataset, validation_dataset = _datasets(config)
-    provenance = build_provenance(config, repository_root())
+    train_dataset, validation_dataset, contamination = _datasets(config)
+    provenance = build_provenance(config, repository_root(), contamination)
+    _write_json(root / "contamination.json", contamination)
+    _write_json(root / "provenance.json", provenance.to_dict())
     model = _model(config, device)
     optimizer = _optimizer(model, config)
     checkpoint_path = root / "checkpoints" / "latest.pt"
@@ -378,6 +391,7 @@ def train(config: PipelineConfig) -> dict[str, Any]:
         if checkpoint_due:
             pending_checkpoint.replace(checkpoint_path)
     _write_json(root / "provenance.json", provenance.to_dict())
+    _write_json(root / "contamination.json", contamination)
     result = {
         "device": str(device),
         "train_anchors": len(train_dataset),
@@ -397,9 +411,9 @@ def _load_trained(
 ) -> _LoadedTrained:
     seed_everything(config.run.seed)
     device = select_device(config.run)
-    train_dataset, validation_dataset = _datasets(config)
+    train_dataset, validation_dataset, contamination = _datasets(config)
     del train_dataset
-    provenance = build_provenance(config, repository_root())
+    provenance = build_provenance(config, repository_root(), contamination)
     model = _model(config, device)
     optimizer = _optimizer(model, config)
     checkpoint_path = artifact_root(config) / "checkpoints" / "best.pt"
@@ -682,8 +696,13 @@ def verify_upstream(config: PipelineConfig) -> dict[str, Any]:
 
 
 def anchor_counts(config: PipelineConfig) -> dict[str, int]:
+    return data_audit(config)["anchors"]  # type: ignore[return-value]
+
+
+def data_audit(config: PipelineConfig) -> dict[str, object]:
+    """Validate eligibility and report every configured discontinuity before training."""
     streams = load_streams(config.data)
     result: dict[str, int] = {}
     for split in ("train", "validation", "holdout"):
         result[split] = len(build_anchors(streams, config.data, config.target, split))
-    return result
+    return {"anchors": result, "contamination": contamination_report(streams, config.data)}
