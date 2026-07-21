@@ -115,18 +115,28 @@ copies match the transfer manifest.
 
 ## Accuracy-first training contract
 
-The RunPod candidate is a fresh domain-adaptation run from the pinned official
-MantisV2 checkpoint, not a resume from the existing local fine-tune and not a
-randomly initialized encoder. The verified corpus covers nine instruments
+The RunPod candidate is a fresh supervised futures-adaptation run from the
+pinned official MantisV2 checkpoint, not a resume from the existing local
+fine-tune and not a randomly initialized encoder. It is not random-weight
+base-model pretraining or self-supervised domain-adaptive pretraining. The
+verified corpus covers nine instruments
 (`ES`, `NQ`, `RTY`, `YM`, `GC`, `SI`, `CL`, `ZB`, `ZN`) at four timeframes
 (`1min`, `3min`, `5min`, `15min`). The 3-minute slice is the primary trading
 horizon and evaluation slice.
 
-Full-model fine-tuning is the primary accuracy arm. Test LoRA ranks 8 and 16
-against MantisV2's `wQKV` and `wO` projections only as non-inferiority arms;
-the older FFM Mantis-8M module names are not compatible. Keep the local adapter
-and task heads trainable, retain base and adapter hashes separately, and merge
-only after native-versus-merged parity passes.
+Full-upstream fine-tuning plus new NextLeg heads is the primary accuracy arm.
+The current `transformer_finetune` behavior freezes the pretrained tokenizer
+and projector and is a separate control, not the full arm. Test LoRA ranks 8
+and 16 against MantisV2's `wQKV` and `wO` projections only as non-inferiority
+arms; the older FFM Mantis-8M module names are not compatible. Retain base and
+adapter hashes separately and merge only after native-versus-merged parity
+passes.
+
+Every first launch uses a unique absent run directory, loads and verifies the
+pinned official revision, deterministically initializes the new task heads,
+and records both identities. A later resume may load only an atomic checkpoint
+from that same provenance-bound run. Random `scratch` mode is outside this
+route and cannot be substituted when official weights are unavailable.
 
 First compare the current three-timeframe recipe with a compute-matched
 four-timeframe recipe. If 5-minute data is promoted, preserve per-stream epoch
