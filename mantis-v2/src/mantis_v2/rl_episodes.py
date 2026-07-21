@@ -154,6 +154,11 @@ def _valid_windows(
         & (frame["label_end_ts"] < partition.end)
         & (frame["terminal_ts"] < partition.end)
     ].copy()
+    owned = owned[
+        owned["session_complete"].astype(bool)
+        & owned["rollover_safe"].astype(bool)
+        & owned["horizon_complete"].astype(bool)
+    ].copy()
     owned["session"] = owned["decision_ts"].map(_session_id)
     if session_calendar is None:
         sessions = list(dict.fromkeys(owned["session"].tolist()))
@@ -600,7 +605,7 @@ def build_episode_manifest(
     if fold_number < 0 or fold_number >= len(folds):
         raise EpisodeContractError("fold number is out of range")
     fold = folds[fold_number]
-    embargo = pd.Timedelta(seconds=180 * int(downstream.walk_forward.embargo_bars))
+    embargo = pd.Timedelta(minutes=3 * int(downstream.walk_forward.embargo_bars))
     boundaries = {
         "training": (fold.train_start, fold.train_end - embargo),
         "validation": (fold.validation_start + embargo, fold.validation_end - embargo),

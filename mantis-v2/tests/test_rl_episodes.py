@@ -201,6 +201,31 @@ def test_exchange_calendar_rejects_ticker_local_missing_or_rollover_session() ->
         )
 
 
+def test_schedule_excludes_candidate_with_rollover_overlap_from_safe_window() -> None:
+    rows = _rows("CL", "2025-01-02", sessions=20)
+    rows.loc[10, "rollover_safe"] = False
+    sessions = tuple(
+        dict.fromkeys(_session_id(pd.Timestamp(value)) for value in rows["decision_ts"])
+    )
+    partition = Partition(
+        name="training",
+        start=pd.Timestamp("2025-01-01", tz="UTC"),
+        end=pd.Timestamp("2025-03-01", tz="UTC"),
+    )
+
+    (episode,) = build_episode_schedule(
+        {"CL": rows},
+        partition,
+        seed=5,
+        episode_count=1,
+        session_calendars={"CL": sessions},
+        unsafe_sessions={"CL": frozenset()},
+    )
+
+    assert episode.candidate_count == 19
+    assert sum(span.row_count for span in episode.observation_spans) == 19
+
+
 def test_schedule_contains_complete_lookback_exit_and_terminal_horizons() -> None:
     rows = _rows("ES", "2025-01-02")
     rows.loc[0, "lookback_start_ts"] = pd.Timestamp("2024-12-31T23:00:00Z")
