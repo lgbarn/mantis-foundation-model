@@ -15,7 +15,7 @@ configs, or checkpoints in this repository.
 | Area | Status |
 | --- | --- |
 | MantisV2 repaired-Parquet MPS training, validation, and export | Complete under the current checkpoint-bound gate |
-| Trend Magic downstream prepare | Complete; embedding, walk-forward, and simulation remain pending |
+| Trend Magic downstream | Prepare and embedding complete; eight-fold head rejected by proper-score gates; simulation not authorized |
 | Downstream 2026 holdout | Sealed |
 | Mantis and Mantis+ repository implementations | Not implemented |
 
@@ -33,7 +33,9 @@ The following workflows are implemented:
 The current Apple MPS production run used the repaired 27-stream Parquet corpus,
 early-stopped after 32 epochs, selected epoch 24, reproduced its best validation
 loss, and passed checkpoint-bound safetensors parity. Trend Magic preparation
-then produced 3,259,736 pre-holdout candidates. See the
+then produced 3,259,736 pre-holdout candidates and the embedding stage
+completed. The eight-fold logistic head converged but did not beat the constant
+log-loss and Brier baselines, so simulation remains blocked. See the
 [current production run record](docs/runs/2026-07-20-mantisv2-nextleg-parquet-v2.md).
 
 The following workflows are not implemented:

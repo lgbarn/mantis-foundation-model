@@ -37,6 +37,7 @@ from mantis_v2.downstream_pipeline import (
 from mantis_v2.downstream_pipeline import (
     smoke as downstream_smoke,
 )
+from mantis_v2.downstream_pipeline import verify_contract as downstream_verify
 from mantis_v2.downstream_pipeline import (
     walk_forward as downstream_walk_forward,
 )
@@ -70,6 +71,7 @@ _DOWNSTREAM_COMMANDS = {
     "downstream-run",
     "downstream-holdout",
     "downstream-smoke",
+    "downstream-verify",
 }
 _CORPUS_COMMANDS = {"repair-corpus", "validate-corpus"}
 
@@ -175,6 +177,7 @@ def main() -> None:
                 "downstream-simulate": downstream_simulate,
                 "downstream-run": downstream_run,
                 "downstream-smoke": downstream_smoke,
+                "downstream-verify": downstream_verify,
             }
             if args.command == "downstream-holdout":
                 result = downstream_holdout(downstream_config, args.unlock)

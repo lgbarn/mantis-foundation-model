@@ -13,6 +13,8 @@ from typing import Any, Literal
 
 from mantis_v2.config import ConfigError
 
+_TREND_MAGIC_CONTRACT_VERSION = "trend_magic_fixed_3r_v1"
+
 
 @dataclass(frozen=True)
 class DownstreamRunConfig:
@@ -142,6 +144,27 @@ class DownstreamConfig:
 
     def canonical_json(self) -> str:
         return json.dumps(asdict(self), default=str, sort_keys=True, separators=(",", ":"))
+
+    @property
+    def strategy_contract(self) -> dict[str, Any] | None:
+        """Return the named strategy recipe without changing legacy artifact identity."""
+        if not isinstance(self.strategy, TrendMagicStrategyConfig):
+            return None
+        return {
+            "version": _TREND_MAGIC_CONTRACT_VERSION,
+            "input_timeframes": ["1min", "3min", "15min"],
+            "decision_timeframe": "3min",
+            "candidate_rule": "every_eligible_closed_3min_state_bar",
+            "direction_owner": "trend_magic",
+            "entry_rule": "next_eligible_bar_open",
+            "risk_rule": "0.5_atr_20",
+            "primary_label_rule": "strict_3r_target_before_1r_stop",
+            "analysis_targets_r": [2.0, 3.0, 4.0, 6.0],
+            "horizon_rule": "120_bars_session_bounded",
+            "session": "17:00-15:10 America/Chicago",
+            "round_trip_cost_r": 0.03,
+            "same_bar_policy": "stop_first",
+        }
 
     @property
     def digest(self) -> str:
@@ -672,6 +695,45 @@ def _validate(config: DownstreamConfig) -> None:
         raise ConfigError("data.timeframes must be ordered exactly as 1min, 3min, 15min")
     if config.data.decision_timeframe != "3min":
         raise ConfigError("data.decision_timeframe must be 3min")
+    if isinstance(config.strategy, TrendMagicStrategyConfig):
+        recipe_values = (
+            ("data.timestamp_semantics", config.data.timestamp_semantics, "bar_open"),
+            ("strategy.atr_period", config.strategy.atr_period, 20),
+            ("strategy.cci_period", config.strategy.cci_period, 20),
+            (
+                "strategy.trend_magic_atr_period",
+                config.strategy.trend_magic_atr_period,
+                5,
+            ),
+            (
+                "strategy.trend_magic_multiplier",
+                config.strategy.trend_magic_multiplier,
+                1.0,
+            ),
+            ("strategy.stop_atr", config.strategy.stop_atr, 0.5),
+            ("strategy.target_r", config.strategy.target_r, 3.0),
+            (
+                "strategy.analysis_targets_r",
+                config.strategy.analysis_targets_r,
+                (2.0, 3.0, 4.0, 6.0),
+            ),
+            ("strategy.horizon_bars", config.strategy.horizon_bars, 120),
+            (
+                "strategy.round_trip_cost_r",
+                config.strategy.round_trip_cost_r,
+                0.03,
+            ),
+            ("strategy.same_bar_policy", config.strategy.same_bar_policy, "stop_first"),
+            ("topstep.session_timezone", config.topstep.session_timezone, "America/Chicago"),
+            ("topstep.session_start_hour", config.topstep.session_start_hour, 17),
+            ("topstep.session_end_hour", config.topstep.session_end_hour, 15),
+            ("topstep.session_end_minute", config.topstep.session_end_minute, 10),
+        )
+        for field, actual, expected in recipe_values:
+            if actual != expected:
+                raise ConfigError(
+                    f"{field} must be {expected!r} for {_TREND_MAGIC_CONTRACT_VERSION}"
+                )
     if len(config.data.contract_multipliers) != len(config.data.symbols):
         raise ConfigError("data.contract_multipliers must align one-for-one with data.symbols")
     if config.data.feature_columns != ("open", "high", "low", "close", "volume"):

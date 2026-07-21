@@ -90,12 +90,25 @@ def _source_digest() -> str:
 def _manifest_base(config: DownstreamConfig, stage: str) -> dict[str, Any]:
     repository_root = Path(__file__).resolve().parents[3]
     lock_path = repository_root / "uv.lock"
-    return {
+    manifest = {
         "schema_version": 1,
         "stage": stage,
         "workflow_digest": config.workflow_digest,
         "source_digest": _source_digest(),
         "lock_digest": sha256_file(lock_path),
+    }
+    if config.strategy_contract is not None:
+        manifest["strategy_contract"] = config.strategy_contract
+    return manifest
+
+
+def verify_contract(config: DownstreamConfig) -> dict[str, Any]:
+    """Report the validated downstream recipe without reading data or writing artifacts."""
+    return {
+        "run": config.run.name,
+        "workflow_digest": config.workflow_digest,
+        "embedding_contract_digest": config.embedding_contract_digest,
+        "strategy_contract": config.strategy_contract,
     }
 
 
@@ -110,6 +123,12 @@ def _manifest(path: Path, config: DownstreamConfig, expected_stage: str) -> dict
     for key in ("stage", "workflow_digest", "source_digest", "lock_digest"):
         if value.get(key) != expected[key]:
             raise DownstreamPipelineError(f"{expected_stage} manifest identity mismatch: {key}")
+    if "strategy_contract" in value and value["strategy_contract"] != expected.get(
+        "strategy_contract"
+    ):
+        raise DownstreamPipelineError(
+            f"{expected_stage} manifest identity mismatch: strategy_contract"
+        )
     return cast(dict[str, Any], value)
 
 

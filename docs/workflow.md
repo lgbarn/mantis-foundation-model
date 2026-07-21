@@ -49,6 +49,7 @@ them can make a checkpoint intentionally non-resumable.
 | `just export <config>` | Exports after prior evaluation | Export directory | Requires exact current evaluation |
 | `just validated-export <config>` | Evaluates and exports one snapshot | Evaluation and export | Preferred release path |
 | `just downstream-prepare <config>` | Builds candidates and labels | Parquet plus manifest | Full data preparation |
+| `just downstream-verify <config>` | Validates and prints the downstream contract | Nothing | Read-only config check |
 | `just downstream-embed <config>` | Runs frozen encoder | NPY shards, Parquet, manifest | Long MPS/CPU inference |
 | `just downstream-walk-forward <config>` | Fits scaler and logistic folds | NPZ, predictions, metrics, manifest | CPU and memory |
 | `just downstream-simulate <config>` | Replays trades and account rules | Results and manifest | CPU |
@@ -313,17 +314,25 @@ and weights digest match the export.
 Run stages independently for bounded recovery:
 
 ```bash
-just downstream-prepare mantis-v2/configs/trend-magic-topstep-100k.toml
-just downstream-embed mantis-v2/configs/trend-magic-topstep-100k.toml
-just downstream-walk-forward mantis-v2/configs/trend-magic-topstep-100k-head-c0001-v2.toml
-just downstream-simulate mantis-v2/configs/trend-magic-topstep-100k-head-c0001-v2.toml
+just trend-magic-verify
+just trend-magic-prepare
+just trend-magic-embed
+just trend-magic-head
 ```
 
 `trend-magic-topstep-100k-head-c0001-v2.toml` is the production consumer for
-walk-forward and simulation. It pins and reuses the completed embeddings from
+walk-forward. It pins and reuses the completed embeddings from
 the producer config, changes only head fitting, and writes under a distinct run
 identity. Do not run the all-stage chain with this consumer config because its
 purpose is isolated head fitting against immutable embeddings.
+
+`trend-magic-verify` is read-only. It prints the named
+`trend_magic_fixed_3r_v1` contract and its workflow identities without reading
+market data or writing artifacts. The loader rejects drift from every eligible
+closed 3m Trend Magic state bar, next-open entry, ATR(20) risk at 0.5 ATR,
+strict 3R-before-stop labels, the 2/3/4/6R analysis ladder, 120 session-bounded
+bars, 0.03R cost, and stop-first ties. The separate 2R trail belongs to
+execution replay and never changes this supervised label.
 
 No all-stage Trend Magic command is currently qualified. A future producer
 config may use `downstream-run` only after its embedded head settings have
