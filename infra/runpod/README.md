@@ -20,9 +20,11 @@ implementation route is [IMPLEMENTATION_HANDOFF.md](IMPLEMENTATION_HANDOFF.md).
 
 - Planning and validation must not create billable resources.
 - Provisioning requires an explicit approved spend envelope.
-- Read the API credential only from `RUNPOD_API_KEY`; never put it in Terraform
-  variables, state, `.tfvars`, container images, committed `.env` files, or Pod
-  environment variables.
+- Read the account provisioning credential only from local
+  `RUNPOD_API_KEY`; never put it in Terraform variables, state, `.tfvars`,
+  container images, committed `.env` files, or Pod environment variables.
+  RunPod automatically supplies a distinct Pod-scoped key; never persist, log,
+  export, or treat it as account provisioning authority.
 - Use the RunPod account SSH public key for interactive Pod access. Never copy
   a private key into the repository, Terraform state, image, or Pod volume.
 - Keep the sealed holdout locked during infrastructure and CUDA qualification.

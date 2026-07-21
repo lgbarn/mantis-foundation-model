@@ -46,9 +46,9 @@ mutable long-lived host configuration.
 | Owner | Responsibility |
 | --- | --- |
 | Terraform | Standard network volume, private Pod template, non-secret stable resource identity, import/adoption checks |
-| Pinned launch adapter | Exact Pod request, one-live-Pod lock, deadline, status, stop, termination, cost reconciliation |
+| Pinned launch adapter | Exact Pod request, one-live-Pod lock, deadline, status, termination, cost reconciliation |
 | Container image | CUDA-compatible userspace, Python 3.12, pinned `uv`, locked dependencies, system packages, self-checks |
-| `just` | Human-facing preflight, plan, transfer, qualification, monitoring, stop, download, and verification workflows |
+| `just` | Human-facing preflight, plan, transfer, qualification, monitoring, termination, download, and verification workflows |
 | Typed TOML | Experiment definition, runtime resources, paths, precision, matrix arms, seeds, budgets, thresholds |
 | Python pipeline | Training, evaluation, export, downstream, RL, manifests, metrics, checkpoint and parity behavior |
 | Local controller | Secrets, SSH, S3 credentials, Terraform state, approvals, spend ledger, independent watchdog |
@@ -58,6 +58,11 @@ owns the template and volume; the adapter consumes their recorded identities.
 An import/adoption preflight must reject duplicate or unmanaged live resources.
 The image contains no datasets, upstream or derived weights, credentials, or
 run artifacts.
+
+The one-live-Pod guard combines a local process lock on the single authorized
+controller host with a fresh remote inventory snapshot. Other controller hosts
+are unsupported. The lock remains held across the remote check and create call
+so concurrent local invocations cannot pass the same check-create window.
 
 ## Configuration contract
 
@@ -83,13 +88,14 @@ Only secret names may appear in committed configuration:
 - `RUNPOD_API_KEY` for the local control plane;
 - `RUNPOD_S3_ACCESS_KEY_ID` and `RUNPOD_S3_SECRET_ACCESS_KEY` for the local S3
   transfer process; and
-- a scoped registry credential through RunPod Secrets only if a private image
-  is unavoidable.
+- a scoped RunPod registry-auth object only if a private image is unavoidable.
 
 Do not place secret values in git, `.tfvars`, Terraform state, image layers,
-Pod environment, command logs, the network volume, TensorBoard, or manifests.
-The Pod does not receive the RunPod API key or S3 key. SSH private keys never
-leave the local controller.
+commands, the network volume, TensorBoard, or manifests. The local account
+provisioning key and S3 data-plane keys never enter the Pod. RunPod
+automatically supplies its own Pod-scoped API key; workloads must not persist,
+log, export, or treat that scoped key as account provisioning authority. SSH
+private keys never leave the local controller.
 
 ## Persistent layout
 
@@ -272,7 +278,9 @@ bootstrap improvement over baselines, and no hidden ticker/profile failure.
 ## Observability
 
 TensorBoard binds to `127.0.0.1:6006` and is viewed only through an SSH tunnel.
-Event files persist beneath the immutable run directory. Record:
+Event files persist beneath the active run directory. The Run Identity is
+immutable, while checkpoints, event logs, and the In-Progress Checkpoint
+Pointer evolve atomically until each Completed Artifact is finalized. Record:
 
 - train/validation total, candle, and leg losses;
 - learning rate, gradient norm, epoch, and global step;
@@ -328,8 +336,7 @@ ordinary path or parameter changes:
 - tool/image/version preflight and image self-test;
 - Terraform format/validate/plan and policy checks;
 - transfer manifest, upload, in-Pod verify, download, and backup verify;
-- launch dry run, approved qualification launch, status, cost, stop, and
-  terminate;
+- launch dry run, approved qualification launch, status, cost, and terminate;
 - localhost TensorBoard tunnel instructions;
 - CUDA foundation probe/parity/resume matrix;
 - foundation arm/seed orchestration and validated export;
