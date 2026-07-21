@@ -8,6 +8,7 @@ import tempfile
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time, timedelta
+from itertools import pairwise
 from pathlib import Path
 from typing import cast
 from zoneinfo import ZoneInfo
@@ -93,9 +94,12 @@ def _spans(rows: pd.DataFrame) -> tuple[ObservationSpan, ...]:
     spans: list[ObservationSpan] = []
     for shard, group in rows.groupby("shard", sort=False):
         offsets = group["row"].astype(int).to_numpy()
-        if len(offsets) > 1 and not np.all(np.diff(offsets) == 1):
-            raise EpisodeContractError("episode observation rows are not contiguous")
-        spans.append(ObservationSpan(int(shard), int(offsets[0]), len(offsets)))
+        differences = np.diff(offsets)
+        if len(differences) and np.any(differences <= 0):
+            raise EpisodeContractError("episode observation rows are not strictly ordered")
+        boundaries = np.concatenate(([0], np.flatnonzero(differences != 1) + 1, [len(offsets)]))
+        for start, end in pairwise(boundaries):
+            spans.append(ObservationSpan(int(shard), int(offsets[int(start)]), int(end - start)))
     return tuple(spans)
 
 

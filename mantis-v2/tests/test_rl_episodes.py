@@ -127,8 +127,6 @@ def test_complete_session_calendar_allows_a_day_without_candidates() -> None:
         dict.fromkeys(_session_id(pd.Timestamp(value)) for value in complete["decision_ts"])
     )
     candidates = complete.drop(index=10).reset_index(drop=True)
-    candidates["shard"] = np.arange(len(candidates)) // 8
-    candidates["row"] = np.arange(len(candidates)) % 8
     partition = Partition(
         name="training",
         start=pd.Timestamp("2025-01-01", tz="UTC"),
@@ -145,6 +143,7 @@ def test_complete_session_calendar_allows_a_day_without_candidates() -> None:
 
     assert episode.trading_days == 20
     assert episode.candidate_count == 19
+    assert sum(span.row_count for span in episode.observation_spans) == 19
 
 
 def test_schedule_does_not_bridge_absent_or_rollover_sessions() -> None:
