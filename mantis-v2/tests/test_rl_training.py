@@ -22,6 +22,7 @@ from mantis_v2.rl_training import (
     TrainingControl,
     TrainingEpisodes,
     _actor_weights,
+    _apply_training_control,
     _balanced_minibatches,
     _completed_timesteps,
     _cost_returns,
@@ -297,6 +298,35 @@ def test_terminal_reward_and_cost_are_unshaped() -> None:
     assert result["transition_audit"]["nonterminal_cost_sum"] == 0.0
     assert result["gamma"] == 1.0
     assert result["reward_shaping"] is False
+
+
+def test_learning_controls_perturb_rewards_without_changing_costs() -> None:
+    episodes = [
+        [
+            _Transition(
+                np.zeros(4, dtype=np.float32),
+                ticker,
+                0,
+                0,
+                0.0,
+                0.0,
+                0.0,
+                np.ones(2, dtype=np.bool_),
+                reward,
+                cost,
+                True,
+            )
+        ]
+        for ticker, (reward, cost) in enumerate(((1.0, 0.0), (0.0, 1.0), (0.0, 0.0)))
+    ]
+
+    zeroed = _apply_training_control(episodes, TrainingControl.ZERO_REWARD)
+    shuffled = _apply_training_control(episodes, TrainingControl.SHUFFLED_REWARD)
+
+    assert [transition.reward for transition in zeroed] == [0.0, 0.0, 0.0]
+    assert [transition.reward for transition in shuffled] == [0.0, 0.0, 1.0]
+    assert [transition.cost for transition in zeroed] == [0.0, 1.0, 0.0]
+    assert [transition.cost for transition in shuffled] == [0.0, 1.0, 0.0]
 
 
 def test_training_rejects_nontraining_and_stale_identities(tmp_path: Path) -> None:

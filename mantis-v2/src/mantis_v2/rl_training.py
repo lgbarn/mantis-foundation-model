@@ -434,14 +434,14 @@ def _apply_training_control(
 ) -> list[_Transition]:
     if training_control in {TrainingControl.NORMAL, TrainingControl.MASK_DISABLED}:
         return [transition for episode in episode_transitions for transition in episode]
-    terminal_signals = [(episode[-1].reward, episode[-1].cost) for episode in episode_transitions]
+    terminal_rewards = [episode[-1].reward for episode in episode_transitions]
     if training_control is TrainingControl.ZERO_REWARD:
-        assigned = [(0.0, 0.0) for _ in terminal_signals]
+        assigned_rewards = [0.0 for _ in terminal_rewards]
     else:
-        assigned = terminal_signals[1:] + terminal_signals[:1]
+        assigned_rewards = terminal_rewards[1:] + terminal_rewards[:1]
     controlled: list[_Transition] = []
-    for episode, (reward, cost) in zip(episode_transitions, assigned, strict=True):
-        controlled.extend((*episode[:-1], replace(episode[-1], reward=reward, cost=cost)))
+    for episode, reward in zip(episode_transitions, assigned_rewards, strict=True):
+        controlled.extend((*episode[:-1], replace(episode[-1], reward=reward)))
     return controlled
 
 
