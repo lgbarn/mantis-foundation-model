@@ -1,0 +1,15 @@
+{
+  "account_balance_usd": "150.00",
+  "live_pods": [],
+  "observed_at": "2026-07-21T12:00:00Z",
+  "offers": [
+    {
+      "available": true,
+      "datacenter_id": "US-CA-2",
+      "gpu_type": "NVIDIA A40",
+      "price_usd_per_gpu_hour": "0.44"
+    }
+  ],
+  "schema_version": 1,
+  "volume_free_bytes": 100000000000
+}

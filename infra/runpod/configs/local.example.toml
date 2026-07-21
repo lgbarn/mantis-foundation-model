@@ -1,0 +1,11 @@
+schema_version = 1
+
+[paths]
+workspace_root = "/workspace/mantis"
+state_root = "/Users/replace-me/Library/Application Support/mantis-runpod"
+output_root = "/Users/replace-me/Personal/Trading/mantis-runpod-plans"
+
+[secrets]
+runpod_api_key_env = "RUNPOD_API_KEY"
+s3_access_key_id_env = "RUNPOD_S3_ACCESS_KEY_ID"
+s3_secret_access_key_env = "RUNPOD_S3_SECRET_ACCESS_KEY"

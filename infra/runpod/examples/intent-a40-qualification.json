@@ -1,0 +1,15 @@
+{
+  "container_disk_gb": 50,
+  "datacenter_id": "US-CA-2",
+  "gpu_count": 1,
+  "gpu_type": "NVIDIA A40",
+  "intent_id": "qualify-a40-seed42",
+  "maximum_duration_seconds": 7200,
+  "ram_gb": 32,
+  "run_name": "mantisv2-cuda-qualification-seed42",
+  "schema_version": 1,
+  "stage": "qualification",
+  "vcpu": 8,
+  "volume_id": "replace-with-current-volume-id",
+  "volume_size_gb": 150
+}

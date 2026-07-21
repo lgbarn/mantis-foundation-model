@@ -18,6 +18,7 @@ data/
 reports/
 output/
 tmp/
+infra/runpod/local.toml
 *.pt
 *.pth
 *.onnx
