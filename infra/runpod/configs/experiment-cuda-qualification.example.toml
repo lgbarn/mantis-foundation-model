@@ -1,0 +1,9 @@
+schema_version = 1
+
+[experiment]
+name = "mantisv2-cuda-qualification"
+model_family = "mantis-v2"
+stage = "qualification"
+seed = 42
+definition_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+sealed_holdout = false

@@ -1,0 +1,19 @@
+{
+  "active_reservations": [],
+  "actual_spend_usd": "0.00",
+  "bucket_actual_spend_usd": {
+    "production": "0.00",
+    "qualification": "0.00",
+    "recovery": "0.00",
+    "storage": "0.00"
+  },
+  "bucket_reserved_spend_usd": {
+    "production": "0.00",
+    "qualification": "0.00",
+    "recovery": "0.00",
+    "storage": "0.00"
+  },
+  "consumed_authorization_digests": [],
+  "reserved_spend_usd": "0.00",
+  "schema_version": 1
+}

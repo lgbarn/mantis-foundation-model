@@ -63,8 +63,10 @@ from mantis_v2.rl_validation import (
     EnvironmentValidationError,
     write_environment_validation,
 )
+from mantis_v2.runpod_config import RunpodConfigError
 from mantis_v2.runpod_image import ImageContractError
 from mantis_v2.runpod_image import self_check as runpod_image_self_check
+from mantis_v2.runpod_plan import LaunchPlanError, write_launch_decision
 from mantis_v2.runtime import RuntimeContractError
 from mantis_v2.strategy import StrategyContractError
 from mantis_v2.topstep import TopstepContractError
@@ -133,6 +135,16 @@ def _parser() -> argparse.ArgumentParser:
             )
         if command == "downstream-holdout":
             child.add_argument("--unlock", required=True)
+    runpod_plan = subparsers.add_parser("runpod-plan")
+    runpod_plan.add_argument("--platform", required=True, type=Path)
+    runpod_plan.add_argument("--local", required=True, type=Path)
+    runpod_plan.add_argument("--experiment", required=True, type=Path)
+    runpod_plan.add_argument("--intent", required=True, type=Path)
+    runpod_plan.add_argument("--inventory", required=True, type=Path)
+    runpod_plan.add_argument("--ledger", required=True, type=Path)
+    runpod_plan.add_argument("--authorization", type=Path)
+    runpod_plan.add_argument("--evaluated-at", required=True)
+    runpod_plan.add_argument("--output", required=True, type=Path)
     return parser
 
 
@@ -159,9 +171,22 @@ def main() -> None:
         "probe": probe,
         "verify-upstream": verify_upstream,
     }
+    result: dict[str, Any]
     try:
         if args.command == "runpod-image-self-check":
             result = runpod_image_self_check()
+        elif args.command == "runpod-plan":
+            result = write_launch_decision(
+                platform_path=args.platform,
+                local_path=args.local,
+                experiment_path=args.experiment,
+                intent_path=args.intent,
+                inventory_path=args.inventory,
+                ledger_path=args.ledger,
+                authorization_path=args.authorization,
+                evaluated_at=args.evaluated_at,
+                output_path=args.output,
+            )
         elif args.command == "rl-account-replay":
             result = write_account_replay_manifest(
                 load_rl_config(args.config), args.input, args.output
@@ -240,6 +265,8 @@ def main() -> None:
         StrategyContractError,
         TopstepContractError,
         WalkForwardContractError,
+        RunpodConfigError,
+        LaunchPlanError,
     ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc

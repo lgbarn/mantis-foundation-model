@@ -1,0 +1,30 @@
+schema_version = 1
+
+[provider]
+secure_cloud = true
+allowed_gpu_types = ["NVIDIA A40", "NVIDIA L40", "NVIDIA L40S", "NVIDIA A100 80GB PCIe"]
+allowed_datacenters = ["US-CA-2"]
+minimum_vcpu = 8
+minimum_ram_gb = 32
+container_disk_gb = 50
+
+[storage]
+volume_gb = 150
+high_water_bytes = 120000000000
+minimum_free_bytes = 30000000000
+
+[lifecycle]
+maximum_inventory_age_seconds = 300
+maximum_duration_seconds = 7200
+
+[billing]
+container_disk_usd_per_gb_month = "0.10"
+billing_month_hours = 730
+
+[budget]
+account_ceiling_usd = "150.00"
+storage_usd = "15.00"
+qualification_usd = "10.00"
+production_usd = "100.00"
+protected_recovery_usd = "25.00"
+ordinary_launch_cutoff_usd = "125.00"
