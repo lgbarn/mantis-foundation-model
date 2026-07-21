@@ -457,9 +457,9 @@ Build training and validation schedules for the same fold, then validate them:
 just rl-build-episodes mantis-v2/configs/rl-entry-topstep-100k.toml 0 training 21
 just rl-build-episodes mantis-v2/configs/rl-entry-topstep-100k.toml 0 validation 21
 just rl-validate-environment \
-  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v4/episodes/fold-00-training-seed-42.json \
-  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v4/episodes/fold-00-validation-seed-42.json \
-  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v4/environment-validation.json \
+  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v11/episodes/fold-00-training-seed-42.json \
+  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v11/episodes/fold-00-validation-seed-42.json \
+  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v11/environment-validation.json \
   mantis-v2/configs/rl-entry-topstep-100k.toml
 ```
 
@@ -511,8 +511,8 @@ schedule. The default candidate and both preregistered ablations share one seam:
 
 ```bash
 just rl-train \
-  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v10/episodes/fold-00-training-seed-42.json \
-  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v10/training/shared-ticker-value \
+  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v11/episodes/fold-00-training-seed-42.json \
+  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v11/training/shared-ticker-value \
   mantis-v2/configs/rl-entry-topstep-100k.toml \
   shared_ticker_value
 ```
