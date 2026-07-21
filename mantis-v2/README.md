@@ -366,14 +366,23 @@ The candidate is `shared_ticker_value`; `independent_actor` and `shared_critic`
 use the identical command and checkpoint contract as preregistered ablations.
 Each actor emits only `skip` or `enter`. Trend Magic direction, the deterministic
 2R/0.75R exit, the fixed mini/micro profile, and the Topstep risk shield remain
-outside actor authority. A run freezes rollout log probabilities and values
-before four configured PPO epochs. Shared-actor transitions receive inverse
-ticker-count weights, so every ticker contributes equally even when legal
-decision counts differ. The independent-actor ablation owns separate profile
-embeddings, trunks, and heads per ticker. A run checkpoints only after a
-complete schedule cycle and resumes optimizer, ticker-owned return statistics,
-RNG state, last rollout and ablation evidence, and exact source/lock/config/
-schedule/collection/artifact identities. Immutable bundles are recovered if a
-crash occurs before the atomic state pointer or final metrics publication.
-`--resume` refuses a published or mismatched run. The sealed holdout is never a
-training input.
+outside actor authority. Training uses episodic PPO-Lagrangian with separate
+ticker-owned reward and BLOW-cost critics. PASS reward and BLOW cost are binary
+terminal signals with gamma 1.0; minimum MLL cushion remains an observation and
+logged path metric, never a dense cost. Reward advantages are standardized per
+ticker, cost advantages are only centered, and the actor uses
+`(A_reward - lambda*A_cost) / (1 + lambda)`. The projected multiplier starts at
+1.0, uses a 0.01 cost limit and 0.05 learning rate, and is capped at 100. A run
+freezes rollout log probabilities and both values before four configured PPO
+epochs. Every minibatch contains exactly equal samples per present ticker,
+oversampling shorter streams when legal decision counts differ. The
+independent-actor ablation owns separate profile embeddings, trunks, and heads
+per ticker. A run checkpoints only after a complete schedule cycle and resumes
+optimizer, both critic families, ticker-owned return statistics, multiplier and
+raw cost statistics, RNG state, last rollout evidence, and exact source/lock/
+config/schedule/collection/artifact identities. Training mode and requested
+update/timestep budgets are also run identities, so bounded and production runs
+cannot share checkpoints. Immutable bundles are recovered if a crash occurs
+before the atomic state pointer or final metrics publication. Old unconstrained
+checkpoints and published or mismatched runs are rejected. The sealed holdout
+is never a training input.

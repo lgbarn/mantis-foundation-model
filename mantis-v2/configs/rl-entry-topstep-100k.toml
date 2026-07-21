@@ -88,6 +88,15 @@ kind = "terminal_pass_with_blow_cost"
 gamma = 1.0
 potential_shaping = false
 
+[rl.constraint]
+kind = "episodic_blow_lagrangian"
+cost_limit = 0.01
+cost_gamma = 1.0
+lambda_init = 1.0
+lambda_lr = 0.05
+lambda_max = 100.0
+minimum_cushion_role = "observation_metric_only"
+
 [rl.training]
 development_seeds = [42, 43, 44, 45, 46]
 confirmation_seeds = [42, 43, 44, 45, 46, 47, 48, 49, 50, 51]

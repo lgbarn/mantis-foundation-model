@@ -10,7 +10,8 @@ import shutil
 import tempfile
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
 
@@ -19,7 +20,11 @@ import torch
 from torch.distributions import Categorical
 
 from mantis_v2.rl_config import RlConfig
-from mantis_v2.rl_environment import EnvironmentEpisode, TopstepEntryEnvironment
+from mantis_v2.rl_environment import (
+    EnvironmentContractError,
+    EnvironmentEpisode,
+    TopstepEntryEnvironment,
+)
 from mantis_v2.rl_policy import (
     PROFILES,
     TICKERS,
@@ -30,7 +35,7 @@ from mantis_v2.rl_policy import (
 from mantis_v2.rl_provenance import sha256_file, verify_rl_runtime
 from mantis_v2.rl_validation import load_episode_manifest
 
-_POLICY_SCHEMA = "entry-policy-v2"
+_POLICY_SCHEMA = "entry-policy-v3"
 _LEARNING_RATE = 3e-4
 _CLIP_RANGE = 0.2
 _VALUE_COEFFICIENT = 0.5
@@ -40,6 +45,15 @@ _MAX_GRAD_NORM = 0.5
 
 class ProductionTrainingError(RuntimeError):
     """Raised when production entry training cannot prove its contract."""
+
+
+class TrainingControl(StrEnum):
+    """Preregistered learning controls run through the production trainer seam."""
+
+    NORMAL = "normal"
+    ZERO_REWARD = "zero_reward"
+    SHUFFLED_REWARD = "shuffled_reward"
+    MASK_DISABLED = "mask_disabled"
 
 
 @dataclass(frozen=True)
@@ -63,10 +77,110 @@ class _Transition:
     action: int
     old_log_probability: float
     old_value: float
+    old_cost_value: float
     mask: np.ndarray
     reward: float
     cost: float
     terminal: bool
+
+
+@dataclass
+class ConstraintController:
+    """Projected episodic Lagrange multiplier with durable raw cost statistics."""
+
+    kind: str
+    cost_limit: float
+    cost_gamma: float
+    lambda_init: float
+    lambda_lr: float
+    lambda_max: float
+    minimum_cushion_role: str
+    lambda_value: float
+    update_count: int = 0
+    episode_count: int = 0
+    cost_sum: float = 0.0
+    saturation_count: int = 0
+
+    @classmethod
+    def from_config(cls, config: RlConfig) -> ConstraintController:
+        constraint = config.constraint
+        return cls(
+            kind=constraint.kind,
+            cost_limit=constraint.cost_limit,
+            cost_gamma=constraint.cost_gamma,
+            lambda_init=constraint.lambda_init,
+            lambda_lr=constraint.lambda_lr,
+            lambda_max=constraint.lambda_max,
+            minimum_cushion_role=constraint.minimum_cushion_role,
+            lambda_value=constraint.lambda_init,
+        )
+
+    def update(self, episode_costs: Sequence[float]) -> dict[str, float | int | bool]:
+        if not episode_costs or any(cost not in {0.0, 1.0} for cost in episode_costs):
+            raise ProductionTrainingError("dual update requires raw binary episode costs")
+        mean_cost = float(np.mean(episode_costs))
+        before = self.lambda_value
+        self.lambda_value = min(
+            self.lambda_max,
+            max(0.0, before + self.lambda_lr * (mean_cost - self.cost_limit)),
+        )
+        self.update_count += 1
+        self.episode_count += len(episode_costs)
+        self.cost_sum += float(sum(episode_costs))
+        saturated = self.lambda_value == self.lambda_max and mean_cost > self.cost_limit
+        self.saturation_count += int(saturated)
+        return {
+            "lambda_before": before,
+            "lambda_after": self.lambda_value,
+            "mean_episode_cost": mean_cost,
+            "cost_limit": self.cost_limit,
+            "constraint_violation": mean_cost - self.cost_limit,
+            "dual_update_count": self.update_count,
+            "dual_saturated": saturated,
+            "dual_saturation_count": self.saturation_count,
+        }
+
+    def state_dict(self) -> dict[str, float | int | str]:
+        return {
+            "kind": self.kind,
+            "cost_limit": self.cost_limit,
+            "cost_gamma": self.cost_gamma,
+            "lambda_init": self.lambda_init,
+            "lambda_lr": self.lambda_lr,
+            "lambda_max": self.lambda_max,
+            "minimum_cushion_role": self.minimum_cushion_role,
+            "lambda_value": self.lambda_value,
+            "update_count": self.update_count,
+            "episode_count": self.episode_count,
+            "cost_sum": self.cost_sum,
+            "saturation_count": self.saturation_count,
+        }
+
+    def load_state_dict(self, raw: Mapping[str, object]) -> None:
+        expected = self.state_dict()
+        if set(raw) != set(expected):
+            raise ProductionTrainingError("constraint controller state is invalid")
+        for key in (
+            "kind",
+            "cost_limit",
+            "cost_gamma",
+            "lambda_init",
+            "lambda_lr",
+            "lambda_max",
+            "minimum_cushion_role",
+        ):
+            if raw[key] != expected[key]:
+                raise ProductionTrainingError("constraint controller config mismatch")
+        try:
+            self.lambda_value = float(cast(float, raw["lambda_value"]))
+            self.update_count = int(cast(int, raw["update_count"]))
+            self.episode_count = int(cast(int, raw["episode_count"]))
+            self.cost_sum = float(cast(float, raw["cost_sum"]))
+            self.saturation_count = int(cast(int, raw["saturation_count"]))
+        except (TypeError, ValueError) as exc:
+            raise ProductionTrainingError("constraint controller state is invalid") from exc
+        if not 0.0 <= self.lambda_value <= self.lambda_max:
+            raise ProductionTrainingError("constraint controller lambda is out of bounds")
 
 
 def _episode_collection_digest(episodes: Sequence[EnvironmentEpisode]) -> str:
@@ -149,7 +263,12 @@ def _validate_contract(config: RlConfig, episodes: TrainingEpisodes) -> None:
 
 
 def _identities(
-    config: RlConfig, episodes: TrainingEpisodes, seed: int, variant: PolicyVariant
+    config: RlConfig,
+    episodes: TrainingEpisodes,
+    seed: int,
+    variant: PolicyVariant,
+    target_updates: int | None,
+    training_control: TrainingControl,
 ) -> dict[str, object]:
     source = episodes.runtime_identities.get("source", {})
     lock = episodes.runtime_identities.get("lock", {})
@@ -157,6 +276,12 @@ def _identities(
         raise ProductionTrainingError("runtime source or lock identity is invalid")
     return {
         "policy_schema": _POLICY_SCHEMA,
+        "completion_mode": "production_timesteps" if target_updates is None else "bounded_updates",
+        "target_updates": target_updates,
+        "target_timesteps": (
+            config.training.development_timesteps_per_seed if target_updates is None else None
+        ),
+        "training_control": training_control.value,
         "variant": variant.value,
         "fold": episodes.fold,
         "seed": seed,
@@ -177,6 +302,9 @@ def _identities(
         "foundation_weights_sha256": config.upstream.foundation_weights_sha256,
         "reward_sha256": hashlib.sha256(
             json.dumps(asdict(config.reward), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        "constraint_sha256": hashlib.sha256(
+            json.dumps(asdict(config.constraint), sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest(),
         "rule_sha256": config.rule_digest,
         "fee_sha256": config.fee_digest,
@@ -206,6 +334,7 @@ def _rollout(
     config: RlConfig,
     model: EntryActorCritic,
     episode: EnvironmentEpisode,
+    training_control: TrainingControl = TrainingControl.NORMAL,
 ) -> tuple[list[_Transition], dict[str, object]]:
     transitions: list[_Transition] = []
     environment = TopstepEntryEnvironment(config, episode)
@@ -213,24 +342,37 @@ def _rollout(
     terminated = truncated = False
     final_status = "ACTIVE"
     bars_replayed = 0
+    initial_account = environment.account_state
+    minimum_mll_cushion = float(cast(float, initial_account["equity"])) - float(
+        cast(float, initial_account["mll_floor"])
+    )
     while not (terminated or truncated):
         ticker = TICKERS.index(episode.ticker)
         profile = PROFILES.index(episode.profile)
-        mask = environment.action_mask().copy()
+        environment_mask = environment.action_mask().copy()
+        mask = (
+            np.ones(2, dtype=np.bool_)
+            if training_control is TrainingControl.MASK_DISABLED
+            else environment_mask
+        )
         if bool(mask[1]):
             vector = torch.from_numpy(observation.vector.copy()).unsqueeze(0)
             ticker_tensor = torch.tensor([ticker], dtype=torch.long)
             profile_tensor = torch.tensor([profile], dtype=torch.long)
             with torch.no_grad():
-                logits, values = model(vector, ticker_tensor, profile_tensor)
+                logits, values, cost_values = model.forward_with_cost(
+                    vector, ticker_tensor, profile_tensor
+                )
                 distribution = _masked_distribution(logits, torch.from_numpy(mask).unsqueeze(0))
                 action_tensor = distribution.sample()  # type: ignore[no-untyped-call]
                 log_probability = float(
                     distribution.log_prob(action_tensor).item()  # type: ignore[no-untyped-call]
                 )
             action = int(action_tensor.item())
-            if not mask[action]:
-                raise ProductionTrainingError("policy sampled an invalid masked action")
+            if not environment_mask[action]:
+                raise ProductionTrainingError(
+                    "mask-disabled control produced an illegal environment action"
+                )
             transitions.append(
                 _Transition(
                     observation.vector.copy(),
@@ -239,6 +381,7 @@ def _rollout(
                     action,
                     log_probability,
                     float(values.item()),
+                    float(cost_values.item()),
                     mask,
                     0.0,
                     0.0,
@@ -247,9 +390,17 @@ def _rollout(
             )
         else:
             action = 0
-        observation, _reward, terminated, truncated, info = environment.step(action)
+        try:
+            observation, _reward, terminated, truncated, info = environment.step(action)
+        except EnvironmentContractError as exc:
+            raise ProductionTrainingError("policy submitted an illegal environment action") from exc
         final_status = str(info["status"])
         bars_replayed += 1
+        account = environment.account_state
+        minimum_mll_cushion = min(
+            minimum_mll_cushion,
+            float(cast(float, account["equity"])) - float(cast(float, account["mll_floor"])),
+        )
     if not transitions:
         raise ProductionTrainingError("training episode contains no legal entry decisions")
     reward, cost = _terminal_signal(final_status)
@@ -261,6 +412,7 @@ def _rollout(
         last.action,
         last.old_log_probability,
         last.old_value,
+        last.old_cost_value,
         last.mask,
         reward,
         cost,
@@ -272,15 +424,43 @@ def _rollout(
         "outcome": final_status,
         "bars_replayed": bars_replayed,
         "policy_decisions": len(transitions),
+        "minimum_mll_cushion": minimum_mll_cushion,
     }
 
 
-def _returns(transitions: Sequence[_Transition]) -> np.ndarray:
+def _apply_training_control(
+    episode_transitions: Sequence[list[_Transition]],
+    training_control: TrainingControl,
+) -> list[_Transition]:
+    if training_control in {TrainingControl.NORMAL, TrainingControl.MASK_DISABLED}:
+        return [transition for episode in episode_transitions for transition in episode]
+    terminal_signals = [(episode[-1].reward, episode[-1].cost) for episode in episode_transitions]
+    if training_control is TrainingControl.ZERO_REWARD:
+        assigned = [(0.0, 0.0) for _ in terminal_signals]
+    else:
+        assigned = terminal_signals[1:] + terminal_signals[:1]
+    controlled: list[_Transition] = []
+    for episode, (reward, cost) in zip(episode_transitions, assigned, strict=True):
+        controlled.extend((*episode[:-1], replace(episode[-1], reward=reward, cost=cost)))
+    return controlled
+
+
+def _reward_returns(transitions: Sequence[_Transition]) -> np.ndarray:
     values = np.zeros(len(transitions), dtype=np.float32)
     running = 0.0
     for index in range(len(transitions) - 1, -1, -1):
         if transitions[index].terminal:
-            running = transitions[index].reward - transitions[index].cost
+            running = transitions[index].reward
+        values[index] = running
+    return values
+
+
+def _cost_returns(transitions: Sequence[_Transition]) -> np.ndarray:
+    values = np.zeros(len(transitions), dtype=np.float32)
+    running = 0.0
+    for index in range(len(transitions) - 1, -1, -1):
+        if transitions[index].terminal:
+            running = transitions[index].cost
         values[index] = running
     return values
 
@@ -296,12 +476,47 @@ def _actor_weights(tickers: torch.Tensor) -> tuple[torch.Tensor, dict[str, float
     return weights, totals
 
 
+def _balanced_minibatches(
+    tickers: torch.Tensor, minibatch_size: int
+) -> tuple[list[torch.Tensor], dict[str, int]]:
+    present = [index for index in range(len(TICKERS)) if bool((tickers == index).any())]
+    if not present:
+        raise ProductionTrainingError("PPO rollout has no ticker transitions")
+    per_ticker = max(1, minibatch_size // len(present))
+    owned = {index: torch.nonzero(tickers == index, as_tuple=False).flatten() for index in present}
+    batch_count = max(int(np.ceil(len(indices) / per_ticker)) for indices in owned.values())
+    shuffled = {index: indices[torch.randperm(len(indices))] for index, indices in owned.items()}
+    batches = []
+    for batch in range(batch_count):
+        selected = []
+        for index in present:
+            indices = shuffled[index]
+            positions = torch.arange(batch * per_ticker, (batch + 1) * per_ticker, dtype=torch.long)
+            selected.append(indices[positions.remainder(len(indices))])
+        combined = torch.cat(selected)
+        batches.append(combined[torch.randperm(len(combined))])
+    samples = {TICKERS[index]: batch_count * per_ticker for index in present}
+    return batches, samples
+
+
+def _lagrangian_actor_advantages(
+    reward_advantages: torch.Tensor,
+    cost_advantages: torch.Tensor,
+    dual_lambda: float,
+) -> torch.Tensor:
+    if dual_lambda < 0.0 or reward_advantages.shape != cost_advantages.shape:
+        raise ProductionTrainingError("invalid constrained actor advantages")
+    return (reward_advantages - dual_lambda * cost_advantages) / (1.0 + dual_lambda)
+
+
 def _ppo_update(
     model: EntryActorCritic,
     optimizer: torch.optim.Optimizer,
     normalizers: ReturnNormalizers,
+    controller: ConstraintController,
     transitions: Sequence[_Transition],
     *,
+    episode_costs: Sequence[float],
     epochs: int,
     minibatch_size: int,
 ) -> dict[str, object]:
@@ -315,47 +530,68 @@ def _ppo_update(
         [item.old_log_probability for item in transitions], dtype=torch.float32
     )
     old_values = torch.tensor([item.old_value for item in transitions], dtype=torch.float32)
+    old_cost_values = torch.tensor(
+        [item.old_cost_value for item in transitions], dtype=torch.float32
+    )
     masks = torch.from_numpy(np.stack([item.mask for item in transitions]))
-    raw_returns = _returns(transitions)
-    normalized_returns = torch.empty(len(transitions), dtype=torch.float32)
-    advantages = torch.empty(len(transitions), dtype=torch.float32)
+    raw_reward_returns = _reward_returns(transitions)
+    raw_cost_returns = _cost_returns(transitions)
+    normalized_reward_returns = torch.empty(len(transitions), dtype=torch.float32)
+    reward_advantages = torch.empty(len(transitions), dtype=torch.float32)
+    cost_returns = torch.from_numpy(raw_cost_returns)
+    cost_advantages = torch.empty(len(transitions), dtype=torch.float32)
     for ticker_index, ticker in enumerate(TICKERS):
         owned = np.flatnonzero(np.asarray([item.ticker for item in transitions]) == ticker_index)
         if len(owned):
-            normalizers.update(ticker, raw_returns[owned])
+            normalizers.update(ticker, raw_reward_returns[owned])
             owned_tensor = torch.from_numpy(owned)
-            normalized_returns[owned_tensor] = normalizers.normalize(
-                ticker, torch.from_numpy(raw_returns[owned])
+            normalized_reward_returns[owned_tensor] = normalizers.normalize(
+                ticker, torch.from_numpy(raw_reward_returns[owned])
             )
-            owned_advantages = normalized_returns[owned_tensor] - old_values[owned_tensor]
-            if len(owned_advantages) > 1 and float(owned_advantages.std(unbiased=False)) > 1e-8:
-                owned_advantages = (
-                    owned_advantages - owned_advantages.mean()
-                ) / owned_advantages.std(unbiased=False)
-            advantages[owned_tensor] = owned_advantages
-    actor_weights, actor_weight_totals = _actor_weights(tickers)
+            owned_reward_advantages = (
+                normalized_reward_returns[owned_tensor] - old_values[owned_tensor]
+            )
+            owned_reward_advantages = owned_reward_advantages - owned_reward_advantages.mean()
+            reward_std = owned_reward_advantages.std(unbiased=False)
+            if len(owned_reward_advantages) > 1 and float(reward_std) > 1e-8:
+                owned_reward_advantages = owned_reward_advantages / reward_std
+            reward_advantages[owned_tensor] = owned_reward_advantages
+            owned_cost_advantages = cost_returns[owned_tensor] - old_cost_values[owned_tensor]
+            cost_advantages[owned_tensor] = owned_cost_advantages - owned_cost_advantages.mean()
+    dual_lambda = controller.lambda_value
+    advantages = _lagrangian_actor_advantages(reward_advantages, cost_advantages, dual_lambda)
+    _actor_weight_values, actor_weight_totals = _actor_weights(tickers)
     losses: list[float] = []
     actor_losses: list[float] = []
     value_losses: list[float] = []
+    cost_value_losses: list[float] = []
     entropies: list[float] = []
     ratios: list[torch.Tensor] = []
     clipped: list[torch.Tensor] = []
-    size = len(transitions)
+    balanced_samples: Counter[str] = Counter()
     for _epoch in range(epochs):
-        permutation = torch.randperm(size)
-        for start in range(0, size, minibatch_size):
-            index = permutation[start : start + minibatch_size]
-            logits, values = model(observations[index], tickers[index], profiles[index])
+        minibatches, epoch_samples = _balanced_minibatches(tickers, minibatch_size)
+        balanced_samples.update(epoch_samples)
+        for index in minibatches:
+            logits, values, cost_values = model.forward_with_cost(
+                observations[index], tickers[index], profiles[index]
+            )
             distribution = _masked_distribution(logits, masks[index])
             current = distribution.log_prob(actions[index])  # type: ignore[no-untyped-call]
             ratio = torch.exp(current - old_log_probabilities[index])
             unclipped = ratio * advantages[index]
             clipped_ratio = torch.clamp(ratio, 1.0 - _CLIP_RANGE, 1.0 + _CLIP_RANGE)
             surrogate = torch.minimum(unclipped, clipped_ratio * advantages[index])
-            actor_loss = -(surrogate * actor_weights[index]).sum()
-            value_loss = (values - normalized_returns[index]).square().mean()
+            actor_loss = -surrogate.mean()
+            value_loss = (values - normalized_reward_returns[index]).square().mean()
+            cost_value_loss = (cost_values - cost_returns[index]).square().mean()
             entropy = distribution.entropy().mean()  # type: ignore[no-untyped-call]
-            loss = actor_loss + _VALUE_COEFFICIENT * value_loss - _ENTROPY_COEFFICIENT * entropy
+            loss = (
+                actor_loss
+                + _VALUE_COEFFICIENT * value_loss
+                + _VALUE_COEFFICIENT * cost_value_loss
+                - _ENTROPY_COEFFICIENT * entropy
+            )
             optimizer.zero_grad()
             loss.backward()
             if not bool(torch.isfinite(loss)) or not all(
@@ -370,15 +606,18 @@ def _ppo_update(
             losses.append(float(loss.detach()))
             actor_losses.append(float(actor_loss.detach()))
             value_losses.append(float(value_loss.detach()))
+            cost_value_losses.append(float(cost_value_loss.detach()))
             entropies.append(float(entropy.detach()))
             ratios.append(ratio.detach())
             clipped.append(((ratio < 1.0 - _CLIP_RANGE) | (ratio > 1.0 + _CLIP_RANGE)).detach())
     all_ratios = torch.cat(ratios)
     all_clipped = torch.cat(clipped)
+    constraint_metrics = controller.update(episode_costs)
     return {
         "loss": float(np.mean(losses)),
         "actor_loss": float(np.sum(actor_losses) / epochs),
         "value_loss": float(np.mean(value_losses)),
+        "cost_value_loss": float(np.mean(cost_value_losses)),
         "entropy": float(np.mean(entropies)),
         "finite_gradients": True,
         "ppo_epochs": epochs,
@@ -387,6 +626,14 @@ def _ppo_update(
         "ratio_max_deviation": float(torch.abs(all_ratios - 1.0).max()),
         "clip_fraction": float(all_clipped.float().mean()),
         "actor_weight_totals": actor_weight_totals,
+        "balanced_actor_samples": dict(sorted(balanced_samples.items())),
+        "lambda_used": dual_lambda,
+        "reward_advantage_mean": float(reward_advantages.mean()),
+        "cost_advantage_mean": float(cost_advantages.mean()),
+        "cost_advantage_std": float(cost_advantages.std(unbiased=False)),
+        "cost_target_min": float(cost_returns.min()),
+        "cost_target_max": float(cost_returns.max()),
+        **constraint_metrics,
     }
 
 
@@ -442,53 +689,46 @@ def _transition_audit(transitions: Sequence[_Transition]) -> dict[str, object]:
     }
 
 
-def _ablation_audit(
-    model: EntryActorCritic, transitions: Sequence[_Transition]
+def _policy_diagnostics(
+    model: EntryActorCritic,
+    episode_transitions: Sequence[list[_Transition]],
+    episode_metrics: Sequence[Mapping[str, object]],
 ) -> dict[str, object]:
-    legal = [item for item in transitions if bool(item.mask[1])]
-    if not legal:
-        raise ProductionTrainingError("ablation audit requires legal entry decisions")
-    observations = torch.from_numpy(np.stack([item.observation for item in legal]))
-    tickers = torch.tensor([item.ticker for item in legal], dtype=torch.long)
-    profiles = torch.tensor([item.profile for item in legal], dtype=torch.long)
-    masks = torch.from_numpy(np.stack([item.mask for item in legal]))
+    probes = [episode[0] for episode in episode_transitions]
+    observations = torch.from_numpy(np.stack([item.observation for item in probes]))
+    tickers = torch.tensor([item.ticker for item in probes], dtype=torch.long)
+    profiles = torch.tensor([item.profile for item in probes], dtype=torch.long)
+    masks = torch.from_numpy(np.stack([item.mask for item in probes]))
     with torch.no_grad():
         logits, _ = model(observations, tickers, profiles)
-        base = _masked_distribution(logits, masks)
-        base_probabilities = base.probs
-        reject = _masked_distribution(logits + torch.tensor([100.0, -100.0]), masks)
-        take = _masked_distribution(logits + torch.tensor([-100.0, 100.0]), masks)
-        invalid_masks = masks.clone()
-        invalid_masks[:, 1] = False
-        invalid = _masked_distribution(logits, invalid_masks)
-        collapsed_observations = observations[:1].repeat(len(observations), 1)
-        collapsed_tickers = tickers[:1].repeat(len(observations))
-        collapsed_profiles = profiles[:1].repeat(len(observations))
-        collapsed_logits, _ = model(collapsed_observations, collapsed_tickers, collapsed_profiles)
-        collapsed = _masked_distribution(collapsed_logits, masks)
-    reward_objective = sum(item.reward - item.cost for item in legal if item.terminal)
-    perturbed_reward_objective = sum(
-        item.reward + 1.0 - item.cost for item in legal if item.terminal
-    )
-    evidence = {
-        "base_enter_probability_range": [
-            float(base_probabilities[:, 1].min()),
-            float(base_probabilities[:, 1].max()),
-        ],
-        "reject_all_actions": sorted(set(reject.probs.argmax(dim=1).tolist())),
-        "take_all_actions": sorted(set(take.probs.argmax(dim=1).tolist())),
-        "invalid_enter_probability_max": float(invalid.probs[:, 1].max()),
-        "collapsed_action_count": len(set(collapsed.probs.argmax(dim=1).tolist())),
-        "terminal_objective": reward_objective,
-        "perturbed_terminal_objective": perturbed_reward_objective,
-    }
+        distribution = _masked_distribution(logits, masks)
+        enter_probabilities = distribution.probs[:, 1]
+        actions = distribution.probs.argmax(dim=1)
+        entropies = distribution.entropy()  # type: ignore[no-untyped-call]
+    by_outcome: dict[str, list[float]] = {}
+    for probability, metrics in zip(enter_probabilities, episode_metrics, strict=True):
+        by_outcome.setdefault(str(metrics["outcome"]), []).append(float(probability))
+    means = {name: float(np.mean(values)) for name, values in sorted(by_outcome.items())}
+    enter_rate = float((actions == 1).float().mean())
+    mean_entropy = float(entropies.mean())
+    action_count = len(set(actions.tolist()))
+    pass_probability = means.get("PASS")
+    blow_probability = means.get("BLOW")
     return {
-        "reject_all_detected": evidence["reject_all_actions"] == [0],
-        "take_all_detected": evidence["take_all_actions"] == [1],
-        "invalid_action_detected": evidence["invalid_enter_probability_max"] == 0.0,
-        "action_collapse_detected": evidence["collapsed_action_count"] == 1,
-        "reward_perturbation_detected": reward_objective != perturbed_reward_objective,
-        "evidence": evidence,
+        "enter_rate": enter_rate,
+        "mean_entropy": mean_entropy,
+        "deterministic_action_count": action_count,
+        "mean_enter_probability_by_outcome": means,
+        "pass_minus_blow_enter_probability": (
+            pass_probability - blow_probability
+            if pass_probability is not None and blow_probability is not None
+            else None
+        ),
+        "reject_all_detected": enter_rate == 0.0,
+        "take_all_detected": enter_rate == 1.0,
+        "action_collapse_detected": action_count == 1 or mean_entropy < 0.05,
+        "invalid_actions_observed": 0,
+        "episode_enter_probabilities": [float(value) for value in enter_probabilities],
     }
 
 
@@ -496,19 +736,21 @@ def _checkpoint_payload(
     model: EntryActorCritic,
     optimizer: torch.optim.Optimizer,
     normalizers: ReturnNormalizers,
+    controller: ConstraintController,
     identities: Mapping[str, object],
     update: int,
     metrics: Sequence[Mapping[str, object]],
     evidence: Mapping[str, object],
 ) -> dict[str, object]:
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "identities": dict(identities),
         "update": update,
         "episode_cursor": 0,
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "normalizers": normalizers.state_dict(),
+        "constraint_controller": controller.state_dict(),
         "rng": {
             "python": random.getstate(),
             "numpy": np.random.get_state(),
@@ -530,7 +772,7 @@ def _publish_checkpoint(output: Path, update: int, payload: Mapping[str, object]
         checkpoint = temporary / "checkpoint.pt"
         torch.save(dict(payload), checkpoint)
         bundle = {
-            "schema_version": 2,
+            "schema_version": 3,
             "update": update,
             "identities": payload["identities"],
             "episode_cursor": payload["episode_cursor"],
@@ -560,7 +802,8 @@ def _load_bundle(path: Path, identities: Mapping[str, object]) -> dict[str, obje
         raise ProductionTrainingError("resume checkpoint bundle is invalid") from exc
     if (
         not isinstance(payload, dict)
-        or payload.get("schema_version") != 2
+        or payload.get("schema_version") != 3
+        or bundle.get("schema_version") != 3
         or payload.get("identities") != dict(identities)
         or bundle.get("identities") != dict(identities)
         or bundle.get("update") != payload.get("update")
@@ -595,11 +838,13 @@ def _restore_checkpoint(
     model: EntryActorCritic,
     optimizer: torch.optim.Optimizer,
     normalizers: ReturnNormalizers,
+    controller: ConstraintController,
 ) -> tuple[int, list[dict[str, object]], dict[str, object]]:
     try:
         model.load_state_dict(cast(dict[str, Any], payload["model"]))
         optimizer.load_state_dict(cast(dict[str, Any], payload["optimizer"]))
         normalizers.load_state_dict(cast(dict[str, object], payload["normalizers"]))
+        controller.load_state_dict(cast(dict[str, object], payload["constraint_controller"]))
         rng = cast(dict[str, Any], payload["rng"])
         random.setstate(rng["python"])
         np.random.set_state(rng["numpy"])
@@ -656,10 +901,12 @@ def _train_loaded_policy(
     maximum_updates_this_run: int | None = None,
     resume: bool = False,
     publish: bool = True,
+    training_control: TrainingControl | str = TrainingControl.NORMAL,
 ) -> dict[str, object]:
     """Internal seam for an already verified, complete schedule collection."""
     _validate_contract(config, episodes)
     selected_variant = PolicyVariant(variant)
+    selected_control = TrainingControl(training_control)
     if seed not in config.training.development_seeds:
         raise ProductionTrainingError("seed is not declared in development_seeds")
     if target_updates is not None and target_updates < 1:
@@ -675,7 +922,10 @@ def _train_loaded_policy(
     model = EntryActorCritic(len(first_observation.vector), selected_variant)
     optimizer = torch.optim.Adam(model.parameters(), lr=_LEARNING_RATE)
     normalizers = ReturnNormalizers(TICKERS)
-    identities = _identities(config, episodes, seed, selected_variant)
+    controller = ConstraintController.from_config(config)
+    identities = _identities(
+        config, episodes, seed, selected_variant, target_updates, selected_control
+    )
     completed = 0
     metrics: list[dict[str, object]] = []
     last_evidence: dict[str, object] = {}
@@ -685,7 +935,7 @@ def _train_loaded_policy(
                 raise ProductionTrainingError("resume requires an unpublished run directory")
             payload = _recover_checkpoint(output, identities)
             completed, metrics, last_evidence = _restore_checkpoint(
-                payload, model, optimizer, normalizers
+                payload, model, optimizer, normalizers, controller
             )
         else:
             try:
@@ -723,19 +973,22 @@ def _train_loaded_policy(
         profile_counts: Counter[str] = Counter()
         outcomes: Counter[str] = Counter()
         episode_metrics: list[dict[str, object]] = []
-        all_transitions: list[_Transition] = []
+        episode_transition_groups: list[list[_Transition]] = []
         for episode in episodes.episodes:
-            transitions, episode_rollout = _rollout(config, model, episode)
-            all_transitions.extend(transitions)
+            transitions, episode_rollout = _rollout(config, model, episode, selected_control)
+            episode_transition_groups.append(transitions)
             ticker_counts[episode.ticker] += 1
             profile_counts[episode.profile] += 1
             outcomes[str(episode_rollout["outcome"])] += 1
             episode_metrics.append(episode_rollout)
+        all_transitions = _apply_training_control(episode_transition_groups, selected_control)
         update_metrics = _ppo_update(
             model,
             optimizer,
             normalizers,
+            controller,
             all_transitions,
+            episode_costs=[item.cost for item in all_transitions if item.terminal],
             epochs=config.training.ppo_epochs,
             minibatch_size=config.training.minibatch_size,
         )
@@ -750,11 +1003,11 @@ def _train_loaded_policy(
             "policy_decisions": len(all_transitions),
             "episodes": episode_metrics,
         }
-        ablations = _ablation_audit(model, all_transitions)
+        policy_diagnostics = _policy_diagnostics(model, episode_transition_groups, episode_metrics)
         last_evidence = {
             "rollouts": rollouts,
             "transition_audit": _transition_audit(all_transitions),
-            "ablations": ablations,
+            "policy_diagnostics": policy_diagnostics,
         }
         completed += 1
         updates_this_run += 1
@@ -765,6 +1018,7 @@ def _train_loaded_policy(
                 model,
                 optimizer,
                 normalizers,
+                controller,
                 identities,
                 completed,
                 metrics,
@@ -788,11 +1042,12 @@ def _train_loaded_policy(
         raise ProductionTrainingError("checkpoint is missing last rollout evidence")
     result: dict[str, object] = {
         "stage": "rl-train",
-        "algorithm": "masked_ppo",
+        "algorithm": "episodic_masked_ppo_lagrangian",
         "status": status,
         "fold": episodes.fold,
         "seed": seed,
         "variant": selected_variant.value,
+        "training_control": selected_control.value,
         "completed_updates": completed,
         "target_updates": target_updates,
         "completed_timesteps": completed_timesteps,
@@ -806,6 +1061,8 @@ def _train_loaded_policy(
         "policy_sha256": _canonical_digest(model.state_dict()),
         "optimizer_sha256": _canonical_digest(optimizer.state_dict()),
         "normalizers": normalizers.state_dict(),
+        "constraint": asdict(config.constraint),
+        "constraint_controller": controller.state_dict(),
         "metrics": metrics,
     }
     if publish and status == "complete":
@@ -842,6 +1099,8 @@ def train_entry_policy(
     maximum_updates_this_run: int | None = None,
     resume: bool = False,
     repository_root: Path | None = None,
+    training_control: TrainingControl | str = TrainingControl.NORMAL,
+    publish: bool = True,
 ) -> dict[str, object]:
     """Load the declared schedule and train one fold/seed through the public seam."""
     episodes = load_training_episodes(config, training_manifest, repository_root)
@@ -854,6 +1113,8 @@ def train_entry_policy(
         target_updates=target_updates,
         maximum_updates_this_run=maximum_updates_this_run,
         resume=resume,
+        publish=publish,
+        training_control=training_control,
     )
 
 
@@ -863,13 +1124,14 @@ def _completed_seed(
     run_output: Path,
     seed: int,
     variant: PolicyVariant,
+    target_updates: int | None,
 ) -> dict[str, object]:
     try:
         manifest = json.loads((run_output / "manifest.json").read_text())
         result = json.loads((run_output / "metrics.json").read_text())
     except (OSError, json.JSONDecodeError) as exc:
         raise ProductionTrainingError("completed seed artifact is invalid") from exc
-    expected = _identities(config, episodes, seed, variant)
+    expected = _identities(config, episodes, seed, variant, target_updates, TrainingControl.NORMAL)
     if (
         not isinstance(manifest, dict)
         or not isinstance(result, dict)
@@ -900,7 +1162,11 @@ def _train_policy_seeds_loaded(
     for seed in selected:
         run_output = output / f"fold-{episodes.fold:02d}" / f"seed-{seed}"
         if resume and (run_output / "manifest.json").is_file():
-            runs.append(_completed_seed(config, episodes, run_output, seed, selected_variant))
+            runs.append(
+                _completed_seed(
+                    config, episodes, run_output, seed, selected_variant, target_updates
+                )
+            )
         else:
             runs.append(
                 _train_loaded_policy(
@@ -932,6 +1198,13 @@ def _train_policy_seeds_loaded(
         "stage": "rl-train-seeds",
         "variant": selected_variant.value,
         "fold": episodes.fold,
+        "completion_mode": (
+            "production_timesteps" if target_updates is None else "bounded_updates"
+        ),
+        "target_updates": target_updates,
+        "target_timesteps": (
+            config.training.development_timesteps_per_seed if target_updates is None else None
+        ),
         "reported_seeds": list(selected),
         "runs": runs,
         "worst_seed": worst_seed,
@@ -974,6 +1247,7 @@ def train_policy_seeds(
 __all__ = [
     "PolicyVariant",
     "ProductionTrainingError",
+    "TrainingControl",
     "TrainingEpisodes",
     "load_training_episodes",
     "train_entry_policy",
