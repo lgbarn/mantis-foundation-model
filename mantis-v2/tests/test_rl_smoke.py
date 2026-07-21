@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -12,7 +14,7 @@ from gymnasium.utils.env_checker import check_env
 from mantis_v2 import cli
 from mantis_v2 import rl_smoke as rl_smoke_module
 from mantis_v2.rl_config import load_rl_config
-from mantis_v2.rl_environment import EnvironmentContractError
+from mantis_v2.rl_environment import EnvironmentContractError, TopstepEntryEnvironment
 from mantis_v2.rl_smoke import (
     GymnasiumEntryAdapter,
     NumericAudit,
@@ -43,20 +45,35 @@ def _checkpoint(output: Path) -> Path:
     return output / state["checkpoint"] / "model.zip"
 
 
-def _assert_torch_tree_close(left: Any, right: Any) -> None:
+def _assert_torch_tree_equal(left: Any, right: Any) -> None:
     if isinstance(left, torch.Tensor):
         assert isinstance(right, torch.Tensor)
-        assert torch.allclose(left, right, rtol=1e-10, atol=1e-12)
+        assert torch.equal(left, right)
     elif isinstance(left, dict):
         assert left.keys() == right.keys()
         for key in left:
-            _assert_torch_tree_close(left[key], right[key])
+            _assert_torch_tree_equal(left[key], right[key])
     elif isinstance(left, list):
         assert len(left) == len(right)
         for first, second in zip(left, right, strict=True):
-            _assert_torch_tree_close(first, second)
+            _assert_torch_tree_equal(first, second)
     else:
         assert left == right
+
+
+def _persisted_schedule_digest(output: Path) -> str:
+    state = json.loads((output / "state.json").read_text())
+    bundle_path = output / state["checkpoint"] / "bundle.json"
+    runtime_path = output / state["checkpoint"] / "runtime.json"
+    bundle = json.loads(bundle_path.read_text())
+    runtime_bytes = runtime_path.read_bytes()
+    assert hashlib.sha256(runtime_bytes).hexdigest() == bundle["runtime_sha256"]
+    runtime = json.loads(runtime_bytes)
+    trace = runtime["schedule_trace"]
+    assert all(type(value) is int for value in trace)
+    digest = hashlib.sha256(json.dumps(trace, separators=(",", ":")).encode()).hexdigest()
+    assert digest == runtime["schedule_trace_sha256"]
+    return digest
 
 
 def test_official_environment_checks_and_action_masks_use_training_adapter() -> None:
@@ -101,7 +118,7 @@ def test_50k_cpu_smoke_beats_reject_all_and_keeps_every_atomic_boundary(
 def test_interrupted_resume_matches_uninterrupted_policy_optimizer_and_schedule(
     tmp_path: Path, completed_smoke
 ) -> None:
-    baseline_output, baseline_result = completed_smoke
+    baseline_output, _baseline_result = completed_smoke
     config = _config()
     output = tmp_path / "resumable"
     partial = run_maskable_ppo_smoke(config, output, maximum_steps_this_run=20_000)
@@ -136,13 +153,11 @@ def test_interrupted_resume_matches_uninterrupted_policy_optimizer_and_schedule(
 
     baseline = MaskablePPO.load(_checkpoint(baseline_output), device="cpu")
     resumed = MaskablePPO.load(_checkpoint(output), device="cpu")
-    _assert_torch_tree_close(baseline.policy.state_dict(), resumed.policy.state_dict())
-    _assert_torch_tree_close(
+    _assert_torch_tree_equal(baseline.policy.state_dict(), resumed.policy.state_dict())
+    _assert_torch_tree_equal(
         baseline.policy.optimizer.state_dict(), resumed.policy.optimizer.state_dict()
     )
-    assert (
-        baseline_result["schedule_digests"]["training"] == completed["schedule_digests"]["training"]
-    )
+    assert _persisted_schedule_digest(baseline_output) == _persisted_schedule_digest(output)
 
     with pytest.raises(RlSmokeError, match="run identity already exists"):
         run_maskable_ppo_smoke(config, output)
@@ -150,13 +165,70 @@ def test_interrupted_resume_matches_uninterrupted_policy_optimizer_and_schedule(
         run_maskable_ppo_smoke(config, output, resume=True)
 
 
+def test_adapter_observation_and_reward_seams_reject_nonfinite_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    episodes = build_synthetic_episodes(seed=42, count=4)
+    observation_environment = GymnasiumEntryAdapter(_config(), episodes, seed=42)
+    monkeypatch.setattr(
+        TopstepEntryEnvironment,
+        "reset",
+        lambda *args, **kwargs: (
+            SimpleNamespace(
+                vector=np.full(observation_environment.observation_space.shape, np.nan)
+            ),
+            {},
+        ),
+    )
+    with pytest.raises(RlSmokeError, match="observations"):
+        observation_environment.reset()
+
+    monkeypatch.undo()
+    reward_environment = GymnasiumEntryAdapter(
+        _config(), episodes, seed=42, reward_transform=lambda _value: float("nan")
+    )
+    reward_environment.reset(seed=42)
+    with pytest.raises(RlSmokeError, match="rewards"):
+        reward_environment.step(0)
+
+
 @pytest.mark.parametrize(
-    "surface",
-    ("observations", "rewards", "logits", "values", "gradients", "parameters", "optimizer_state"),
+    "surface", ("parameters", "gradients", "optimizer_state", "logits", "values")
 )
-def test_numeric_audit_rejects_injected_nonfinite_values(surface: str) -> None:
+def test_policy_audit_hook_rejects_injected_nonfinite_values(
+    completed_smoke, monkeypatch: pytest.MonkeyPatch, surface: str
+) -> None:
+    output, _ = completed_smoke
+    model = MaskablePPO.load(_checkpoint(output), device="cpu")
+    episodes = build_synthetic_episodes(seed=42, count=4)
+    environment = GymnasiumEntryAdapter(_config(), episodes, seed=42)
+    observation, _ = environment.reset(seed=42)
+    parameter = next(model.policy.parameters())
+    if surface == "parameters":
+        with torch.no_grad():
+            parameter.flatten()[0] = float("nan")
+    elif surface == "gradients":
+        parameter.grad = torch.full_like(parameter, float("nan"))
+    elif surface == "optimizer_state":
+        state = next(iter(model.policy.optimizer.state.values()))
+        tensor = next(value for value in state.values() if isinstance(value, torch.Tensor))
+        tensor.flatten()[0] = float("nan")
+    elif surface == "logits":
+        monkeypatch.setattr(
+            model.policy,
+            "get_distribution",
+            lambda *args, **kwargs: SimpleNamespace(
+                distribution=SimpleNamespace(logits=torch.tensor([[float("nan"), 0.0]]))
+            ),
+        )
+    else:
+        monkeypatch.setattr(
+            model.policy,
+            "predict_values",
+            lambda *args, **kwargs: torch.tensor([[float("nan")]]),
+        )
     with pytest.raises(RlSmokeError, match=surface):
-        NumericAudit()._finite(surface, np.array([np.nan], dtype=np.float32))
+        NumericAudit().policy(model, observation, environment.action_masks())
 
 
 def test_smoke_independently_never_opens_production_or_holdout_paths(
@@ -216,6 +288,41 @@ def test_checkpoint_failures_preserve_last_valid_pointer_and_resume(
     assert prior_checkpoint.read_bytes() == prior_checkpoint_hash
     resumed = run_maskable_ppo_smoke(config, output, resume=True, maximum_steps_this_run=10_000)
     assert resumed["timesteps"] == 20_000
+
+
+def test_pointer_failure_orphan_adoption_continues_exactly_to_50k(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, completed_smoke
+) -> None:
+    baseline_output, _ = completed_smoke
+    config = _config()
+    output = tmp_path / "orphan-continuation"
+    run_maskable_ppo_smoke(config, output, maximum_steps_this_run=10_000)
+    prior_state = (output / "state.json").read_bytes()
+    original_replace = rl_smoke_module.os.replace
+
+    with monkeypatch.context() as context:
+
+        def fail_pointer(source, target):
+            if Path(target) == output / "state.json":
+                raise OSError("injected pointer failure")
+            return original_replace(source, target)
+
+        context.setattr(rl_smoke_module.os, "replace", fail_pointer)
+        with pytest.raises(OSError, match="injected pointer failure"):
+            run_maskable_ppo_smoke(config, output, resume=True, maximum_steps_this_run=10_000)
+
+    assert (output / "state.json").read_bytes() == prior_state
+    assert (output / "checkpoints" / "step-00020000").is_dir()
+    result = run_maskable_ppo_smoke(config, output, resume=True)
+    assert result["timesteps"] == 50_000
+
+    baseline = MaskablePPO.load(_checkpoint(baseline_output), device="cpu")
+    adopted = MaskablePPO.load(_checkpoint(output), device="cpu")
+    _assert_torch_tree_equal(baseline.policy.state_dict(), adopted.policy.state_dict())
+    _assert_torch_tree_equal(
+        baseline.policy.optimizer.state_dict(), adopted.policy.optimizer.state_dict()
+    )
+    assert _persisted_schedule_digest(baseline_output) == _persisted_schedule_digest(output)
 
 
 def test_cli_exposes_cpu_rl_smoke_and_resume(

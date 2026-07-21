@@ -60,13 +60,6 @@ class NumericAudit:
         self.rewards += 1
 
     def policy(self, model: MaskablePPO, observation: np.ndarray, mask: np.ndarray) -> None:
-        tensor, _ = model.policy.obs_to_tensor(observation)
-        with torch.no_grad():
-            distribution = model.policy.get_distribution(tensor, action_masks=mask)
-            logits = cast(Categorical, distribution.distribution).logits
-            values = model.policy.predict_values(tensor)
-        self._finite("logits", logits)
-        self._finite("values", values)
         for parameter in model.policy.parameters():
             self._finite("parameters", parameter)
             if parameter.grad is not None:
@@ -75,6 +68,13 @@ class NumericAudit:
             for value in state.values():
                 if isinstance(value, torch.Tensor):
                     self._finite("optimizer_state", value)
+        tensor, _ = model.policy.obs_to_tensor(observation)
+        with torch.no_grad():
+            distribution = model.policy.get_distribution(tensor, action_masks=mask)
+            logits = cast(Categorical, distribution.distribution).logits
+            values = model.policy.predict_values(tensor)
+        self._finite("logits", logits)
+        self._finite("values", values)
         self.policy_checks += 1
 
     def _finite(self, name: str, value: np.ndarray | torch.Tensor) -> None:
@@ -184,6 +184,7 @@ class GymnasiumEntryAdapter(gym.Env[np.ndarray, int]):
         *,
         seed: int,
         audit: NumericAudit | None = None,
+        reward_transform: Callable[[float], float] | None = None,
     ) -> None:
         super().__init__()
         self.metadata = {"render_modes": []}
@@ -195,6 +196,7 @@ class GymnasiumEntryAdapter(gym.Env[np.ndarray, int]):
         self._cursor = 0
         self._environment = TopstepEntryEnvironment(config, episodes[0])
         self._audit = audit or NumericAudit()
+        self._reward_transform = reward_transform or (lambda value: value)
         observation, _ = self._environment.reset(seed=seed)
         bounds = np.finfo(np.float32)
         self.observation_space = spaces.Box(
@@ -236,7 +238,9 @@ class GymnasiumEntryAdapter(gym.Env[np.ndarray, int]):
             self.illegal_action_count += 1
         label = self._environment.current_label
         observation, _, terminated, truncated, info = self._environment.step(chosen)
-        reward = 0.0 if label is None else (1.0 if chosen == label else -1.0)
+        reward = self._reward_transform(
+            0.0 if label is None else (1.0 if chosen == label else -1.0)
+        )
         vector = observation.vector.copy()
         self._audit.observation(vector)
         self._audit.reward(reward)
@@ -435,7 +439,15 @@ def _equivalent_checkpoint(
     ):
         if existing_runtime.get(key) != runtime.get(key):
             return False
-    saved = MaskablePPO.load(model_path, device="cpu")
+    python_rng = random.getstate()
+    numpy_rng = np.random.get_state()
+    torch_rng = torch.get_rng_state().clone()
+    try:
+        saved = MaskablePPO.load(model_path, device="cpu")
+    finally:
+        random.setstate(python_rng)
+        np.random.set_state(numpy_rng)
+        torch.set_rng_state(torch_rng)
     return (
         saved.num_timesteps == model.num_timesteps
         and _torch_tree_equal(saved.policy.state_dict(), model.policy.state_dict())
