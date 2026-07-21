@@ -1,8 +1,63 @@
 # RunPod infrastructure
 
-This directory will contain the reproducible RunPod infrastructure for the
+This directory contains the reproducible RunPod control-plane inputs for the
 MantisV2 training pipeline. The decision map is GitHub issue #20. The accepted
 implementation route is [IMPLEMENTATION_HANDOFF.md](IMPLEMENTATION_HANDOFF.md).
+
+## Deterministic launch planning
+
+`runpod-plan` is the zero-cost planning boundary. It reads only explicit files,
+does not query RunPod, does not invoke a subprocess, and cannot create or modify
+a provider resource. Inputs are strict and versioned:
+
+- `configs/platform-v1.toml` is the committed non-secret resource and spend
+  policy.
+- An Experiment Config binds one portable scientific definition. The example
+  file uses a placeholder definition digest and is not production authority.
+- `configs/local.example.toml` documents the ignored machine mapping. Copy it
+  to `infra/runpod/local.toml` and replace the paths; that filename is ignored.
+- Launch Intent, Inventory Snapshot, Spend Ledger, and optional Launch
+  Authorization are explicit JSON inputs. The files under `examples/` are
+  deterministic synthetic fixtures, not current inventory or authorization.
+
+The rejection dry run below is deliberately historical and synthetic. It is
+safe to execute because the Inventory Snapshot is a file, not a live query:
+
+```bash
+just runpod-plan \
+  infra/runpod/configs/platform-v1.toml \
+  infra/runpod/configs/local.example.toml \
+  infra/runpod/configs/experiment-cuda-qualification.example.toml \
+  infra/runpod/examples/intent-a40-qualification.json \
+  infra/runpod/examples/inventory-synthetic.json \
+  infra/runpod/examples/spend-ledger-empty.json \
+  2026-07-21T12:02:00Z \
+  /tmp/mantis-runpod-plan/launch-decision.json
+```
+
+Standard output contains only `decision_path` and `decision_digest`. The file
+is canonical JSON and contains `allowed = false`, reason
+`authorization_required`, and the exact `authorization_subject_digest` a human
+would review. The output path must not already exist. Every target path and the
+evaluation timestamp are required; there is no default environment, account,
+GPU, datacenter, experiment, inventory, ledger, or output location.
+
+An operator creates a Launch Authorization outside this command after reviewing
+the exact subject, provider price, projected spend, maximum duration, and
+expiry. Re-evaluate through the same CLI with the explicit authorization:
+
+```bash
+just runpod-plan-authorized \
+  <platform> <local> <experiment> <intent> <inventory> <ledger> \
+  <authorization> <evaluated-at> <new-output>
+```
+
+Authorization is exact, expiring, and single-use. A changed config, local
+controller mapping, intent, price/inventory observation, ledger/reservation
+state, duration, spend ceiling, expiry, or consumed authorization digest rejects
+the decision. Issue #31 will own consumption, reservation mutation, provider
+inventory collection, and Pod lifecycle; this planner owns none of those side
+effects.
 
 ## Ownership
 
