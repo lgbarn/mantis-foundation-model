@@ -220,3 +220,6 @@ rl-validate-environment training_manifest validation_manifest output config="man
 
 rl-smoke output config="mantis-v2/configs/rl-entry-smoke.toml" resume="":
     uv run mantis-v2 rl-smoke --config {{config}} --output {{output}} {{resume}}
+
+rl-train training_manifest output config="mantis-v2/configs/rl-entry-topstep-100k.toml" variant="shared_ticker_value" resume="":
+    uv run mantis-v2 rl-train --config {{config}} --training-manifest {{training_manifest}} --output {{output}} --variant {{variant}} {{resume}}

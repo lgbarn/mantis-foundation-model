@@ -69,6 +69,8 @@ just rl-account-replay fixture.json replay.json mantis-v2/configs/rl-entry-smoke
 just rl-validate-environment training.json validation.json environment-validation.json \
   mantis-v2/configs/rl-entry-smoke.toml
 just rl-smoke artifacts/rl-entry-smoke-v1 mantis-v2/configs/rl-entry-smoke.toml
+just rl-train training.json artifacts/rl-entry-training \
+  mantis-v2/configs/rl-entry-topstep-100k.toml shared_ticker_value
 just runpod-image-build ghcr.io/lgbarn/mantis-v2-cuda:SOURCE_SHA
 just runpod-image-scan ghcr.io/lgbarn/mantis-v2-cuda:SOURCE_SHA reports/image-scan.json
 just runpod-image-self-check \
@@ -358,3 +360,13 @@ Normal preparation does not materialize 2026 labels or embeddings. The sealed
 with `evaluation.allow_holdout=true` and the matching explicit `--unlock`
 value. Only then does it generate 2026 candidates and embeddings and apply the
 final validation-owned head and threshold once.
+`rl-train` is the Stage 2 CPU production seam. It accepts only a provenance-
+matching `training` episode manifest and trains every declared development seed.
+The candidate is `shared_ticker_value`; `independent_actor` and `shared_critic`
+use the identical command and checkpoint contract as preregistered ablations.
+Each actor emits only `skip` or `enter`. Trend Magic direction, the deterministic
+2R/0.75R exit, the fixed mini/micro profile, and the Topstep risk shield remain
+outside actor authority. A run checkpoints only after a complete balanced
+schedule cycle and resumes optimizer, ticker-owned return statistics, RNG state,
+metrics, and exact config/schedule/artifact identities. `--resume` refuses a
+completed or mismatched run. The sealed holdout is never a training input.

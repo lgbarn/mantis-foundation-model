@@ -17,7 +17,7 @@ foundation_weights_path = "/Volumes/Storage/trading-research/artifacts/mantis-fo
 foundation_weights_sha256 = "aab5bac1459a3cf0b08663d1d327e79ee3c1337dd51a30e16def53b8f563c1b9"
 
 [rl.run]
-name = "rl-entry-topstep-100k-v4"
+name = "rl-entry-topstep-100k-v8"
 profile = "production"
 seed = 42
 device = "cpu"

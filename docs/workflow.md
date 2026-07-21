@@ -60,6 +60,7 @@ them can make a checkpoint intentionally non-resumable.
 | `just rl-dry-run <config>` | Validates the locked RL identity | Atomic dry-run manifest | CPU; no holdout access |
 | `just rl-account-replay <input> <output> <config>` | Replays marked-equity account fixtures | Atomic replay manifest | CPU; refuses overwrite |
 | `just rl-smoke <output> <config> [--resume]` | Trains the bounded synthetic MaskablePPO qualification | Atomic checkpoint, state, metrics, manifest | 50K CPU steps; no production or holdout data |
+| `just rl-train <training_manifest> <output> <config> [variant] [--resume]` | Trains all declared development seeds on one production training partition | Atomic fold/seed checkpoints, metrics, seed summary | CPU only; no validation, test, or holdout input |
 | `just runpod-image-build <image>` | Builds the pinned Linux amd64 CUDA image from a clean commit | Local Docker image | Docker CPU/disk/network use; no Pod or registry push |
 | `just runpod-image-scan <image> <output>` | Scans saved image layers and history | Canonical scan JSON | Requires a local Docker daemon |
 | `just runpod-image-self-check <image> <output>` | Verifies CUDA, driver, tools, lock, and runtime inventory | Canonical runtime JSON | Requires Docker plus a compatible NVIDIA GPU |
@@ -504,6 +505,24 @@ just rl-smoke \
   mantis-v2/configs/rl-entry-smoke.toml \
   --resume
 ```
+
+Production entry-policy training starts only from the qualified training
+schedule. The default candidate and both preregistered ablations share one seam:
+
+```bash
+just rl-train \
+  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v8/episodes/fold-00-training-seed-42.json \
+  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v8/training/shared-ticker-value \
+  mantis-v2/configs/rl-entry-topstep-100k.toml \
+  shared_ticker_value
+```
+
+Use `independent_actor` or `shared_critic` only for the named architecture
+ablation. Training replays complete episodes, balances ticker/profile evidence,
+uses `gamma=1.0` with PASS=1 and BLOW cost=1 only at termination, and writes a
+checkpoint after each complete schedule cycle. Resume with a final `--resume`;
+any source, config, schedule, embedding, foundation, rule, fee, seed, fold, or
+variant mismatch fails before state is loaded.
 
 The smoke uses the MIT-licensed, hash-locked local stack: Gymnasium 1.3.0,
 Stable-Baselines3 2.9.0, SB3-Contrib 2.9.0, and Optuna 4.9.0. No paid or hosted
