@@ -783,6 +783,32 @@ def test_next_open_label_resolves_same_bar_tie_as_stop() -> None:
     assert exit_index.tolist() == [1]
 
 
+def test_fixed_3r_label_ignores_a_target_reached_after_an_earlier_stop() -> None:
+    frame = pd.DataFrame(
+        {
+            "open": [99.0, 100.0, 100.0],
+            "high": [100.0, 101.0, 103.0],
+            "low": [98.0, 99.0, 99.5],
+            "close": [99.0, 99.0, 103.0],
+        }
+    )
+
+    label, reward, exit_price, exit_index, _ = _label_chunk(
+        frame,
+        np.array([0]),
+        np.array([1]),
+        np.array([1.0]),
+        target_r=3.0,
+        horizon=2,
+        cost_r=0.03,
+    )
+
+    assert label.tolist() == [0]
+    assert reward[0] == pytest.approx(-1.03)
+    assert exit_price.tolist() == [99.0]
+    assert exit_index.tolist() == [1]
+
+
 def test_session_horizon_enforces_the_configured_1510_chicago_cutoff() -> None:
     config = load_downstream_config(TREND_MAGIC_CONFIG)
     close_timestamps = pd.Series(
