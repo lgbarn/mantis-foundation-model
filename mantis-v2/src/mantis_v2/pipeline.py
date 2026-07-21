@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import tempfile
+import time
 from collections.abc import Sized
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -24,6 +25,12 @@ from mantis_v2.data import (
     build_anchors,
     contamination_report,
     load_streams,
+)
+from mantis_v2.instrumentation import (
+    RunInstrumentation,
+    collect_resource_metrics,
+    parse_tensorboard_events,
+    synchronize_device,
 )
 from mantis_v2.model import MantisV2Adapter, NextLegModel, download_verified_weights, nextleg_loss
 from mantis_v2.provenance import Provenance, build_provenance, sha256_file
@@ -75,6 +82,7 @@ def _assert_run_writable(config: PipelineConfig, root: Path) -> None:
             "checkpoints/latest.pt",
             "checkpoints/best.pt",
             "metrics.json",
+            "run-metadata.json",
             "provenance.json",
             "train-result.json",
             "evaluation.json",
@@ -224,6 +232,50 @@ def _validation_state(history: list[dict[str, Any]]) -> tuple[float, int]:
     return best, without_improvement
 
 
+def _emit_training_event(
+    instrumentation: RunInstrumentation,
+    record: dict[str, Any],
+    telemetry: dict[str, Any],
+) -> None:
+    instrumentation.scalars(
+        {
+            "run/epoch": record["epoch"],
+            "run/global_step": record["global_step"],
+            "loss/train/total": record["train"]["total"],
+            "loss/train/candle": record["train"]["candle"],
+            "loss/train/leg": record["train"]["leg"],
+            "loss/validation/total": record["validation"]["total"],
+            "loss/validation/candle": record["validation"]["candle"],
+            "loss/validation/leg": record["validation"]["leg"],
+            "optimizer/learning_rate": record["learning_rate"],
+            "optimization/gradient_norm": telemetry["gradient_norm"],
+            "throughput/examples_per_second": telemetry["examples_per_second"],
+            "throughput/updates_per_second": telemetry["updates_per_second"],
+            "events/checkpoint_saved": telemetry["checkpoint_saved"],
+            "events/best_checkpoint": telemetry["best_checkpoint"],
+            "events/early_stop": telemetry["early_stop"],
+            "io/data_wait_seconds": telemetry["data_wait_seconds"],
+            "checkpoint/duration_seconds": telemetry["checkpoint_duration_seconds"],
+            "checkpoint/size_bytes": telemetry["checkpoint_size_bytes"],
+            "host/rss_bytes": telemetry["host_rss_bytes"],
+            "filesystem/free_bytes": telemetry["filesystem_free_bytes"],
+        },
+        record["global_step"],
+    )
+    instrumentation.scalars(
+        {
+            tag: value
+            for tag, value in {
+                "cuda/allocated_bytes": telemetry["cuda_allocated_bytes"],
+                "cuda/reserved_bytes": telemetry["cuda_reserved_bytes"],
+                "cuda/utilization_percent": telemetry["cuda_utilization_percent"],
+            }.items()
+            if value is not None
+        },
+        record["global_step"],
+    )
+
+
 def _model(config: PipelineConfig, device: torch.device) -> NextLegModel:
     model = NextLegModel(config.model, config.target, len(config.data.feature_columns), device)
     return model.to(device)
@@ -253,15 +305,28 @@ def _run_epoch(
     max_steps: int,
     *,
     completed_steps: int = 0,
+    telemetry: dict[str, float] | None = None,
 ) -> tuple[dict[str, float], int]:
     training = optimizer is not None
     model.train(training)
     totals = {"total": 0.0, "candle": 0.0, "leg": 0.0}
+    gradient_norm_total = 0.0
+    examples = 0
     batches = 0
+    data_wait_seconds = 0.0
+    epoch_started = time.perf_counter()
     steps_per_epoch = max_steps or len(loader)
     context = torch.enable_grad() if training else torch.inference_mode()
+    synchronize_device(device)
     with context:
-        for batch in loader:
+        iterator = iter(loader)
+        while True:
+            wait_started = time.perf_counter()
+            try:
+                batch = next(iterator)
+            except StopIteration:
+                break
+            data_wait_seconds += time.perf_counter() - wait_started
             moved = _move(batch, device)
             if optimizer is not None:
                 learning_rate = config.training.learning_rate_for_step(
@@ -292,14 +357,28 @@ def _run_epoch(
                         "non-finite training gradient norm at global step "
                         f"{completed_steps + batches + 1}"
                     )
+                gradient_norm_total += float(gradient_norm.detach().cpu())
                 optimizer.step()
             for key in ("total", "candle", "leg"):
                 totals[key] += float(losses[key].detach().cpu())
             batches += 1
+            examples += len(moved["context"])
             if max_steps and batches >= max_steps:
                 break
     if not batches:
         raise PipelineError("data loader produced no batches")
+    synchronize_device(device)
+    duration_seconds = max(time.perf_counter() - epoch_started, 1e-12)
+    if telemetry is not None:
+        telemetry.update(
+            {
+                "data_wait_seconds": data_wait_seconds,
+                "duration_seconds": duration_seconds,
+                "examples_per_second": examples / duration_seconds,
+                "updates_per_second": batches / duration_seconds,
+                "gradient_norm": gradient_norm_total / batches if training else 0.0,
+            }
+        )
     return {key: value / batches for key, value in totals.items()}, batches
 
 
@@ -318,13 +397,16 @@ def train(config: PipelineConfig) -> dict[str, Any]:
     pending_checkpoint = checkpoint_path.with_name("pending.pt")
     start_epoch = 0
     global_step = 0
+    resume_source: str | None = None
     history: list[dict[str, Any]] = []
     if config.training.resume and pending_checkpoint.is_file():
+        resume_source = str(pending_checkpoint.resolve())
         start_epoch, global_step = load_checkpoint(pending_checkpoint, model, optimizer, provenance)
         try:
             history = _load_history(root, start_epoch)
         except PipelineError:
             if checkpoint_path.is_file():
+                resume_source = str(checkpoint_path.resolve())
                 start_epoch, global_step = load_checkpoint(
                     checkpoint_path, model, optimizer, provenance
                 )
@@ -335,13 +417,60 @@ def train(config: PipelineConfig) -> dict[str, Any]:
                 optimizer = _optimizer(model, config)
                 start_epoch = 0
                 global_step = 0
+                resume_source = None
             else:
                 raise
         else:
             pending_checkpoint.replace(checkpoint_path)
     elif config.training.resume and checkpoint_path.is_file():
+        resume_source = str(checkpoint_path.resolve())
         start_epoch, global_step = load_checkpoint(checkpoint_path, model, optimizer, provenance)
         history = _load_history(root, start_epoch)
+    trainable_parameters = sum(
+        parameter.numel() for parameter in model.parameters() if parameter.requires_grad
+    )
+    frozen_parameters = sum(
+        parameter.numel() for parameter in model.parameters() if not parameter.requires_grad
+    )
+    first_parameter = next(model.parameters())
+    metadata: dict[str, object] = {
+        "initialization_mode": (
+            "random" if config.model.mode == "scratch" else "pinned_official_checkpoint"
+        ),
+        "upstream_revision": config.model.hub_revision,
+        "upstream_weights_sha256": config.model.weights_sha256,
+        "trainable_parameters": trainable_parameters,
+        "frozen_parameters": frozen_parameters,
+        "seed": config.run.seed,
+        "precision": str(first_parameter.dtype).removeprefix("torch."),
+        "resume_source": resume_source,
+    }
+    _write_json(root / "run-metadata.json", metadata)
+    try:
+        if not (root / "events").is_dir():
+            raise FileNotFoundError
+        prior_events = parse_tensorboard_events(root / "events")
+        prior_steps = prior_events["scalars"].get("run/global_step", [])
+        last_event_step = max((event["step"] for event in prior_steps), default=-1)
+    except (FileNotFoundError, KeyError, OSError, RuntimeError):
+        last_event_step = -1
+    instrumentation = RunInstrumentation(root)
+    instrumentation.text("run/metadata", metadata, global_step)
+    telemetry_path = root / "instrumentation" / "telemetry.json"
+    try:
+        loaded_telemetry = json.loads(telemetry_path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        loaded_telemetry = []
+    telemetry_history: list[Any] = (
+        loaded_telemetry[:start_epoch] if isinstance(loaded_telemetry, list) else []
+    )
+    telemetry_history.extend([None] * (start_epoch - len(telemetry_history)))
+    for historical_record, historical_telemetry in zip(history, telemetry_history, strict=False):
+        if (
+            isinstance(historical_telemetry, dict)
+            and historical_record["global_step"] > last_event_step
+        ):
+            _emit_training_event(instrumentation, historical_record, historical_telemetry)
     best_validation, epochs_without_improvement = _validation_state(history)
     stopped_early = bool(
         config.training.early_stopping_patience
@@ -352,6 +481,8 @@ def train(config: PipelineConfig) -> dict[str, Any]:
             break
         train_loader = _loader(train_dataset, config, shuffle=True, epoch=epoch)
         validation_loader = _loader(validation_dataset, config, shuffle=False, epoch=epoch)
+        train_telemetry: dict[str, float] = {}
+        validation_telemetry: dict[str, float] = {}
         train_metrics, steps = _run_epoch(
             model,
             train_loader,
@@ -360,6 +491,7 @@ def train(config: PipelineConfig) -> dict[str, Any]:
             optimizer,
             config.training.max_steps_per_epoch,
             completed_steps=global_step,
+            telemetry=train_telemetry,
         )
         validation_metrics, _ = _run_epoch(
             model,
@@ -368,6 +500,7 @@ def train(config: PipelineConfig) -> dict[str, Any]:
             device,
             None,
             config.training.validation_max_steps,
+            telemetry=validation_telemetry,
         )
         global_step += steps
         learning_rate = float(optimizer.param_groups[0]["lr"])
@@ -384,7 +517,6 @@ def train(config: PipelineConfig) -> dict[str, Any]:
             "train": train_metrics,
             "validation": validation_metrics,
         }
-        history.append(record)
         stopped_early = bool(
             config.training.early_stopping_patience
             and epochs_without_improvement >= config.training.early_stopping_patience
@@ -392,6 +524,8 @@ def train(config: PipelineConfig) -> dict[str, Any]:
         checkpoint_due = (epoch + 1) % config.training.checkpoint_every == 0 or (
             epoch + 1 == config.training.epochs or stopped_early
         )
+        checkpoint_started = time.perf_counter()
+        synchronize_device(device)
         if improved:
             save_checkpoint(
                 root / "checkpoints" / "best.pt",
@@ -403,9 +537,37 @@ def train(config: PipelineConfig) -> dict[str, Any]:
             )
         if checkpoint_due:
             save_checkpoint(pending_checkpoint, model, optimizer, epoch, global_step, provenance)
+        synchronize_device(device)
+        checkpoint_duration_seconds = time.perf_counter() - checkpoint_started
+        checkpoint_size_path = (
+            pending_checkpoint if checkpoint_due else root / "checkpoints" / "best.pt"
+        )
+        checkpoint_size_bytes = (
+            checkpoint_size_path.stat().st_size if checkpoint_size_path.is_file() else 0
+        )
+        resource_metrics = collect_resource_metrics(root, device)
+        telemetry_record = {
+            "epoch": epoch,
+            "global_step": global_step,
+            "gradient_norm": train_telemetry["gradient_norm"],
+            "examples_per_second": train_telemetry["examples_per_second"],
+            "updates_per_second": train_telemetry["updates_per_second"],
+            "data_wait_seconds": train_telemetry["data_wait_seconds"]
+            + validation_telemetry["data_wait_seconds"],
+            "checkpoint_duration_seconds": checkpoint_duration_seconds,
+            "checkpoint_size_bytes": checkpoint_size_bytes,
+            "checkpoint_saved": int(checkpoint_due),
+            "best_checkpoint": int(improved),
+            "early_stop": int(stopped_early),
+            **resource_metrics,
+        }
+        history.append(record)
+        telemetry_history.append(telemetry_record)
+        _write_json(telemetry_path, telemetry_history)
         _write_json(root / "metrics.json", history)
         if checkpoint_due:
             pending_checkpoint.replace(checkpoint_path)
+        _emit_training_event(instrumentation, record, telemetry_record)
     _write_json(root / "provenance.json", provenance.to_dict())
     _write_json(root / "contamination.json", contamination)
     result = {
@@ -417,8 +579,11 @@ def train(config: PipelineConfig) -> dict[str, Any]:
         "stopped_early": stopped_early,
         "best_validation_loss": best_validation,
         "last": history[-1] if history else None,
+        "telemetry": telemetry_history[-1] if telemetry_history else None,
+        "metadata": metadata,
     }
     _write_json(root / "train-result.json", result)
+    instrumentation.close()
     return result
 
 

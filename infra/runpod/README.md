@@ -121,8 +121,12 @@ The image exposes SSH port 22 only. Run TensorBoard inside the Pod on
 `127.0.0.1:6006`, then use the existing localhost tunnel contract:
 
 ```bash
-ssh -L 6006:127.0.0.1:6006 root@POD_HOST -p POD_SSH_PORT
+just tensorboard /network/volume/runs/RUN_ID
+ssh -N -L 6006:127.0.0.1:6006 root@POD_HOST -p POD_SSH_PORT
 ```
+
+Open `http://127.0.0.1:6006` locally. The command rejects `0.0.0.0`, `::`,
+`localhost`, wildcard, and public-interface binds; do not add a public HTTP port.
 
 Do not publish this image or create a Pod until the local scan is clean and a
 GPU-host self-check records `driver.compatible=true`. A local machine without a
@@ -174,7 +178,8 @@ reaches $125.
 TensorBoard event files belong under the persistent run directory. Bind the
 server to `127.0.0.1:6006` and view it through an SSH tunnel; do not expose a
 public TensorBoard HTTP port. JSON manifests and atomic checkpoints remain the
-authoritative provenance and resume records.
+authoritative provenance and resume records. Writer failures are recorded in
+`instrumentation/diagnostics.jsonl` and must not invalidate those artifacts.
 
 ## Transfer and storage contract
 

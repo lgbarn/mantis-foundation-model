@@ -45,6 +45,7 @@ them can make a checkpoint intentionally non-resumable.
 | `just inspect-data <config>` | Reads every configured stream and builds anchors | Nothing | Full corpus scan |
 | `just probe-mps` | 32 real optimizer updates and one validation batch | Disposable probe artifacts | MPS allocation and weight fetch |
 | `just train <config>` | Trains or resumes | Checkpoints, metrics, provenance | Long accelerator run; mutates run state |
+| `just tensorboard <run-root>` | Serves run events on `127.0.0.1:6006` | Nothing | Read-only; use an SSH tunnel remotely |
 | `just evaluate <config>` | Evaluates `best.pt` | `evaluation.json` | Reads data/checkpoint; writes authorization |
 | `just export <config>` | Exports after prior evaluation | Export directory | Requires exact current evaluation |
 | `just validated-export <config>` | Evaluates and exports one snapshot | Evaluation and export | Preferred release path |
@@ -61,6 +62,18 @@ them can make a checkpoint intentionally non-resumable.
 | `just runpod-image-build <image>` | Builds the pinned Linux amd64 CUDA image from a clean commit | Local Docker image | Docker CPU/disk/network use; no Pod or registry push |
 | `just runpod-image-scan <image> <output>` | Scans saved image layers and history | Canonical scan JSON | Requires a local Docker daemon |
 | `just runpod-image-self-check <image> <output>` | Verifies CUDA, driver, tools, lock, and runtime inventory | Canonical runtime JSON | Requires Docker plus a compatible NVIDIA GPU |
+
+For remote runs, start the fixed localhost-only server on the remote host, then
+open an SSH tunnel from the local machine:
+
+```bash
+just tensorboard /network/volume/runs/RUN_ID
+ssh -N -L 6006:127.0.0.1:6006 root@POD_HOST -p POD_SSH_PORT
+```
+
+Open `http://127.0.0.1:6006`. Public and wildcard binds such as `0.0.0.0` are
+rejected. TensorBoard is observational; JSON, checkpoints, and manifests remain
+authoritative if event writing fails.
 
 ## Phase 1: inspect the repository
 

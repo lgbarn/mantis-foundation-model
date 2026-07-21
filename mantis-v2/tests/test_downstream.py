@@ -25,6 +25,7 @@ from mantis_v2.downstream_pipeline import (
     walk_forward,
 )
 from mantis_v2.embedding import EmbeddingContractError, _validated_evidence, load_foundation
+from mantis_v2.instrumentation import parse_tensorboard_events
 from mantis_v2.model import sha256_file
 from mantis_v2.strategy import (
     _label_chunk,
@@ -1118,6 +1119,19 @@ def test_downstream_smoke_writes_and_verifies_all_stage_manifests(tmp_path: Path
     assert result["device"] == "cpu"
     for stage in ("prepare", "embed", "walk-forward", "simulate"):
         assert (tmp_path / config.run.name / stage / "manifest.json").is_file()
+    root = tmp_path / config.run.name
+    for stage, manifest_stage in (("embed", "embed"), ("walk_forward", "walk-forward")):
+        telemetry = json.loads((root / "instrumentation" / f"{stage}.json").read_text())
+        manifest = json.loads((root / manifest_stage / "manifest.json").read_text())
+        assert manifest["instrumentation"] == {
+            "path": str(root / "instrumentation" / f"{stage}.json"),
+            **telemetry,
+        }
+    events = parse_tensorboard_events(root / "events")["scalars"]
+    assert events["stage/embed/rows"][-1]["value"] == 12
+    assert events["stage/embed/shards"][-1]["value"] == 1
+    assert events["stage/walk_forward/folds"][-1]["value"] == 1
+    assert events["stage/walk_forward/validation_weighted_log_loss"]
 
 
 def _prediction(reward_r: float, mae_r: float, timestamp: str) -> dict[str, object]:
