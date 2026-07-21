@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import platform
 import sys
 import tempfile
 import time
 from dataclasses import asdict, dataclass, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -42,6 +44,149 @@ from mantis_v2.walk_forward import PortableHead
 
 class EnvironmentValidationError(RuntimeError):
     """Raised when environment qualification cannot prove its contract."""
+
+
+_ORACLE_ECONOMICS = (
+    ("ES", "one_mini", 1, 50.0, 12.5, 3.78),
+    ("ES", "ten_micros", 10, 50.0, 12.5, 12.20),
+    ("NQ", "one_mini", 1, 20.0, 5.0, 3.78),
+    ("NQ", "ten_micros", 10, 20.0, 5.0, 12.20),
+    ("RTY", "one_mini", 1, 50.0, 5.0, 3.78),
+    ("RTY", "ten_micros", 10, 50.0, 5.0, 12.20),
+    ("YM", "one_mini", 1, 5.0, 5.0, 3.78),
+    ("YM", "ten_micros", 10, 5.0, 5.0, 12.20),
+    ("GC", "one_mini", 1, 100.0, 10.0, 4.32),
+    ("GC", "ten_micros", 10, 100.0, 10.0, 19.20),
+    ("CL", "one_mini", 1, 1000.0, 10.0, 4.02),
+    ("CL", "ten_micros", 10, 1000.0, 10.0, 15.20),
+    ("ZB", "one_mini", 1, 1000.0, 31.25, 2.76),
+)
+
+
+def _oracle_candidate() -> CandidateData:
+    return CandidateData(np.array([1.0, -1.0], dtype=np.float32), 1, 99.0, 2.0, 1, 1)
+
+
+def _independent_replay_oracles(config: RlConfig) -> dict[str, Any]:
+    """Compare production transitions with literal, independently calculated fixtures."""
+    origin = datetime(2025, 1, 6, 15, 0, tzinfo=UTC)
+    cases: list[dict[str, Any]] = []
+    for ticker, profile, quantity, multiplier, tick_value, fee in _ORACLE_ECONOMICS:
+        bars = (
+            BarData(origin, 100.0, 100.2, 99.8, 100.0, 1.0, _oracle_candidate()),
+            BarData(origin + timedelta(minutes=3), 100.0, 100.5, 99.5, 100.0, 1.0),
+            BarData(origin + timedelta(minutes=6), 100.0, 103.1, 100.0, 103.0, 1.0),
+            BarData(origin + timedelta(minutes=9), 103.0, 103.0, 102.0, 102.5, 1.0),
+        )
+        environment = TopstepEntryEnvironment(config, EnvironmentEpisode(ticker, profile, bars))
+        environment.reset(seed=7)
+        infos = []
+        for action in (1, 0, 0):
+            _, _, terminated, truncated, info = environment.step(action)
+            infos.append(info)
+            if terminated or truncated:
+                break
+        expected = 100_000.0 + 2.35 * multiplier - 2.0 * tick_value - fee
+        state = environment.account_state
+        checks = {
+            "quantity": environment.observation_schema.index("quantity") >= 0,
+            "fill_timestamp": infos[0].get("fill_timestamp") == bars[1].timestamp.isoformat(),
+            "fill_price": infos[0].get("fill_price") == 100.0,
+            "fee": infos[0].get("booked_round_trip_fee") == fee,
+            "trail_exit": infos[-1].get("event") == "STOP",
+            "balance": math.isclose(cast(float, state["balance"]), expected, abs_tol=1e-6),
+            "equity": math.isclose(cast(float, state["equity"]), expected, abs_tol=1e-6),
+        }
+        if not all(checks.values()):
+            raise EnvironmentValidationError(
+                f"independent replay oracle failed: {ticker} {profile}"
+            )
+        cases.append({"ticker": ticker, "profile": profile, "quantity": quantity, "checks": checks})
+
+    def lifecycle(name: str, episode: EnvironmentEpisode, expected: dict[str, Any]) -> None:
+        environment = TopstepEntryEnvironment(config, episode)
+        environment.reset(seed=9)
+        infos = []
+        while True:
+            action = int(environment.action_mask()[1])
+            _, _, terminated, truncated, info = environment.step(action)
+            infos.append(info)
+            if terminated or truncated:
+                break
+        state = environment.account_state
+        if expected.get("status") is not None and state["status"] != expected["status"]:
+            raise EnvironmentValidationError(f"independent replay oracle failed: {name}")
+        if expected.get("event") is not None and expected["event"] not in {
+            item.get("event") for item in infos
+        }:
+            raise EnvironmentValidationError(f"independent replay oracle failed: {name}")
+        for key in ("balance", "equity", "best_day_profit", "consistency_ratio"):
+            if key in expected and not math.isclose(
+                cast(float, state[key]), float(expected[key]), abs_tol=1e-6
+            ):
+                raise EnvironmentValidationError(f"independent replay oracle failed: {name}")
+        cases.append(
+            {"name": name, "status": state["status"], "events": [i.get("event") for i in infos]}
+        )
+
+    discontinuity = EnvironmentEpisode(
+        "ES",
+        "one_mini",
+        (
+            BarData(origin, 100, 100, 100, 100, 1, _oracle_candidate()),
+            BarData(origin + timedelta(minutes=3), 100, 100, 100, 100, 1, discontinuity=True),
+        ),
+    )
+    lifecycle(
+        "rollover_discontinuity",
+        discontinuity,
+        {"status": "TIMEOUT", "event": "DISCONTINUITY_RESET"},
+    )
+    mll = EnvironmentEpisode(
+        "NQ",
+        "one_mini",
+        (
+            BarData(origin, 100, 100, 100, 100, 1, _oracle_candidate()),
+            BarData(origin + timedelta(minutes=3), 100, 100, 100, 100, 1),
+            BarData(origin + timedelta(minutes=6), -100, -100, -100, -100, 1),
+        ),
+    )
+    lifecycle("mll_blow", mll, {"status": "BLOW", "event": "MLL_BLOW", "balance": 95_986.22})
+    dll = EnvironmentEpisode(
+        "ES",
+        "one_mini",
+        (
+            BarData(origin, 100, 100, 100, 100, 1, _oracle_candidate()),
+            BarData(origin + timedelta(minutes=3), 100, 100, 100, 100, 1),
+            BarData(origin + timedelta(minutes=6), 55, 55, 55, 55, 1),
+        ),
+    )
+    lifecycle(
+        "dll_lockout", dll, {"status": "TIMEOUT", "event": "DLL_LOCKOUT", "balance": 97_721.22}
+    )
+    flat_origin = datetime(2025, 1, 6, 21, 6, tzinfo=UTC)
+    session_flat = EnvironmentEpisode(
+        "ES",
+        "one_mini",
+        (
+            BarData(flat_origin, 100, 100, 100, 100, 1, _oracle_candidate()),
+            BarData(flat_origin + timedelta(minutes=3), 100, 100.5, 99.5, 100, 1),
+            BarData(flat_origin + timedelta(minutes=6), 101, 101, 101, 101, 1),
+        ),
+    )
+    lifecycle(
+        "session_flatten",
+        session_flat,
+        {
+            "status": "TIMEOUT",
+            "event": "SESSION_FLATTEN",
+            "balance": 100_021.22,
+            "equity": 100_021.22,
+            "best_day_profit": 21.22,
+            "consistency_ratio": 1.0,
+        },
+    )
+    return {"passed": True, "cases": cases, "case_count": len(cases)}
 
 
 @dataclass(frozen=True)
@@ -304,6 +449,7 @@ def validate_environment(
     """Qualify finite observations, causality, baselines, performance, and provenance."""
     if training.partition != "training" or validation.partition != "validation":
         raise EnvironmentValidationError("environment validation requires training and validation")
+    independent_oracles = _independent_replay_oracles(config)
     training_rows = _supervised_rows(config, training)
     validation_rows = _supervised_rows(config, validation)
     logistic, hist, fit = fit_supervised_baselines(
@@ -397,6 +543,7 @@ def validate_environment(
         "shared_action_mask": mask_mismatches == 0,
         "action_mask_parity": {"comparisons": mask_comparisons, "mismatches": mask_mismatches},
         "baseline_fit": asdict(fit),
+        "independent_replay_oracles": independent_oracles,
         "historical_head_sha256": historical_head_sha256,
         "baseline_replays": baseline_results,
         "benchmark": {"mmap_fetch": mmap, "environment": throughput},

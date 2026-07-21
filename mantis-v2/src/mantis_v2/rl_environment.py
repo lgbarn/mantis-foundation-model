@@ -453,6 +453,7 @@ class TopstepEntryEnvironment:
             self._session_activity = True
             info["fill_timestamp"] = bar.timestamp.isoformat()
             info["fill_price"] = bar.open
+            info["booked_round_trip_fee"] = self._fee
         event = self._process_position(bar)
         if event is not None:
             info["event"] = event
@@ -508,9 +509,19 @@ class TopstepEntryEnvironment:
     @property
     def account_state(self) -> dict[str, object]:
         """Return the causal public account state used by replay and validation."""
+        bar = self.episode.bars[self._index]
+        equity = self._balance
+        if self._position is not None:
+            equity += self._net_position_pnl(bar.close)
+        starting = float(self._rules["account"]["starting_balance"])
+        total_profit = self._balance - starting
+        consistency = self._best_day / total_profit if total_profit > 0 else 0.0
         return {
             "balance": self._balance,
+            "equity": equity,
             "mll_floor": self._mll_floor,
+            "best_day_profit": self._best_day,
+            "consistency_ratio": consistency,
             "accepted_trades": self._accepted_trades,
             "trading_days": self._trading_days,
             "entry_locked": self._entry_locked,

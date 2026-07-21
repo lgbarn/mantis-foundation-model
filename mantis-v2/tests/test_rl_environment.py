@@ -227,6 +227,8 @@ def test_environment_validation_emits_baselines_benchmarks_and_provenance(
     assert result["causal_prefix"] is True
     assert result["shared_action_mask"] is True
     assert result["action_mask_parity"]["mismatches"] == 0
+    assert result["independent_replay_oracles"]["passed"] is True
+    assert result["independent_replay_oracles"]["case_count"] == 17
     assert result["baseline_fit"]["threshold_source"] == "validation"
     assert {
         replay["policy"] for episode in result["baseline_replays"] for replay in episode["results"]
