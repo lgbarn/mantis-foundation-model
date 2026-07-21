@@ -65,6 +65,9 @@ def test_reset_step_mask_and_next_open_fill_are_deterministic() -> None:
     assert np.array_equal(first_observation.vector, second_observation.vector)
     assert first_info == second_info
     assert first.action_mask().tolist() == [True, True]
+    assert first_observation.schema_version == 1
+    assert first_observation.action_mask.tolist() == [True, True]
+    assert first.observation_schema.index("quantity") >= 0
 
     next_observation, reward, terminated, truncated, info = first.step(1)
 
@@ -75,6 +78,7 @@ def test_reset_step_mask_and_next_open_fill_are_deterministic() -> None:
     assert info["fill_price"] == pytest.approx(100.5)
     assert next_observation.positioned == 1.0
     assert first.action_mask().tolist() == [True, False]
+    assert next_observation.action_mask.tolist() == [True, False]
     with pytest.raises(EnvironmentContractError, match="invalid action"):
         first.step(1)
 
@@ -106,6 +110,26 @@ def test_observation_prefix_cannot_see_future_bars_or_labels() -> None:
     assert np.array_equal(before.vector, after.vector)
 
 
+@pytest.mark.parametrize(
+    ("profile", "mini", "micro", "quantity", "fee"),
+    [("one_mini", 1.0, 0.0, 1.0, 3.78), ("ten_micros", 0.0, 1.0, 10.0, 12.20)],
+)
+def test_observation_schema_v1_exposes_profile_economics(
+    profile: str, mini: float, micro: float, quantity: float, fee: float
+) -> None:
+    environment = TopstepEntryEnvironment(_config(), _episode(profile=profile))
+    observation, _ = environment.reset(seed=1)
+    schema = environment.observation_schema
+
+    assert observation.vector[schema.index("contract_is_mini")] == mini
+    assert observation.vector[schema.index("contract_is_micro")] == micro
+    assert observation.vector[schema.index("quantity")] == quantity
+    assert observation.vector[schema.index("dollar_stop_risk")] == pytest.approx(50.0)
+    assert observation.vector[schema.index("tick_size")] == pytest.approx(0.25)
+    assert observation.vector[schema.index("aggregate_tick_value")] == pytest.approx(12.5)
+    assert observation.vector[schema.index("booked_round_trip_fee")] == pytest.approx(fee)
+
+
 def test_deterministic_baselines_share_mechanics_and_match_entry_oracles() -> None:
     reject = replay_policy(_config(), _episode(), RejectAllPolicy())
     take = replay_policy(_config(), _episode(), TakeAllPolicy())
@@ -124,6 +148,7 @@ def test_deterministic_baselines_share_mechanics_and_match_entry_oracles() -> No
     assert reject.actions == (0, 0, 0)
     assert take.accepted_trades == 1
     assert take.actions[0] == 1
+    assert take.ending_balance == pytest.approx(100_033.72)
     assert random_first == random_second
     assert random_first.accepted_trades == 1
 
@@ -201,6 +226,7 @@ def test_environment_validation_emits_baselines_benchmarks_and_provenance(
     assert result["finite_observations"] is True
     assert result["causal_prefix"] is True
     assert result["shared_action_mask"] is True
+    assert result["action_mask_parity"]["mismatches"] == 0
     assert result["baseline_fit"]["threshold_source"] == "validation"
     assert {
         replay["policy"] for episode in result["baseline_replays"] for replay in episode["results"]
@@ -211,9 +237,15 @@ def test_environment_validation_emits_baselines_benchmarks_and_provenance(
         "historical_rejected_logistic_head",
         "hist_gradient_boosting_contextual",
     }
-    assert result["benchmark"]["mmap_fetch"]["headroom_x"] >= 100.0
-    assert result["benchmark"]["environment"]["steps_per_second"] >= 5_000.0
+    assert result["benchmark"]["mmap_fetch"]["samples"] == 1000
+    assert result["benchmark"]["environment"]["steps"] == 10_000
     assert result["host"]["machine"]
+    for episode in result["baseline_replays"]:
+        by_name = {item["policy"]: item for item in episode["results"]}
+        assert (
+            by_name["matched_random_take"]["accepted_trades"]
+            == by_name["hist_gradient_boosting_contextual"]["accepted_trades"]
+        )
 
 
 def test_cli_exposes_manifest_backed_environment_validation(

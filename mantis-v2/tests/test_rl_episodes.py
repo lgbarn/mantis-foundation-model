@@ -13,6 +13,7 @@ from mantis_v2.rl_episodes import (
     EpisodeContractError,
     Partition,
     _atomic_resume,
+    _independent_exchange_calendar,
     _session_id,
     _session_is_complete,
     _session_ordinal,
@@ -176,6 +177,7 @@ def test_session_calendar_detects_whole_and_partial_session_gaps() -> None:
     )
     assert _session_is_complete(complete)
     assert _session_is_complete(complete.drop(index=100))
+    assert not _session_is_complete(complete.iloc[[0, -1]])
     assert not _session_is_complete(complete.iloc[:2])
 
 
@@ -199,6 +201,15 @@ def test_exchange_calendar_rejects_ticker_local_missing_or_rollover_session() ->
             session_calendars={"ES": sessions},
             unsafe_sessions={"ES": frozenset({sessions[10]})},
         )
+
+
+def test_independent_calendar_keeps_provider_wide_missing_session_visible() -> None:
+    sessions = _independent_exchange_calendar(
+        pd.Timestamp("2025-01-06", tz="UTC"), pd.Timestamp("2025-01-10", tz="UTC")
+    )
+
+    assert len(sessions) == 5
+    assert date(2025, 1, 7) in sessions
 
 
 def test_schedule_excludes_candidate_with_rollover_overlap_from_safe_window() -> None:

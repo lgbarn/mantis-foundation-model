@@ -311,26 +311,61 @@ def validate_environment(
     )
     historical = historical_policy if historical_policy is not None else logistic
     baseline_results: list[dict[str, Any]] = []
+    mask_comparisons = 0
+    mask_mismatches = 0
     for episode in validation.episodes:
-        take = replay_policy(config, episode, TakeAllPolicy())
+        learned = replay_policy(config, episode, hist)
+        matched = None
+        for offset in range(100):
+            candidate = replay_policy(
+                config,
+                episode,
+                MatchedRandomPolicy(
+                    take_count=learned.accepted_trades,
+                    legal_opportunities=sum(bar.candidate is not None for bar in episode.bars),
+                    seed=config.run.seed + offset,
+                ),
+            )
+            if candidate.accepted_trades == learned.accepted_trades:
+                matched = candidate
+                break
+        if matched is None:
+            matched = replay_policy(
+                config,
+                episode,
+                MatchedRandomPolicy(
+                    take_count=learned.accepted_trades,
+                    legal_opportunities=sum(bar.candidate is not None for bar in episode.bars),
+                    seed=config.run.seed,
+                    probability=1.0,
+                ),
+            )
+        if matched.accepted_trades != learned.accepted_trades:
+            raise EnvironmentValidationError("random baseline cannot match learned participation")
         policies = [
             RejectAllPolicy(),
             TakeAllPolicy(),
-            MatchedRandomPolicy(
-                take_count=take.accepted_trades,
-                legal_opportunities=sum(bar.candidate is not None for bar in episode.bars),
-                seed=config.run.seed,
-            ),
             historical,
             hist,
         ]
+        replays = [asdict(replay_policy(config, episode, policy)) for policy in policies]
+        replays.insert(2, asdict(matched))
         baseline_results.append(
             {
                 "ticker": episode.ticker,
                 "profile": episode.profile,
-                "results": [asdict(replay_policy(config, episode, policy)) for policy in policies],
+                "results": replays,
             }
         )
+        environment = TopstepEntryEnvironment(config, episode)
+        observation, _ = environment.reset(seed=config.run.seed)
+        while True:
+            mask = environment.action_mask()
+            mask_comparisons += 1
+            mask_mismatches += int(not np.array_equal(observation.action_mask, mask))
+            observation, _, terminated, truncated, _ = environment.step(0)
+            if terminated or truncated:
+                break
     first = validation.episodes[0]
     original, _ = TopstepEntryEnvironment(config, first).reset(seed=config.run.seed)
     changed_last = replace(first.bars[-1], close=first.bars[-1].close * 1.5)
@@ -359,7 +394,8 @@ def validate_environment(
             and np.isfinite(validation_rows.features).all()
         ),
         "causal_prefix": causal,
-        "shared_action_mask": True,
+        "shared_action_mask": mask_mismatches == 0,
+        "action_mask_parity": {"comparisons": mask_comparisons, "mismatches": mask_mismatches},
         "baseline_fit": asdict(fit),
         "historical_head_sha256": historical_head_sha256,
         "baseline_replays": baseline_results,

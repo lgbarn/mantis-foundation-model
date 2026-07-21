@@ -77,24 +77,29 @@ class TakeAllPolicy(RejectAllPolicy):
 class MatchedRandomPolicy(RejectAllPolicy):
     name = "matched_random_take"
 
-    def __init__(self, *, take_count: int, legal_opportunities: int, seed: int) -> None:
+    def __init__(
+        self, *, take_count: int, legal_opportunities: int, seed: int, probability: float = 0.75
+    ) -> None:
         if take_count < 0 or legal_opportunities < 0 or take_count > legal_opportunities:
             raise ValueError("matched random counts must satisfy 0 <= take <= opportunities")
         self.take_count = take_count
         self.legal_opportunities = legal_opportunities
         self.seed = seed
+        self.probability = probability
 
     def reset(self) -> None:
         generator = np.random.default_rng(self.seed)
-        chosen = generator.choice(self.legal_opportunities, size=self.take_count, replace=False)
-        self._chosen = set(int(value) for value in chosen)
-        self._legal_index = 0
+        self._generator = generator
+        self._accepted = 0
 
     def action(self, observation: EntryObservation, mask: np.ndarray) -> int:
         if not bool(mask[1]):
             return 0
-        result = int(self._legal_index in self._chosen)
-        self._legal_index += 1
+        if self._accepted >= self.take_count:
+            return 0
+        result = int(self._generator.random() < self.probability)
+        if result:
+            self._accepted += 1
         return result
 
 

@@ -88,6 +88,8 @@ class EnvironmentEpisode:
 class EntryObservation:
     vector: np.ndarray
     positioned: float
+    schema_version: int = 1
+    action_mask: np.ndarray = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         vector = np.asarray(self.vector, dtype=np.float32)
@@ -95,6 +97,33 @@ class EntryObservation:
             raise EnvironmentContractError("observation must be a finite vector")
         vector.setflags(write=False)
         object.__setattr__(self, "vector", vector)
+        mask = np.asarray(self.action_mask, dtype=np.bool_)
+        if mask.shape != (2,):
+            raise EnvironmentContractError("observation action mask must have two actions")
+        mask.setflags(write=False)
+        object.__setattr__(self, "action_mask", mask)
+
+
+@dataclass(frozen=True)
+class EntryObservationSchemaV1:
+    embedding_width: int
+
+    _FIELDS = (
+        "contract_is_mini",
+        "contract_is_micro",
+        "quantity",
+        "dollar_stop_risk",
+        "tick_size",
+        "aggregate_tick_value",
+        "booked_round_trip_fee",
+        "best_day_profit",
+        "consistency_ratio",
+        "action_skip",
+        "action_enter",
+    )
+
+    def index(self, name: str) -> int:
+        return self.embedding_width + self._FIELDS.index(name)
 
 
 @dataclass
@@ -131,11 +160,20 @@ class TopstepEntryEnvironment:
         self._embedding_width = len(
             next(bar.candidate for bar in episode.bars if bar.candidate is not None).embedding
         )
+        self.observation_schema = EntryObservationSchemaV1(self._embedding_width)
         self._price_multiplier = _MINI_MULTIPLIERS[episode.ticker]
         if episode.profile == "one_mini":
             self._fee = float(getattr(config.fees, episode.ticker.lower()))
         else:
             self._fee = float(getattr(config.fees, _MICRO_SYMBOLS[episode.ticker])) * 10.0
+        contracts = self._rules["contracts"]
+        symbol = (
+            episode.ticker
+            if episode.profile == "one_mini"
+            else _MICRO_SYMBOLS[episode.ticker].upper()
+        )
+        self._quantity = 1 if episode.profile == "one_mini" else 10
+        self._tick_size = float(contracts[symbol]["tick_size"])
         self._reset_state()
 
     def _load_rules(self) -> dict[str, Any]:
@@ -333,8 +371,26 @@ class TopstepEntryEnvironment:
             dtype=np.float32,
         )
         mask = self.action_mask().astype(np.float32)
-        vector = np.concatenate((embedding, market, identity, account_values, mask))
-        return EntryObservation(vector, float(self._position is not None))
+        total_profit = self._balance - starting
+        consistency = self._best_day / total_profit if total_profit > 0 else 0.0
+        economics = np.array(
+            [
+                float(self.episode.profile == "one_mini"),
+                float(self.episode.profile == "ten_micros"),
+                float(self._quantity),
+                (candidate.atr * 0.5 * self._price_multiplier) if candidate else 0.0,
+                self._tick_size,
+                self._tick_value(),
+                self._fee,
+                self._best_day,
+                consistency,
+            ],
+            dtype=np.float32,
+        )
+        vector = np.concatenate((embedding, economics, mask, market, identity, account_values))
+        return EntryObservation(
+            vector, float(self._position is not None), action_mask=mask.astype(np.bool_)
+        )
 
     def reset(self, *, seed: int | None = None) -> tuple[EntryObservation, dict[str, object]]:
         if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):

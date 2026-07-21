@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -58,6 +59,8 @@ class ObservationSpan:
 
 
 _CHICAGO = ZoneInfo("America/Chicago")
+_EXCHANGE_CALENDAR_VERSION = "cme-globex-weekday-sessions-v1"
+_EXCHANGE_CALENDAR_SHA256 = hashlib.sha256(_EXCHANGE_CALENDAR_VERSION.encode()).hexdigest()
 
 
 def _session_id(timestamp: pd.Timestamp) -> date:
@@ -76,10 +79,13 @@ def _session_is_complete(values: pd.Series) -> bool:
         return False
     first_local = ordered.iloc[0].tz_convert(_CHICAGO)
     last_local = ordered.iloc[-1].tz_convert(_CHICAGO)
+    gaps = ordered.diff().dropna()
     return bool(
         (17, 0) <= (first_local.hour, first_local.minute) <= (17, 3)
         and last_local.date() > first_local.date()
         and (last_local.hour, last_local.minute) >= (15, 9)
+        and not gaps.empty
+        and gaps.max() <= pd.to_timedelta(15, unit="m")
     )
 
 
@@ -88,6 +94,11 @@ def _session_bounds(session: date) -> tuple[pd.Timestamp, pd.Timestamp]:
     following = session + timedelta(days=1)
     end = pd.Timestamp(datetime.combine(following, time(15, 9)), tz=_CHICAGO)
     return start.tz_convert("UTC"), end.tz_convert("UTC")
+
+
+def _independent_exchange_calendar(start: pd.Timestamp, end: pd.Timestamp) -> tuple[date, ...]:
+    trade_dates = pd.bdate_range(start.date(), end.date())
+    return tuple((value.date() - timedelta(days=1)) for value in trade_dates)
 
 
 def _spans(rows: pd.DataFrame) -> tuple[ObservationSpan, ...]:
@@ -605,7 +616,7 @@ def build_episode_manifest(
     if fold_number < 0 or fold_number >= len(folds):
         raise EpisodeContractError("fold number is out of range")
     fold = folds[fold_number]
-    embargo = pd.Timedelta(minutes=3 * int(downstream.walk_forward.embargo_bars))
+    embargo = pd.to_timedelta(3 * int(downstream.walk_forward.embargo_bars), unit="m")
     boundaries = {
         "training": (fold.train_start, fold.train_end - embargo),
         "validation": (fold.validation_start + embargo, fold.validation_end - embargo),
@@ -621,7 +632,7 @@ def build_episode_manifest(
         symbol: owned_metadata[owned_metadata["symbol"] == symbol].copy()
         for symbol in downstream.data.symbols
     }
-    exchange_calendar = tuple(sorted(set().union(*complete_sessions.values())))
+    exchange_calendar = _independent_exchange_calendar(start, end)
     episodes = build_episode_schedule(
         sources,
         partition,
@@ -646,6 +657,11 @@ def build_episode_manifest(
         "account_start": config.episode.account_start,
         "identities": identities,
         "embedding": {"feature_width": width, "outputs": embedding_outputs},
+        "exchange_calendar": {
+            "version": _EXCHANGE_CALENDAR_VERSION,
+            "sha256": _EXCHANGE_CALENDAR_SHA256,
+            "sessions": len(exchange_calendar),
+        },
         "episodes": [asdict(episode) for episode in episodes],
     }
     _atomic_resume(output, payload)
