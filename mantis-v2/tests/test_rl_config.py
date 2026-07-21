@@ -86,7 +86,11 @@ def test_smoke_profile_reduces_scale_without_weakening_promotion_gates() -> None
     production = load_rl_config(ROOT / "configs" / "rl-entry-topstep-100k.toml")
 
     assert smoke.run.profile == "smoke"
-    assert smoke.training.smoke_timesteps < production.training.smoke_timesteps
+    assert smoke.training.smoke_timesteps == production.training.smoke_timesteps == 50_000
+    assert (
+        smoke.training.development_timesteps_per_seed
+        < production.training.development_timesteps_per_seed
+    )
     assert smoke.evaluation == production.evaluation
 
 
@@ -153,8 +157,8 @@ def test_rl_config_rejects_unknown_missing_invalid_and_incompatible_values(
             "rl.training.maximum_search_trials must be <= 30",
         ),
         (
-            "development_timesteps_per_seed = 128",
-            "development_timesteps_per_seed = 64",
+            "development_timesteps_per_seed = 50000",
+            "development_timesteps_per_seed = 25000",
             "rl.training timestep budgets must be nondecreasing",
         ),
         (

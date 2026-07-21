@@ -102,3 +102,6 @@ rl-account-replay input output config="mantis-v2/configs/rl-entry-smoke.toml":
 
 rl-validate-environment training_manifest validation_manifest output config="mantis-v2/configs/rl-entry-smoke.toml":
     uv run mantis-v2 rl-validate-environment --config {{config}} --training-manifest {{training_manifest}} --validation-manifest {{validation_manifest}} --output {{output}}
+
+rl-smoke output config="mantis-v2/configs/rl-entry-smoke.toml" resume="":
+    uv run mantis-v2 rl-smoke --config {{config}} --output {{output}} {{resume}}

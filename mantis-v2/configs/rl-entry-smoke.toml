@@ -1,8 +1,8 @@
 schema_version = 1
 
 [upstream]
-source_digest = "f0742c6934648a9fbbf2e3aa794a232f9b48581a9c95f9669af55e1ef34b67b5"
-lock_digest = "ff9068081c5e4c1383d252850d5ea99b2cca0775d318ce5346c5cd88542db8e0"
+source_digest = "78095e3e36911bcb0c882295dad7181d941ac3eedf3749eca9861ed0fa3ebc2c"
+lock_digest = "02b956b813c37b865b854a2fe90dfd58098b786be1bcf6788dd7f3eb0ce43b49"
 rule_contract_path = "mantis-v2/configs/topstep-100k-2026-07-20.toml"
 rule_contract_sha256 = "6e8b0d71716ec7b4c3e40a902b2ba62b4983f614463d1a823ea1dd85a4860db5"
 downstream_config_path = "mantis-v2/configs/trend-magic-topstep-100k-head-c0001-v2.toml"
@@ -93,13 +93,13 @@ development_seeds = [42]
 confirmation_seeds = [42]
 serving_seed = 42
 vector_environments = 1
-smoke_timesteps = 128
-search_timesteps_per_seed = 128
+smoke_timesteps = 50000
+search_timesteps_per_seed = 50000
 search_seeds = 1
 maximum_search_trials = 1
-development_timesteps_per_seed = 128
-confirmation_timesteps_per_seed = 128
-maximum_timesteps_per_seed = 128
+development_timesteps_per_seed = 50000
+confirmation_timesteps_per_seed = 50000
+maximum_timesteps_per_seed = 50000
 
 [rl.evaluation]
 market_uncertainty = "synchronized_calendar_block_bootstrap"
