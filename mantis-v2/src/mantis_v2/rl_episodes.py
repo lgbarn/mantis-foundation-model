@@ -7,7 +7,7 @@ import os
 import tempfile
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import cast
 from zoneinfo import ZoneInfo
@@ -84,6 +84,13 @@ def _session_is_complete(values: pd.Series) -> bool:
     )
 
 
+def _session_bounds(session: date) -> tuple[pd.Timestamp, pd.Timestamp]:
+    start = pd.Timestamp(datetime.combine(session, time(17, 0)), tz=_CHICAGO)
+    following = session + timedelta(days=1)
+    end = pd.Timestamp(datetime.combine(following, time(15, 9)), tz=_CHICAGO)
+    return start.tz_convert("UTC"), end.tz_convert("UTC")
+
+
 def _spans(rows: pd.DataFrame) -> tuple[ObservationSpan, ...]:
     spans: list[ObservationSpan] = []
     for shard, group in rows.groupby("shard", sort=False):
@@ -95,7 +102,11 @@ def _spans(rows: pd.DataFrame) -> tuple[ObservationSpan, ...]:
 
 
 def _valid_windows(
-    ticker: str, rows: pd.DataFrame, partition: Partition, trading_days: int
+    ticker: str,
+    rows: pd.DataFrame,
+    partition: Partition,
+    trading_days: int,
+    session_calendar: tuple[date, ...] | None = None,
 ) -> list[
     tuple[
         date,
@@ -141,7 +152,15 @@ def _valid_windows(
         & (frame["terminal_ts"] < partition.end)
     ].copy()
     owned["session"] = owned["decision_ts"].map(_session_id)
-    sessions = list(dict.fromkeys(owned["session"].tolist()))
+    if session_calendar is None:
+        sessions = list(dict.fromkeys(owned["session"].tolist()))
+    else:
+        sessions = [
+            session
+            for session in session_calendar
+            if _session_bounds(session)[0] >= partition.start
+            and _session_bounds(session)[1] < partition.end
+        ]
     windows: list[
         tuple[
             date,
@@ -157,15 +176,18 @@ def _valid_windows(
     ] = []
     for offset in range(len(sessions) - trading_days + 1):
         selected = sessions[offset : offset + trading_days]
+        ordinals = np.asarray([_session_ordinal(session) for session in selected])
+        if len(ordinals) > 1 and not np.all(np.diff(ordinals) == 1):
+            continue
         mask = owned["session"].isin(selected)
         indices = np.flatnonzero(mask.to_numpy())
         if len(indices) == 0:
             continue
         selected_rows = owned.iloc[indices]
-        ordinals = (
+        observed_ordinals = (
             selected_rows.groupby("session", sort=False)["session_ordinal"].first().to_numpy()
         )
-        if len(ordinals) > 1 and not np.all(np.diff(ordinals) == 1):
+        if not set(observed_ordinals).issubset(set(ordinals)):
             continue
         if not selected_rows["session_complete"].astype(bool).all():
             continue
@@ -181,9 +203,9 @@ def _valid_windows(
                 len(indices),
                 _spans(selected_rows),
                 pd.Timestamp(selected_rows["lookback_start_ts"].min()),
-                pd.Timestamp(selected_rows["decision_ts"].min()),
+                _session_bounds(selected[0])[0],
                 pd.Timestamp(selected_rows["label_end_ts"].max()),
-                pd.Timestamp(selected_rows["terminal_ts"].max()),
+                _session_bounds(selected[-1])[1],
             )
         )
     return windows
@@ -204,6 +226,7 @@ def build_episode_schedule(
     seed: int,
     episode_count: int,
     trading_days: int = 20,
+    session_calendars: Mapping[str, tuple[date, ...]] | None = None,
 ) -> tuple[Episode, ...]:
     """Build a reproducible, balanced schedule from complete ticker-local windows."""
     if episode_count < 1:
@@ -212,8 +235,16 @@ def build_episode_schedule(
     if not tickers:
         raise EpisodeContractError("episode sources are empty")
     generator = np.random.default_rng(seed)
+    if session_calendars is not None and set(session_calendars) != set(tickers):
+        raise EpisodeContractError("session calendars must match episode sources")
     windows = {
-        ticker: _valid_windows(ticker, sources[ticker], partition, trading_days)
+        ticker: _valid_windows(
+            ticker,
+            sources[ticker],
+            partition,
+            trading_days,
+            None if session_calendars is None else session_calendars[ticker],
+        )
         for ticker in tickers
     }
     empty = [ticker for ticker, available in windows.items() if not available]
@@ -582,6 +613,10 @@ def build_episode_manifest(
         seed=config.run.seed,
         episode_count=episode_count,
         trading_days=config.episode.timeout_trading_days,
+        session_calendars={
+            symbol: tuple(sorted(complete_sessions[symbol] - rollover_sessions[symbol]))
+            for symbol in downstream.data.symbols
+        },
     )
     payload: dict[str, object] = {
         "schema_version": 1,

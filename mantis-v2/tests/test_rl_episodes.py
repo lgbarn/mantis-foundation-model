@@ -121,6 +121,32 @@ def test_schedule_rejects_missing_session_before_sampling() -> None:
         build_episode_schedule({"ES": rows}, partition, seed=5, episode_count=1)
 
 
+def test_complete_session_calendar_allows_a_day_without_candidates() -> None:
+    complete = _rows("ES", "2025-01-02", sessions=20)
+    sessions = tuple(
+        dict.fromkeys(_session_id(pd.Timestamp(value)) for value in complete["decision_ts"])
+    )
+    candidates = complete.drop(index=10).reset_index(drop=True)
+    candidates["shard"] = np.arange(len(candidates)) // 8
+    candidates["row"] = np.arange(len(candidates)) % 8
+    partition = Partition(
+        name="training",
+        start=pd.Timestamp("2025-01-01", tz="UTC"),
+        end=pd.Timestamp("2025-03-01", tz="UTC"),
+    )
+
+    (episode,) = build_episode_schedule(
+        {"ES": candidates},
+        partition,
+        seed=5,
+        episode_count=1,
+        session_calendars={"ES": sessions},
+    )
+
+    assert episode.trading_days == 20
+    assert episode.candidate_count == 19
+
+
 def test_schedule_does_not_bridge_absent_or_rollover_sessions() -> None:
     partition = Partition(
         name="training",
