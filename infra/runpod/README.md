@@ -59,6 +59,17 @@ This is a benchmark envelope, not a final production size or authorization to
 provision. Re-query price and availability immediately before any plan or
 apply. The hard project ceiling recorded in issue #25 is $150.
 
+Budget allocation is fail-closed:
+
+- $15 maximum for the first month of storage and storage overhead.
+- $10 cumulative maximum for qualification probes.
+- $100 production compute pool after benchmark acceptance.
+- $25 protected recovery reserve that requires new user approval.
+
+Keep auto-pay disabled. Permit only one live Mantis Pod, never launch an
+automatic paid retry, and reject ordinary launches once cumulative spend
+reaches $125.
+
 TensorBoard event files belong under the persistent run directory. Bind the
 server to `127.0.0.1:6006` and view it through an SSH tunnel; do not expose a
 public TensorBoard HTTP port. JSON manifests and atomic checkpoints remain the
