@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 import torch
+from mantis_v2 import instrumentation as instrumentation_module
 from mantis_v2 import pipeline as pipeline_module
 from mantis_v2.config import load_config
 from mantis_v2.data import Anchor
@@ -23,6 +24,7 @@ from mantis_v2.pipeline import (
     train,
     validated_export,
 )
+from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 from torch.utils.data import DataLoader, Dataset
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -196,6 +198,116 @@ def test_terminal_epoch_is_checkpointed_and_collision_is_rejected(tmp_path: Path
     )
     with pytest.raises(PipelineError, match="run artifacts already exist"):
         _assert_run_writable(protected, checkpoint.parents[1])
+
+
+def test_bounded_training_emits_tensorboard_loss_and_progress_events(tmp_path: Path) -> None:
+    base = load_config(ROOT / "configs" / "smoke.toml")
+    config = replace(
+        base,
+        run=replace(base.run, name="instrumented", artifact_root=tmp_path),
+        training=replace(
+            base.training,
+            max_steps_per_epoch=1,
+            validation_max_steps=1,
+            checkpoint_every=1,
+        ),
+    )
+
+    result = train(config)
+    history = json.loads((tmp_path / "instrumented" / "metrics.json").read_text())
+    events = EventAccumulator(str(tmp_path / "instrumented" / "events")).Reload()
+    scalar_tags = set(events.Tags()["scalars"])
+
+    assert {
+        "run/epoch",
+        "run/global_step",
+        "loss/train/total",
+        "loss/train/candle",
+        "loss/train/leg",
+        "loss/validation/total",
+        "loss/validation/candle",
+        "loss/validation/leg",
+        "optimizer/learning_rate",
+        "optimization/gradient_norm",
+        "throughput/examples_per_second",
+        "throughput/updates_per_second",
+        "events/checkpoint_saved",
+        "events/best_checkpoint",
+        "events/early_stop",
+    } <= scalar_tags
+    assert events.Scalars("run/global_step")[-1].value == result["last"]["global_step"]
+    assert events.Scalars("loss/train/total")[-1].value == pytest.approx(
+        history[-1]["train"]["total"]
+    )
+    assert events.Scalars("loss/validation/total")[-1].value == pytest.approx(
+        history[-1]["validation"]["total"]
+    )
+    telemetry = json.loads(
+        (tmp_path / "instrumented" / "instrumentation" / "telemetry.json").read_text()
+    )[-1]
+    assert telemetry["gradient_norm"] >= 0.0
+    assert telemetry["examples_per_second"] > 0.0
+    assert telemetry["updates_per_second"] > 0.0
+    assert telemetry["data_wait_seconds"] >= 0.0
+    assert telemetry["checkpoint_duration_seconds"] >= 0.0
+    assert telemetry["checkpoint_size_bytes"] > 0
+    assert telemetry["host_rss_bytes"] > 0
+    assert telemetry["filesystem_free_bytes"] > 0
+    assert telemetry["cuda_allocated_bytes"] is None
+    assert telemetry["cuda_reserved_bytes"] is None
+    assert telemetry["cuda_utilization_percent"] is None
+    metadata = result["metadata"]
+    assert metadata == {
+        "initialization_mode": "random",
+        "upstream_revision": config.model.hub_revision,
+        "upstream_weights_sha256": config.model.weights_sha256,
+        "trainable_parameters": 4605639,
+        "frozen_parameters": 820800,
+        "seed": 7,
+        "precision": "float32",
+        "resume_source": None,
+    }
+    assert "run/metadata/text_summary" in events.Tags()["tensors"]
+
+
+def test_tensorboard_failure_preserves_authoritative_training_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingWriter:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+            raise RuntimeError("event sink failed")
+
+    base = load_config(ROOT / "configs" / "smoke.toml")
+    config = replace(
+        base,
+        run=replace(base.run, name="failed-events", artifact_root=tmp_path),
+        training=replace(
+            base.training,
+            max_steps_per_epoch=1,
+            validation_max_steps=1,
+            checkpoint_every=1,
+        ),
+    )
+    monkeypatch.setattr(instrumentation_module, "SummaryWriter", FailingWriter)
+
+    result = train(config)
+
+    run_root = tmp_path / "failed-events"
+    assert Path(result["checkpoint"]).is_file()
+    assert json.loads((run_root / "metrics.json").read_text())[-1]["global_step"] == 1
+    diagnostics = [
+        json.loads(line)
+        for line in (run_root / "instrumentation" / "diagnostics.jsonl").read_text().splitlines()
+    ]
+    assert diagnostics == [
+        {
+            "error": "event sink failed",
+            "error_type": "RuntimeError",
+            "operation": "writer_initialization",
+        }
+    ]
 
 
 def _trained_smoke_config(tmp_path: Path, name: str) -> Any:
@@ -405,8 +517,17 @@ def test_best_checkpoint_and_early_stopping_follow_validation_loss(
         max_steps: int,
         *,
         completed_steps: int = 0,
+        telemetry: dict[str, float] | None = None,
     ) -> tuple[dict[str, float], int]:
         del model, loader, pipeline_config, device, max_steps, completed_steps
+        if telemetry is not None:
+            telemetry.update(
+                gradient_norm=1.0,
+                examples_per_second=1.0,
+                updates_per_second=1.0,
+                data_wait_seconds=0.0,
+                duration_seconds=1.0,
+            )
         total = 1.0 if optimizer is not None else next(validation_losses)
         return {"total": total, "candle": total / 2, "leg": total / 2}, 1
 
@@ -461,8 +582,17 @@ def test_resumed_training_restores_early_stopping_patience(
         max_steps: int,
         *,
         completed_steps: int = 0,
+        telemetry: dict[str, float] | None = None,
     ) -> tuple[dict[str, float], int]:
         del model, loader, pipeline_config, device, max_steps, completed_steps
+        if telemetry is not None:
+            telemetry.update(
+                gradient_norm=1.0,
+                examples_per_second=1.0,
+                updates_per_second=1.0,
+                data_wait_seconds=0.0,
+                duration_seconds=1.0,
+            )
         total = 1.0 if optimizer is not None else next(validation_losses)
         return {"total": total, "candle": total / 2, "leg": total / 2}, 1
 
@@ -532,6 +662,12 @@ def test_interrupted_resume_matches_uninterrupted_training(
     with pytest.raises(RuntimeError, match="simulated interruption"):
         train(interrupted)
     assert did_interrupt
+    run_root = tmp_path / f"interrupted-{interrupt_length}"
+    event_root = run_root / "events"
+    original_event_files = set(event_root.glob("events.out.tfevents.*"))
+    assert original_event_files
+    if interrupt_length == 1:
+        (run_root / "instrumentation" / "telemetry.json").unlink()
     monkeypatch.setattr(pipeline_module, "_write_json", original_write_json)
     resumed_result = train(interrupted)
 
@@ -559,3 +695,15 @@ def test_interrupted_resume_matches_uninterrupted_training(
         (tmp_path / f"uninterrupted-{interrupt_length}" / "metrics.json").read_text()
     )
     assert resumed_metrics == uninterrupted_metrics
+    assert original_event_files < set(event_root.glob("events.out.tfevents.*"))
+    parsed_events = instrumentation_module.parse_tensorboard_events(event_root)
+    assert [event["step"] for event in parsed_events["scalars"]["run/global_step"]] == (
+        [2, 3] if interrupt_length == 1 else [1, 2, 3]
+    )
+    expected_resume_source = str((run_root / "checkpoints" / "pending.pt").resolve())
+    assert resumed_result["metadata"]["resume_source"] == expected_resume_source
+    assert json.loads((run_root / "run-metadata.json").read_text()) == resumed_result["metadata"]
+    assert (
+        json.loads(parsed_events["text"]["run/metadata/text_summary"][-1]["value"])["resume_source"]
+        == expected_resume_source
+    )

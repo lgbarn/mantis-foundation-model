@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
@@ -14,10 +15,16 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+import torch
 
 from mantis_v2.contamination import report_digest
 from mantis_v2.downstream_config import DownstreamConfig, load_downstream_config
 from mantis_v2.embedding import iter_symbol_embeddings, load_foundation
+from mantis_v2.instrumentation import (
+    RunInstrumentation,
+    collect_resource_metrics,
+    synchronize_device,
+)
 from mantis_v2.model import sha256_file
 from mantis_v2.strategy import build_symbol_candidates, market_path
 from mantis_v2.topstep import simulate_topstep
@@ -100,6 +107,55 @@ def _manifest_base(config: DownstreamConfig, stage: str) -> dict[str, Any]:
     if config.strategy_contract is not None:
         manifest["strategy_contract"] = config.strategy_contract
     return manifest
+
+
+def _record_stage_instrumentation(
+    config: DownstreamConfig,
+    stage: str,
+    started: float,
+    progress: dict[str, int | float],
+    device: torch.device,
+) -> dict[str, Any]:
+    root = artifact_root(config)
+    synchronize_device(device)
+    telemetry: dict[str, Any] = {
+        "stage": stage,
+        "duration_seconds": max(time.perf_counter() - started, 0.0),
+        **progress,
+        **collect_resource_metrics(root, device),
+    }
+    path = root / "instrumentation" / f"{stage}.json"
+    _atomic_json(path, telemetry)
+    writer = RunInstrumentation(root)
+    writer.text(
+        f"stage/{stage}/metadata",
+        {"stage": stage, "seed": config.run.seed, "device": str(device)},
+        0,
+    )
+    writer.scalars(
+        {
+            f"stage/{stage}/completed": 1,
+            f"stage/{stage}/duration_seconds": float(telemetry["duration_seconds"]),
+            **{f"stage/{stage}/{key}": value for key, value in progress.items()},
+            "host/rss_bytes": int(telemetry["host_rss_bytes"]),
+            "filesystem/free_bytes": int(telemetry["filesystem_free_bytes"]),
+        },
+        int(progress.get("step", 0)),
+    )
+    writer.scalars(
+        {
+            tag: float(value)
+            for tag, value in {
+                "cuda/allocated_bytes": telemetry["cuda_allocated_bytes"],
+                "cuda/reserved_bytes": telemetry["cuda_reserved_bytes"],
+                "cuda/utilization_percent": telemetry["cuda_utilization_percent"],
+            }.items()
+            if value is not None
+        },
+        int(progress.get("step", 0)),
+    )
+    writer.close()
+    return {"path": str(path), **telemetry}
 
 
 def verify_contract(config: DownstreamConfig) -> dict[str, Any]:
@@ -251,11 +307,13 @@ def prepare(config: DownstreamConfig) -> dict[str, Any]:
 def embed(config: DownstreamConfig) -> dict[str, Any]:
     """Extract bounded MantisV2 embedding shards from prepared candidates."""
     root = artifact_root(config)
+    started = time.perf_counter()
     prepared = _manifest(root / "prepare" / "manifest.json", config, "prepare")
     stage_root = root / "embed"
     manifest_path = stage_root / "manifest.json"
     _require_new(stage_root, config)
     foundation = load_foundation(config)
+    synchronize_device(foundation.device)
     outputs: list[dict[str, Any]] = []
     shard_number = 0
     for candidate_identity in prepared["outputs"]:
@@ -300,6 +358,13 @@ def embed(config: DownstreamConfig) -> dict[str, Any]:
         "outputs": outputs,
         "rows": sum(int(output["rows"]) for output in outputs),
     }
+    manifest["instrumentation"] = _record_stage_instrumentation(
+        config,
+        "embed",
+        started,
+        {"step": len(outputs), "rows": manifest["rows"], "shards": len(outputs)},
+        foundation.device,
+    )
     _atomic_json(manifest_path, manifest)
     return manifest
 
@@ -430,6 +495,9 @@ def _read_head(path: Path) -> PortableHead:
 def walk_forward(config: DownstreamConfig) -> dict[str, Any]:
     """Fit train-only logistic heads and emit full out-of-sample predictions."""
     root = artifact_root(config)
+    device = torch.device("cpu")
+    synchronize_device(device)
+    started = time.perf_counter()
     embedded, embed_manifest_path, embed_manifest_sha = _embedding_manifest_input(config)
     stage_root = root / "walk-forward"
     manifest_path = stage_root / "manifest.json"
@@ -542,6 +610,19 @@ def walk_forward(config: DownstreamConfig) -> dict[str, Any]:
         "diagnostic_metrics": ["log_loss", "brier", "roc_auc", "pr_auc"],
         "folds": fold_outputs,
     }
+    manifest["instrumentation"] = _record_stage_instrumentation(
+        config,
+        "walk_forward",
+        started,
+        {
+            "step": len(fold_outputs),
+            "folds": len(fold_outputs),
+            "validation_weighted_log_loss": float(
+                np.mean([fold["validation_metrics"]["weighted_log_loss"] for fold in fold_outputs])
+            ),
+        },
+        device,
+    )
     _atomic_json(manifest_path, manifest)
     return manifest
 
@@ -595,6 +676,7 @@ def smoke(config: DownstreamConfig) -> dict[str, Any]:
             "downstream smoke requires device=cpu and allow_overwrite=true"
         )
     root = artifact_root(config)
+    embed_started = time.perf_counter()
     generator = np.random.default_rng(config.run.seed)
     features = generator.normal(size=(12, 4)).astype(np.float32)
     labels = np.asarray([0, 1] * 6, dtype=np.int8)
@@ -630,7 +712,15 @@ def smoke(config: DownstreamConfig) -> dict[str, Any]:
         "features": _file_identity(feature_path),
         "metadata": _file_identity(metadata_path),
     }
+    embed_manifest["instrumentation"] = _record_stage_instrumentation(
+        config,
+        "embed",
+        embed_started,
+        {"step": 1, "rows": len(metadata), "shards": 1},
+        torch.device("cpu"),
+    )
     _atomic_json(root / "embed" / "manifest.json", embed_manifest)
+    walk_forward_started = time.perf_counter()
     head, validation_metrics, convergence = fit_logistic_head(
         features[:8], labels[:8], features[8:], labels[8:], config
     )
@@ -656,6 +746,19 @@ def smoke(config: DownstreamConfig) -> dict[str, Any]:
         "head": _file_identity(head_path),
         "predictions": _file_identity(predictions_path),
     }
+    walk_manifest["instrumentation"] = _record_stage_instrumentation(
+        config,
+        "walk_forward",
+        walk_forward_started,
+        {
+            "step": 1,
+            "folds": 1,
+            "validation_weighted_log_loss": float(
+                cast(float, validation_metrics["weighted_log_loss"])
+            ),
+        },
+        torch.device("cpu"),
+    )
     _atomic_json(root / "walk-forward" / "manifest.json", walk_manifest)
     result, trades = simulate_topstep(predictions, config)
     trades_path = root / "simulate" / "trades.parquet"

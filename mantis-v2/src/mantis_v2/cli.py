@@ -43,6 +43,7 @@ from mantis_v2.downstream_pipeline import (
 )
 from mantis_v2.embedding import EmbeddingContractError
 from mantis_v2.model import ModelContractError
+from mantis_v2.monitoring import MonitoringError, serve_tensorboard
 from mantis_v2.pipeline import (
     PipelineError,
     data_audit,
@@ -105,10 +106,15 @@ def _parser() -> argparse.ArgumentParser:
         "runpod-image-self-check",
         *_CORPUS_COMMANDS,
         *_DOWNSTREAM_COMMANDS,
+        "tensorboard",
     ):
         child = subparsers.add_parser(command)
-        if command != "runpod-image-self-check":
+        if command not in ("runpod-image-self-check", "tensorboard"):
             child.add_argument("--config", required=True, type=Path)
+        if command == "tensorboard":
+            child.add_argument("--run-root", required=True, type=Path)
+            child.add_argument("--host", default="127.0.0.1")
+            child.add_argument("--port", default=6006, type=int)
         if command == "rl-build-episodes":
             child.add_argument("--fold", required=True, type=int)
             child.add_argument(
@@ -187,6 +193,8 @@ def main() -> None:
                 evaluated_at=args.evaluated_at,
                 output_path=args.output,
             )
+        elif args.command == "tensorboard":
+            result = serve_tensorboard(args.run_root, host=args.host, port=args.port)
         elif args.command == "rl-account-replay":
             result = write_account_replay_manifest(
                 load_rl_config(args.config), args.input, args.output
@@ -253,6 +261,7 @@ def main() -> None:
         CorpusRepairError,
         DataContractError,
         ModelContractError,
+        MonitoringError,
         PipelineError,
         RuntimeContractError,
         RlAccountError,

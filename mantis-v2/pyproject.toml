@@ -16,6 +16,7 @@ dependencies = [
   "sb3-contrib>=2.7,<3",
   "scikit-learn>=1.9,<2",
   "stable-baselines3>=2.7,<3",
+  "tensorboard>=2.20,<3",
   "torch>=2.4,<3",
 ]
 

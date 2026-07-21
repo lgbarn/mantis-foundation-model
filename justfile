@@ -5,6 +5,7 @@ default:
 
 sync:
     uv sync --all-packages
+    uv run tensorboard --version
 
 format:
     uv run ruff format .
@@ -58,6 +59,9 @@ runpod-plan-authorized platform local experiment intent inventory ledger authori
 
 train config:
     uv run mantis-v2 train --config {{config}}
+
+tensorboard run_root port="6006":
+    uv run mantis-v2 tensorboard --run-root {{quote(run_root)}} --host 127.0.0.1 --port {{port}}
 
 evaluate config:
     uv run mantis-v2 evaluate --config {{config}}
