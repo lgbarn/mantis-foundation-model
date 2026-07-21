@@ -1,7 +1,8 @@
 # RunPod infrastructure
 
 This directory will contain the reproducible RunPod infrastructure for the
-MantisV2 training pipeline. The decision map is GitHub issue #20.
+MantisV2 training pipeline. The decision map is GitHub issue #20. The accepted
+implementation route is [IMPLEMENTATION_HANDOFF.md](IMPLEMENTATION_HANDOFF.md).
 
 ## Ownership
 
@@ -50,8 +51,8 @@ fleet:
 - Secure Cloud
 - one NVIDIA A40 with 48 GiB VRAM
 - at least 8 vCPU and 32 GiB host RAM
-- 50 GiB container disk
-- 150 GiB network volume
+- 50 GB container disk
+- 150 GB network volume
 - two-hour automatic termination for the smoke benchmark
 - no automatic retry that can create a second Pod
 
@@ -165,11 +166,13 @@ resource instrumentation, transfer verification, and an independent shutdown
 watchdog. The benchmark is the first post-implementation acceptance gate, not
 a planning-time claim that CUDA is already qualified.
 
-Run the A40 alone first. Bound it to eight hours and $3.52 at the observed
-price. L40, L40S, and A100 PCIe are explicit sequential fallbacks only; the
-worst-case approved matrix is $8.53 compute and must remain below the $10
-qualification allocation after container-disk overhead. Never launch a
-fallback automatically.
+Run the A40 alone first with a two-hour hard deadline. A longer qualification
+requires a new explicit approval after reviewing that result. The cumulative
+A40 qualification allowance is at most eight hours and $3.52 at the observed
+price; this is not permission for one eight-hour Pod. L40, L40S, and A100 PCIe
+are explicit sequential fallbacks only. The worst-case approved matrix is $8.53
+compute and must remain below the $10 qualification allocation after
+container-disk overhead. Never launch a fallback automatically.
 
 The matrix covers environment and network-volume I/O; FP32 batch doubling;
 CPU/CUDA output, loss, gradient, and update parity; BF16 qualification;
