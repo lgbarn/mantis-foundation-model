@@ -99,3 +99,6 @@ rl-build-episodes config fold partition episodes:
 
 rl-account-replay input output config="mantis-v2/configs/rl-entry-smoke.toml":
     uv run mantis-v2 rl-account-replay --config {{config}} --input {{input}} --output {{output}}
+
+rl-validate-environment training_manifest validation_manifest output config="mantis-v2/configs/rl-entry-smoke.toml":
+    uv run mantis-v2 rl-validate-environment --config {{config}} --training-manifest {{training_manifest}} --validation-manifest {{validation_manifest}} --output {{output}}

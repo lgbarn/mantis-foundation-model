@@ -13,6 +13,7 @@ from mantis_v2.rl_episodes import (
     EpisodeContractError,
     Partition,
     _atomic_resume,
+    _independent_exchange_calendar,
     _session_id,
     _session_is_complete,
     _session_ordinal,
@@ -121,6 +122,31 @@ def test_schedule_rejects_missing_session_before_sampling() -> None:
         build_episode_schedule({"ES": rows}, partition, seed=5, episode_count=1)
 
 
+def test_complete_session_calendar_allows_a_day_without_candidates() -> None:
+    complete = _rows("ES", "2025-01-02", sessions=20)
+    sessions = tuple(
+        dict.fromkeys(_session_id(pd.Timestamp(value)) for value in complete["decision_ts"])
+    )
+    candidates = complete.drop(index=10).reset_index(drop=True)
+    partition = Partition(
+        name="training",
+        start=pd.Timestamp("2025-01-01", tz="UTC"),
+        end=pd.Timestamp("2025-03-01", tz="UTC"),
+    )
+
+    (episode,) = build_episode_schedule(
+        {"ES": candidates},
+        partition,
+        seed=5,
+        episode_count=1,
+        session_calendars={"ES": sessions},
+    )
+
+    assert episode.trading_days == 20
+    assert episode.candidate_count == 19
+    assert sum(span.row_count for span in episode.observation_spans) == 19
+
+
 def test_schedule_does_not_bridge_absent_or_rollover_sessions() -> None:
     partition = Partition(
         name="training",
@@ -150,7 +176,65 @@ def test_session_calendar_detects_whole_and_partial_session_gaps() -> None:
         )
     )
     assert _session_is_complete(complete)
+    assert _session_is_complete(complete.drop(index=100))
+    assert not _session_is_complete(complete.iloc[[0, -1]])
     assert not _session_is_complete(complete.iloc[:2])
+
+
+def test_exchange_calendar_rejects_ticker_local_missing_or_rollover_session() -> None:
+    complete = _rows("ES", "2025-01-02", sessions=20)
+    sessions = tuple(
+        dict.fromkeys(_session_id(pd.Timestamp(value)) for value in complete["decision_ts"])
+    )
+    partition = Partition(
+        name="training",
+        start=pd.Timestamp("2025-01-01", tz="UTC"),
+        end=pd.Timestamp("2025-03-01", tz="UTC"),
+    )
+
+    with pytest.raises(EpisodeContractError, match="no complete episode"):
+        build_episode_schedule(
+            {"ES": complete},
+            partition,
+            seed=5,
+            episode_count=1,
+            session_calendars={"ES": sessions},
+            unsafe_sessions={"ES": frozenset({sessions[10]})},
+        )
+
+
+def test_independent_calendar_keeps_provider_wide_missing_session_visible() -> None:
+    sessions = _independent_exchange_calendar(
+        pd.Timestamp("2025-01-06", tz="UTC"), pd.Timestamp("2025-01-10", tz="UTC")
+    )
+
+    assert len(sessions) == 5
+    assert date(2025, 1, 7) in sessions
+
+
+def test_schedule_excludes_candidate_with_rollover_overlap_from_safe_window() -> None:
+    rows = _rows("CL", "2025-01-02", sessions=20)
+    rows.loc[10, "rollover_safe"] = False
+    sessions = tuple(
+        dict.fromkeys(_session_id(pd.Timestamp(value)) for value in rows["decision_ts"])
+    )
+    partition = Partition(
+        name="training",
+        start=pd.Timestamp("2025-01-01", tz="UTC"),
+        end=pd.Timestamp("2025-03-01", tz="UTC"),
+    )
+
+    (episode,) = build_episode_schedule(
+        {"CL": rows},
+        partition,
+        seed=5,
+        episode_count=1,
+        session_calendars={"CL": sessions},
+        unsafe_sessions={"CL": frozenset()},
+    )
+
+    assert episode.candidate_count == 19
+    assert sum(span.row_count for span in episode.observation_spans) == 19
 
 
 def test_schedule_contains_complete_lookback_exit_and_terminal_horizons() -> None:

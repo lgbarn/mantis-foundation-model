@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
+from itertools import pairwise
 from pathlib import Path
 from typing import cast
 from zoneinfo import ZoneInfo
@@ -57,6 +59,8 @@ class ObservationSpan:
 
 
 _CHICAGO = ZoneInfo("America/Chicago")
+_EXCHANGE_CALENDAR_VERSION = "cme-globex-weekday-sessions-v1"
+_EXCHANGE_CALENDAR_SHA256 = hashlib.sha256(_EXCHANGE_CALENDAR_VERSION.encode()).hexdigest()
 
 
 def _session_id(timestamp: pd.Timestamp) -> date:
@@ -73,29 +77,50 @@ def _session_is_complete(values: pd.Series) -> bool:
     ordered = values.sort_values()
     if len(ordered) < 2:
         return False
-    gaps = ordered.diff().dropna()
     first_local = ordered.iloc[0].tz_convert(_CHICAGO)
     last_local = ordered.iloc[-1].tz_convert(_CHICAGO)
+    gaps = ordered.diff().dropna()
     return bool(
         (17, 0) <= (first_local.hour, first_local.minute) <= (17, 3)
         and last_local.date() > first_local.date()
         and (last_local.hour, last_local.minute) >= (15, 9)
-        and (gaps.empty or gaps.max() <= timedelta(minutes=3))
+        and not gaps.empty
+        and gaps.max() <= pd.to_timedelta(15, unit="m")
     )
+
+
+def _session_bounds(session: date) -> tuple[pd.Timestamp, pd.Timestamp]:
+    start = pd.Timestamp(datetime.combine(session, time(17, 0)), tz=_CHICAGO)
+    following = session + timedelta(days=1)
+    end = pd.Timestamp(datetime.combine(following, time(15, 9)), tz=_CHICAGO)
+    return start.tz_convert("UTC"), end.tz_convert("UTC")
+
+
+def _independent_exchange_calendar(start: pd.Timestamp, end: pd.Timestamp) -> tuple[date, ...]:
+    trade_dates = pd.bdate_range(start.date(), end.date())
+    return tuple((value.date() - timedelta(days=1)) for value in trade_dates)
 
 
 def _spans(rows: pd.DataFrame) -> tuple[ObservationSpan, ...]:
     spans: list[ObservationSpan] = []
     for shard, group in rows.groupby("shard", sort=False):
         offsets = group["row"].astype(int).to_numpy()
-        if len(offsets) > 1 and not np.all(np.diff(offsets) == 1):
-            raise EpisodeContractError("episode observation rows are not contiguous")
-        spans.append(ObservationSpan(int(shard), int(offsets[0]), len(offsets)))
+        differences = np.diff(offsets)
+        if len(differences) and np.any(differences <= 0):
+            raise EpisodeContractError("episode observation rows are not strictly ordered")
+        boundaries = np.concatenate(([0], np.flatnonzero(differences != 1) + 1, [len(offsets)]))
+        for start, end in pairwise(boundaries):
+            spans.append(ObservationSpan(int(shard), int(offsets[int(start)]), int(end - start)))
     return tuple(spans)
 
 
 def _valid_windows(
-    ticker: str, rows: pd.DataFrame, partition: Partition, trading_days: int
+    ticker: str,
+    rows: pd.DataFrame,
+    partition: Partition,
+    trading_days: int,
+    session_calendar: tuple[date, ...] | None = None,
+    unsafe_sessions: frozenset[date] = frozenset(),
 ) -> list[
     tuple[
         date,
@@ -140,8 +165,21 @@ def _valid_windows(
         & (frame["label_end_ts"] < partition.end)
         & (frame["terminal_ts"] < partition.end)
     ].copy()
+    owned = owned[
+        owned["session_complete"].astype(bool)
+        & owned["rollover_safe"].astype(bool)
+        & owned["horizon_complete"].astype(bool)
+    ].copy()
     owned["session"] = owned["decision_ts"].map(_session_id)
-    sessions = list(dict.fromkeys(owned["session"].tolist()))
+    if session_calendar is None:
+        sessions = list(dict.fromkeys(owned["session"].tolist()))
+    else:
+        sessions = [
+            session
+            for session in session_calendar
+            if _session_bounds(session)[0] >= partition.start
+            and _session_bounds(session)[1] < partition.end
+        ]
     windows: list[
         tuple[
             date,
@@ -157,15 +195,20 @@ def _valid_windows(
     ] = []
     for offset in range(len(sessions) - trading_days + 1):
         selected = sessions[offset : offset + trading_days]
+        ordinals = np.asarray([_session_ordinal(session) for session in selected])
+        if any(session in unsafe_sessions for session in selected):
+            continue
+        if session_calendar is None and len(ordinals) > 1 and not np.all(np.diff(ordinals) == 1):
+            continue
         mask = owned["session"].isin(selected)
         indices = np.flatnonzero(mask.to_numpy())
         if len(indices) == 0:
             continue
         selected_rows = owned.iloc[indices]
-        ordinals = (
+        observed_ordinals = (
             selected_rows.groupby("session", sort=False)["session_ordinal"].first().to_numpy()
         )
-        if len(ordinals) > 1 and not np.all(np.diff(ordinals) == 1):
+        if not set(observed_ordinals).issubset(set(ordinals)):
             continue
         if not selected_rows["session_complete"].astype(bool).all():
             continue
@@ -181,9 +224,9 @@ def _valid_windows(
                 len(indices),
                 _spans(selected_rows),
                 pd.Timestamp(selected_rows["lookback_start_ts"].min()),
-                pd.Timestamp(selected_rows["decision_ts"].min()),
+                _session_bounds(selected[0])[0],
                 pd.Timestamp(selected_rows["label_end_ts"].max()),
-                pd.Timestamp(selected_rows["terminal_ts"].max()),
+                _session_bounds(selected[-1])[1],
             )
         )
     return windows
@@ -204,6 +247,8 @@ def build_episode_schedule(
     seed: int,
     episode_count: int,
     trading_days: int = 20,
+    session_calendars: Mapping[str, tuple[date, ...]] | None = None,
+    unsafe_sessions: Mapping[str, frozenset[date]] | None = None,
 ) -> tuple[Episode, ...]:
     """Build a reproducible, balanced schedule from complete ticker-local windows."""
     if episode_count < 1:
@@ -212,8 +257,19 @@ def build_episode_schedule(
     if not tickers:
         raise EpisodeContractError("episode sources are empty")
     generator = np.random.default_rng(seed)
+    if session_calendars is not None and set(session_calendars) != set(tickers):
+        raise EpisodeContractError("session calendars must match episode sources")
+    if unsafe_sessions is not None and set(unsafe_sessions) != set(tickers):
+        raise EpisodeContractError("unsafe sessions must match episode sources")
     windows = {
-        ticker: _valid_windows(ticker, sources[ticker], partition, trading_days)
+        ticker: _valid_windows(
+            ticker,
+            sources[ticker],
+            partition,
+            trading_days,
+            None if session_calendars is None else session_calendars[ticker],
+            frozenset() if unsafe_sessions is None else unsafe_sessions[ticker],
+        )
         for ticker in tickers
     }
     empty = [ticker for ticker, available in windows.items() if not available]
@@ -560,7 +616,7 @@ def build_episode_manifest(
     if fold_number < 0 or fold_number >= len(folds):
         raise EpisodeContractError("fold number is out of range")
     fold = folds[fold_number]
-    embargo = pd.Timedelta(seconds=180 * int(downstream.walk_forward.embargo_bars))
+    embargo = pd.to_timedelta(3 * int(downstream.walk_forward.embargo_bars), unit="m")
     boundaries = {
         "training": (fold.train_start, fold.train_end - embargo),
         "validation": (fold.validation_start + embargo, fold.validation_end - embargo),
@@ -576,12 +632,20 @@ def build_episode_manifest(
         symbol: owned_metadata[owned_metadata["symbol"] == symbol].copy()
         for symbol in downstream.data.symbols
     }
+    exchange_calendar = _independent_exchange_calendar(start, end)
     episodes = build_episode_schedule(
         sources,
         partition,
         seed=config.run.seed,
         episode_count=episode_count,
         trading_days=config.episode.timeout_trading_days,
+        session_calendars={symbol: exchange_calendar for symbol in downstream.data.symbols},
+        unsafe_sessions={
+            symbol: frozenset(
+                (set(exchange_calendar) - complete_sessions[symbol]) | rollover_sessions[symbol]
+            )
+            for symbol in downstream.data.symbols
+        },
     )
     payload: dict[str, object] = {
         "schema_version": 1,
@@ -593,6 +657,11 @@ def build_episode_manifest(
         "account_start": config.episode.account_start,
         "identities": identities,
         "embedding": {"feature_width": width, "outputs": embedding_outputs},
+        "exchange_calendar": {
+            "version": _EXCHANGE_CALENDAR_VERSION,
+            "sha256": _EXCHANGE_CALENDAR_SHA256,
+            "sessions": len(exchange_calendar),
+        },
         "episodes": [asdict(episode) for episode in episodes],
     }
     _atomic_resume(output, payload)

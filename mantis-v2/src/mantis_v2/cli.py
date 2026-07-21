@@ -58,6 +58,10 @@ from mantis_v2.rl_account import RlAccountError, write_account_replay_manifest
 from mantis_v2.rl_config import load_rl_config
 from mantis_v2.rl_episodes import EpisodeContractError, build_episode_manifest
 from mantis_v2.rl_provenance import RlProvenanceError, write_rl_dry_run_manifest
+from mantis_v2.rl_validation import (
+    EnvironmentValidationError,
+    write_environment_validation,
+)
 from mantis_v2.runtime import RuntimeContractError
 from mantis_v2.strategy import StrategyContractError
 from mantis_v2.topstep import TopstepContractError
@@ -91,6 +95,7 @@ def _parser() -> argparse.ArgumentParser:
         "rl-dry-run",
         "rl-build-episodes",
         "rl-account-replay",
+        "rl-validate-environment",
         *_CORPUS_COMMANDS,
         *_DOWNSTREAM_COMMANDS,
     ):
@@ -104,6 +109,10 @@ def _parser() -> argparse.ArgumentParser:
             child.add_argument("--episodes", required=True, type=int)
         if command == "rl-account-replay":
             child.add_argument("--input", required=True, type=Path)
+            child.add_argument("--output", required=True, type=Path)
+        if command == "rl-validate-environment":
+            child.add_argument("--training-manifest", required=True, type=Path)
+            child.add_argument("--validation-manifest", required=True, type=Path)
             child.add_argument("--output", required=True, type=Path)
         if command in _DOWNSTREAM_COMMANDS:
             child.add_argument(
@@ -145,6 +154,13 @@ def main() -> None:
         if args.command == "rl-account-replay":
             result = write_account_replay_manifest(
                 load_rl_config(args.config), args.input, args.output
+            )
+        elif args.command == "rl-validate-environment":
+            result = write_environment_validation(
+                load_rl_config(args.config),
+                args.training_manifest,
+                args.validation_manifest,
+                args.output,
             )
         elif args.command == "rl-dry-run":
             result = write_rl_dry_run_manifest(load_rl_config(args.config))
@@ -197,6 +213,7 @@ def main() -> None:
         RlAccountError,
         RlProvenanceError,
         EpisodeContractError,
+        EnvironmentValidationError,
         DownstreamPipelineError,
         EmbeddingContractError,
         StrategyContractError,
