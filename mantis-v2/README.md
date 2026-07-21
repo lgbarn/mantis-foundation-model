@@ -69,6 +69,10 @@ just rl-account-replay fixture.json replay.json mantis-v2/configs/rl-entry-smoke
 just rl-validate-environment training.json validation.json environment-validation.json \
   mantis-v2/configs/rl-entry-smoke.toml
 just rl-smoke artifacts/rl-entry-smoke-v1 mantis-v2/configs/rl-entry-smoke.toml
+just runpod-image-build ghcr.io/lgbarn/mantis-v2-cuda:SOURCE_SHA
+just runpod-image-scan ghcr.io/lgbarn/mantis-v2-cuda:SOURCE_SHA reports/image-scan.json
+just runpod-image-self-check \
+  ghcr.io/lgbarn/mantis-v2-cuda:SOURCE_SHA reports/runtime-inventory.json
 ```
 
 `gate` includes deterministic synthetic smoke training, evaluation, checkpoint,

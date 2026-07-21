@@ -41,6 +41,15 @@ repair-corpus config="mantis-v2/configs/corpus-repair-v1.toml":
 validate-corpus config="mantis-v2/configs/corpus-repair-v1.toml":
     uv run mantis-v2 validate-corpus --config {{config}}
 
+runpod-image-build image:
+    infra/runpod/scripts/build-image.sh {{quote(image)}}
+
+runpod-image-self-check image output:
+    infra/runpod/scripts/self-check-image.sh {{quote(image)}} {{quote(output)}}
+
+runpod-image-scan image output:
+    infra/runpod/scripts/scan-image.sh {{quote(image)}} {{quote(output)}}
+
 train config:
     uv run mantis-v2 train --config {{config}}
 

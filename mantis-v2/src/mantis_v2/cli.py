@@ -63,6 +63,8 @@ from mantis_v2.rl_validation import (
     EnvironmentValidationError,
     write_environment_validation,
 )
+from mantis_v2.runpod_image import ImageContractError
+from mantis_v2.runpod_image import self_check as runpod_image_self_check
 from mantis_v2.runtime import RuntimeContractError
 from mantis_v2.strategy import StrategyContractError
 from mantis_v2.topstep import TopstepContractError
@@ -98,11 +100,13 @@ def _parser() -> argparse.ArgumentParser:
         "rl-account-replay",
         "rl-validate-environment",
         "rl-smoke",
+        "runpod-image-self-check",
         *_CORPUS_COMMANDS,
         *_DOWNSTREAM_COMMANDS,
     ):
         child = subparsers.add_parser(command)
-        child.add_argument("--config", required=True, type=Path)
+        if command != "runpod-image-self-check":
+            child.add_argument("--config", required=True, type=Path)
         if command == "rl-build-episodes":
             child.add_argument("--fold", required=True, type=int)
             child.add_argument(
@@ -156,7 +160,9 @@ def main() -> None:
         "verify-upstream": verify_upstream,
     }
     try:
-        if args.command == "rl-account-replay":
+        if args.command == "runpod-image-self-check":
+            result = runpod_image_self_check()
+        elif args.command == "rl-account-replay":
             result = write_account_replay_manifest(
                 load_rl_config(args.config), args.input, args.output
             )
@@ -211,6 +217,11 @@ def main() -> None:
         else:
             config = load_config(args.config)
             result = commands[args.command](config)
+    except ImageContractError as exc:
+        if exc.inventory is not None:
+            print(json.dumps(exc.inventory, sort_keys=True, separators=(",", ":")))
+        print(f"error: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
     except (
         CheckpointError,
         ConfigError,
@@ -232,7 +243,10 @@ def main() -> None:
     ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
-    print(json.dumps(result, indent=2, sort_keys=True, default=str))
+    if args.command == "runpod-image-self-check":
+        print(json.dumps(result, sort_keys=True, separators=(",", ":"), default=str))
+    else:
+        print(json.dumps(result, indent=2, sort_keys=True, default=str))
 
 
 if __name__ == "__main__":
