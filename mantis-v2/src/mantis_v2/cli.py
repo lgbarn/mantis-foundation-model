@@ -58,6 +58,7 @@ from mantis_v2.rl_account import RlAccountError, write_account_replay_manifest
 from mantis_v2.rl_config import load_rl_config
 from mantis_v2.rl_episodes import EpisodeContractError, build_episode_manifest
 from mantis_v2.rl_provenance import RlProvenanceError, write_rl_dry_run_manifest
+from mantis_v2.rl_smoke import RlSmokeError, run_maskable_ppo_smoke
 from mantis_v2.rl_validation import (
     EnvironmentValidationError,
     write_environment_validation,
@@ -96,6 +97,7 @@ def _parser() -> argparse.ArgumentParser:
         "rl-build-episodes",
         "rl-account-replay",
         "rl-validate-environment",
+        "rl-smoke",
         *_CORPUS_COMMANDS,
         *_DOWNSTREAM_COMMANDS,
     ):
@@ -114,6 +116,9 @@ def _parser() -> argparse.ArgumentParser:
             child.add_argument("--training-manifest", required=True, type=Path)
             child.add_argument("--validation-manifest", required=True, type=Path)
             child.add_argument("--output", required=True, type=Path)
+        if command == "rl-smoke":
+            child.add_argument("--output", required=True, type=Path)
+            child.add_argument("--resume", action="store_true")
         if command in _DOWNSTREAM_COMMANDS:
             child.add_argument(
                 "--set",
@@ -154,6 +159,10 @@ def main() -> None:
         if args.command == "rl-account-replay":
             result = write_account_replay_manifest(
                 load_rl_config(args.config), args.input, args.output
+            )
+        elif args.command == "rl-smoke":
+            result = run_maskable_ppo_smoke(
+                load_rl_config(args.config), args.output, resume=args.resume
             )
         elif args.command == "rl-validate-environment":
             result = write_environment_validation(
@@ -212,6 +221,7 @@ def main() -> None:
         RuntimeContractError,
         RlAccountError,
         RlProvenanceError,
+        RlSmokeError,
         EpisodeContractError,
         EnvironmentValidationError,
         DownstreamPipelineError,

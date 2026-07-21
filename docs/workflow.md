@@ -57,6 +57,7 @@ them can make a checkpoint intentionally non-resumable.
 | `just downstream-holdout ...` | Opens sealed 2026 downstream data | Holdout artifacts | One-time governance action |
 | `just rl-dry-run <config>` | Validates the locked RL identity | Atomic dry-run manifest | CPU; no holdout access |
 | `just rl-account-replay <input> <output> <config>` | Replays marked-equity account fixtures | Atomic replay manifest | CPU; refuses overwrite |
+| `just rl-smoke <output> <config> [--resume]` | Trains the bounded synthetic MaskablePPO qualification | Atomic checkpoint, state, metrics, manifest | 50K CPU steps; no production or holdout data |
 
 ## Phase 1: inspect the repository
 
@@ -380,6 +381,36 @@ TIMEOUT terminal status, and include a sub-2R retrace before the 3.1R excursion
 that activates the locked 2R/0.75R trail. Any action, quantity, fill, fee, exit,
 balance, equity, best-day, consistency, event, or terminal mismatch fails
 publication.
+
+### Qualify MaskablePPO on CPU
+
+Use a unique local output directory for the bounded Stage 1 smoke:
+
+```bash
+just rl-smoke \
+  artifacts/rl-entry-smoke-v1 \
+  mantis-v2/configs/rl-entry-smoke.toml
+```
+
+If the process stops after an atomic checkpoint, resume the same identity with:
+
+```bash
+just rl-smoke \
+  artifacts/rl-entry-smoke-v1 \
+  mantis-v2/configs/rl-entry-smoke.toml \
+  --resume
+```
+
+The smoke uses Gymnasium 1.x, Stable-Baselines3 and SB3-Contrib MaskablePPO on
+CPU. It trains for exactly 50,000 steps on deterministic synthetic episodes
+that exercise the same production observation, transition, and action-mask
+adapter. It must beat reject-all, keep every policy value finite, submit no
+illegal action, reproduce the seeded schedule, and match deterministic actions
+after checkpoint reload. `manifest.json` binds the checkpoint and metrics to
+the exact config, source, lock, schedule, policy, dependency versions, and seed.
+The command never reads a production episode manifest, market corpus, embedding
+shard, or sealed-holdout file. Passing this smoke permits later bounded fold
+work; it is not evidence of trading quality or permission to start Optuna.
 
 ### Prepare
 

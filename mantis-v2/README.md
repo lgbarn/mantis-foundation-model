@@ -68,6 +68,7 @@ just rl-build-episodes mantis-v2/configs/rl-entry-smoke.toml 0 training 21
 just rl-account-replay fixture.json replay.json mantis-v2/configs/rl-entry-smoke.toml
 just rl-validate-environment training.json validation.json environment-validation.json \
   mantis-v2/configs/rl-entry-smoke.toml
+just rl-smoke artifacts/rl-entry-smoke-v1 mantis-v2/configs/rl-entry-smoke.toml
 ```
 
 `gate` includes deterministic synthetic smoke training, evaluation, checkpoint,
@@ -114,9 +115,19 @@ rejected logistic fold head, and a fixed HistGradientBoosting contextual
 baseline. Supervised fitting uses training only and selects thresholds on
 validation only. It also records mmap p95 latency, deterministic environment
 steps per second, the 100x/5,000 steps-per-second gates, input hashes, host,
-Python, NumPy, and scikit-learn versions. This command does not import Gymnasium;
-official Gymnasium and MaskablePPO adapter qualification belongs to the next
-issue.
+Python, NumPy, and scikit-learn versions.
+
+`rl-smoke` is the Stage 1 CPU qualification. It runs the official Gymnasium and
+Stable-Baselines3 environment checks through the production entry adapter, then
+trains MaskablePPO for exactly 50,000 steps on a balanced, deterministic,
+learnable synthetic schedule. Completion requires finite policy parameters,
+zero illegal actions, better reward than reject-all, identical deterministic
+actions after native reload, and a reproduced schedule. The command writes
+atomic `checkpoint.zip`, `state.json`, `metrics.json`, and `manifest.json`
+files. A partial run resumes only with `--resume` and exact source, config,
+lock, policy, dependency, seed, and schedule identities. Completed or changed
+run identities are never overwritten. This smoke does not read production data
+or the sealed holdout and does not qualify MPS for policy training.
 
 ### Bar-level Topstep account replay
 
