@@ -66,6 +66,8 @@ just validated-export mantis-v2/configs/nextleg-parquet-v2.toml
 just rl-dry-run mantis-v2/configs/rl-entry-smoke.toml
 just rl-build-episodes mantis-v2/configs/rl-entry-smoke.toml 0 training 21
 just rl-account-replay fixture.json replay.json mantis-v2/configs/rl-entry-smoke.toml
+just rl-validate-environment training.json validation.json environment-validation.json \
+  mantis-v2/configs/rl-entry-smoke.toml
 ```
 
 `gate` includes deterministic synthetic smoke training, evaluation, checkpoint,
@@ -97,6 +99,24 @@ mini-only. The manifest stores shard row spans for memory-mapped observation
 lookup plus all upstream identities. Repeating the same command resumes by
 accepting an identical completed manifest; changed inputs or parameters fail
 without replacing it. Use a new RL run name for a different schedule contract.
+
+`rl-validate-environment` is the dependency-light Stage 0 gate. It consumes
+training and validation episode manifests from the same fold, rejects test and
+sealed-holdout partitions, and reconstructs complete chronological 3-minute
+episodes from the pinned Parquet corpus and memory-mapped embedding shards. The
+environment exposes the shared `[skip, enter]` mask used by every baseline,
+fills accepted close-formed decisions at the next open, and permits only no-op
+while positioned. Invalid entry raises instead of being rewritten.
+
+The validation output records finite and prefix-causality checks, exact replays
+for reject-all, take-all, participation-matched seeded random-take, the immutable
+rejected logistic fold head, and a fixed HistGradientBoosting contextual
+baseline. Supervised fitting uses training only and selects thresholds on
+validation only. It also records mmap p95 latency, deterministic environment
+steps per second, the 100x/5,000 steps-per-second gates, input hashes, host,
+Python, NumPy, and scikit-learn versions. This command does not import Gymnasium;
+official Gymnasium and MaskablePPO adapter qualification belongs to the next
+issue.
 
 ### Bar-level Topstep account replay
 
