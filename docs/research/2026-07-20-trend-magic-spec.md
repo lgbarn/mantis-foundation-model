@@ -76,10 +76,16 @@ sealed holdout, and the existing 24/3/3-month purged walk-forward definition.
 Run each recoverable stage separately:
 
 ```bash
-just downstream-prepare mantis-v2/configs/trend-magic-topstep-100k.toml
-just downstream-embed mantis-v2/configs/trend-magic-topstep-100k.toml
-just downstream-walk-forward mantis-v2/configs/trend-magic-topstep-100k-head-c0001-v2.toml
+just trend-magic-verify
+just trend-magic-prepare
+just trend-magic-embed
+just trend-magic-head
 ```
+
+The read-only verification command reports the fail-closed
+`trend_magic_fixed_3r_v1` recipe before any stage is allowed to mutate
+artifacts. The 2R-activated execution trail remains separate from the strict
+fixed-3R supervised label.
 
 The original `C=1.0`, 500-iteration head failed closed on fold 0. An exact-fold
 diagnostic changed one variable and found that `C=0.0001` converged in 56 of 500

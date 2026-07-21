@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -8,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from mantis_v2 import cli
 from mantis_v2 import strategy as strategy_module
 from mantis_v2.config import ConfigError
 from mantis_v2.corpus import _json_digest, _write_frame
@@ -26,6 +28,7 @@ from mantis_v2.embedding import EmbeddingContractError, _validated_evidence, loa
 from mantis_v2.model import sha256_file
 from mantis_v2.strategy import (
     _label_chunk,
+    _session_horizons,
     build_symbol_candidates,
     causal_context_indices,
     load_market_frame,
@@ -77,6 +80,21 @@ def test_trend_magic_config_is_strict_and_has_distinct_embedding_identity(
     assert trend_magic.strategy.kind == "trend_magic"
     assert trend_magic.strategy.cci_period == 20
     assert trend_magic.strategy.trend_magic_atr_period == 5
+    assert trend_magic.strategy_contract == {
+        "version": "trend_magic_fixed_3r_v1",
+        "input_timeframes": ["1min", "3min", "15min"],
+        "decision_timeframe": "3min",
+        "candidate_rule": "every_eligible_closed_3min_state_bar",
+        "direction_owner": "trend_magic",
+        "entry_rule": "next_eligible_bar_open",
+        "risk_rule": "0.5_atr_20",
+        "primary_label_rule": "strict_3r_target_before_1r_stop",
+        "analysis_targets_r": [2.0, 3.0, 4.0, 6.0],
+        "horizon_rule": "120_bars_session_bounded",
+        "session": "17:00-15:10 America/Chicago",
+        "round_trip_cost_r": 0.03,
+        "same_bar_policy": "stop_first",
+    }
     assert trend_magic.embedding_contract_digest != supertrend.embedding_contract_digest
     invalid = TREND_MAGIC_CONFIG.read_text().replace(
         "trend_magic_multiplier = 1.0",
@@ -86,6 +104,90 @@ def test_trend_magic_config_is_strict_and_has_distinct_embedding_identity(
     path.write_text(invalid)
     with pytest.raises(ConfigError, match=r"unknown \[strategy\] keys: supertrend_period"):
         load_downstream_config(path)
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "field"),
+    [
+        ("atr_period = 20", "atr_period = 14", "strategy.atr_period"),
+        ("cci_period = 20", "cci_period = 14", "strategy.cci_period"),
+        (
+            "trend_magic_atr_period = 5",
+            "trend_magic_atr_period = 7",
+            "strategy.trend_magic_atr_period",
+        ),
+        (
+            "trend_magic_multiplier = 1.0",
+            "trend_magic_multiplier = 1.5",
+            "strategy.trend_magic_multiplier",
+        ),
+        ("stop_atr = 0.5", "stop_atr = 0.75", "strategy.stop_atr"),
+        ("target_r = 3.0", "target_r = 4.0", "strategy.target_r"),
+        (
+            "analysis_targets_r = [2.0, 3.0, 4.0, 6.0]",
+            "analysis_targets_r = [2.0, 3.0, 4.0]",
+            "strategy.analysis_targets_r",
+        ),
+        ("horizon_bars = 120", "horizon_bars = 60", "strategy.horizon_bars"),
+        (
+            "round_trip_cost_r = 0.03",
+            "round_trip_cost_r = 0.04",
+            "strategy.round_trip_cost_r",
+        ),
+        (
+            'timestamp_semantics = "bar_open"',
+            'timestamp_semantics = "bar_close"',
+            "data.timestamp_semantics",
+        ),
+        (
+            'session_timezone = "America/Chicago"',
+            'session_timezone = "UTC"',
+            "topstep.session_timezone",
+        ),
+        (
+            "session_start_hour = 17",
+            "session_start_hour = 18",
+            "topstep.session_start_hour",
+        ),
+        (
+            "session_end_minute = 10",
+            "session_end_minute = 0",
+            "topstep.session_end_minute",
+        ),
+    ],
+)
+def test_trend_magic_fixed_3r_contract_rejects_recipe_drift(
+    tmp_path: Path, old: str, new: str, field: str
+) -> None:
+    path = tmp_path / "drifted-trend-magic.toml"
+    path.write_text(TREND_MAGIC_CONFIG.read_text().replace(old, new, 1))
+
+    with pytest.raises(ConfigError, match=rf"{field} must be"):
+        load_downstream_config(path)
+
+
+def test_prepare_manifest_base_names_the_trend_magic_contract() -> None:
+    config = load_downstream_config(TREND_MAGIC_CONFIG)
+
+    manifest = _manifest_base(config, "prepare")
+
+    assert manifest["strategy_contract"] == config.strategy_contract
+
+
+def test_cli_verifies_the_trend_magic_contract_without_running_a_stage(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["mantis-v2", "downstream-verify", "--config", str(TREND_MAGIC_CONFIG)],
+    )
+
+    cli.main()
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["strategy_contract"]["version"] == "trend_magic_fixed_3r_v1"
+    assert result["workflow_digest"] == load_downstream_config(TREND_MAGIC_CONFIG).workflow_digest
 
 
 @pytest.mark.parametrize("value", ["nan", "inf"])
@@ -185,6 +287,41 @@ def test_reusable_embed_manifest_requires_its_exact_digest(
     manifest_path.write_text("{}")
     with pytest.raises(DownstreamPipelineError, match="digest mismatch"):
         _embedding_manifest_input(config)
+
+
+def test_reusable_embed_manifest_rejects_declared_strategy_contract_drift(
+    tmp_path: Path,
+) -> None:
+    producer = load_downstream_config(TREND_MAGIC_CONFIG)
+    manifest_path = tmp_path / "embed-manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "stage": "embed",
+                "workflow_digest": producer.workflow_digest,
+                "strategy_contract": {"version": "tampered"},
+                "foundation_weights_sha256": producer.foundation.weights_sha256,
+                "embedding_dim_per_channel": 256,
+                "feature_width": 3840,
+                "rows": 1,
+                "outputs": [{"rows": 1}],
+            }
+        )
+    )
+    consumer = replace(
+        producer,
+        walk_forward=replace(
+            producer.walk_forward,
+            embed_manifest_path=manifest_path,
+            embed_manifest_sha256=sha256_file(manifest_path),
+            embed_producer_config_path=TREND_MAGIC_CONFIG,
+            embed_producer_config_sha256=sha256_file(TREND_MAGIC_CONFIG),
+        ),
+    )
+
+    with pytest.raises(DownstreamPipelineError, match="strategy_contract"):
+        _embedding_manifest_input(consumer)
 
 
 def test_reusable_embed_manifest_rejects_same_width_semantic_changes(
@@ -427,7 +564,11 @@ def test_candidate_builder_dispatches_trend_magic_parameters_and_uses_next_open(
 
     assert observed == [(4, 5, 1.25)]
     assert (candidates["direction"] == 1).all()
+    np.testing.assert_array_equal(np.diff(candidates["decision_index"]), 1)
     assert (candidates["entry_ts"] == candidates["decision_ts"]).all()
+    np.testing.assert_array_equal(
+        candidates["entry_price"], frame["open"].iloc[candidates["decision_index"] + 1]
+    )
 
 
 def test_candidate_builder_emits_each_eligible_state_bar(
@@ -639,6 +780,97 @@ def test_next_open_label_resolves_same_bar_tie_as_stop() -> None:
     assert reward[0] == pytest.approx(-1.03)
     assert mae[0] == pytest.approx(-1.03)
     assert exit_price.tolist() == [99.0]
+    assert exit_index.tolist() == [1]
+
+
+def test_fixed_3r_label_ignores_a_target_reached_after_an_earlier_stop() -> None:
+    frame = pd.DataFrame(
+        {
+            "open": [99.0, 100.0, 100.0],
+            "high": [100.0, 101.0, 103.0],
+            "low": [98.0, 99.0, 99.5],
+            "close": [99.0, 99.0, 103.0],
+        }
+    )
+
+    label, reward, exit_price, exit_index, _ = _label_chunk(
+        frame,
+        np.array([0]),
+        np.array([1]),
+        np.array([1.0]),
+        target_r=3.0,
+        horizon=2,
+        cost_r=0.03,
+    )
+
+    assert label.tolist() == [0]
+    assert reward[0] == pytest.approx(-1.03)
+    assert exit_price.tolist() == [99.0]
+    assert exit_index.tolist() == [1]
+
+
+def test_session_horizon_enforces_the_configured_1510_chicago_cutoff() -> None:
+    config = load_downstream_config(TREND_MAGIC_CONFIG)
+    close_timestamps = pd.Series(
+        pd.to_datetime(
+            [
+                "2025-01-06T21:03:00Z",
+                "2025-01-06T21:06:00Z",
+                "2025-01-06T21:09:00Z",
+                "2025-01-06T21:12:00Z",
+            ],
+            utc=True,
+        )
+    )
+    entry_timestamps = pd.Series(
+        pd.to_datetime(
+            ["2025-01-06T21:06:00Z", "2025-01-06T21:12:00Z"],
+            utc=True,
+        )
+    )
+
+    horizons = _session_horizons(
+        entry_timestamps,
+        close_timestamps,
+        np.array([1, 3]),
+        config,
+    )
+
+    np.testing.assert_array_equal(horizons, [2, 0])
+
+
+@pytest.mark.parametrize(
+    ("direction", "high", "low", "target"),
+    [
+        (1, [100.0, 103.0], [99.0, 99.5], 103.0),
+        (-1, [101.0, 100.5], [100.0, 97.0], 97.0),
+    ],
+)
+def test_fixed_3r_label_is_symmetric_for_long_and_short_targets(
+    direction: int, high: list[float], low: list[float], target: float
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "open": [99.0, 100.0],
+            "high": high,
+            "low": low,
+            "close": [99.5, target],
+        }
+    )
+
+    label, reward, exit_price, exit_index, _ = _label_chunk(
+        frame,
+        np.array([0]),
+        np.array([direction]),
+        np.array([1.0]),
+        target_r=3.0,
+        horizon=1,
+        cost_r=0.03,
+    )
+
+    assert label.tolist() == [1]
+    assert reward[0] == pytest.approx(2.97)
+    assert exit_price.tolist() == [target]
     assert exit_index.tolist() == [1]
 
 

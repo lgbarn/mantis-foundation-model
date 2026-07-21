@@ -30,14 +30,14 @@ storage_dtype = "float32"
 
 [strategy]
 kind = "trend_magic"
-atr_period = 3
-cci_period = 3
-trend_magic_atr_period = 3
+atr_period = 20
+cci_period = 20
+trend_magic_atr_period = 5
 trend_magic_multiplier = 1.0
 stop_atr = 0.5
 target_r = 3.0
-analysis_targets_r = [2.0, 3.0]
-horizon_bars = 4
+analysis_targets_r = [2.0, 3.0, 4.0, 6.0]
+horizon_bars = 120
 round_trip_cost_r = 0.03
 cooldown_bars = 0
 same_bar_policy = "stop_first"

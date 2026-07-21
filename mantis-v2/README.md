@@ -205,12 +205,19 @@ bars, same-bar ties stop out, and round-trip cost is 0.03R. Any still-open trade
 is force-closed on the final completed bar before 3:10 PM CT; the simulator
 never selects trades based on their future realized exit time.
 
+The loader names this exact recipe `trend_magic_fixed_3r_v1` and rejects any
+drift in its direction, timing, risk, target ladder, horizon, cost, or session
+settings. This declaration does not change the completed producer TOML or its
+pinned SHA-256. The 2R-activated, 0.75R-giveback trail is a separate downstream
+execution policy; it does not define the supervised label.
+
 Run one stage at a time for bounded failure recovery and inspection:
 
 ```bash
-just downstream-prepare mantis-v2/configs/trend-magic-topstep-100k.toml
-just downstream-embed mantis-v2/configs/trend-magic-topstep-100k.toml
-just downstream-walk-forward mantis-v2/configs/trend-magic-topstep-100k-head-c0001-v2.toml
+just trend-magic-verify
+just trend-magic-prepare
+just trend-magic-embed
+just trend-magic-head
 ```
 
 The head-only config pins the completed production embeddings and their producer

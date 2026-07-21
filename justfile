@@ -56,6 +56,9 @@ validated-export config:
 downstream-prepare config:
     uv run mantis-v2 downstream-prepare --config {{config}}
 
+downstream-verify config:
+    uv run mantis-v2 downstream-verify --config {{config}}
+
 downstream-embed config:
     uv run mantis-v2 downstream-embed --config {{config}}
 
@@ -73,6 +76,18 @@ downstream-smoke:
 
 downstream-trend-magic-smoke:
     uv run mantis-v2 downstream-smoke --config mantis-v2/configs/downstream-trend-magic-smoke.toml
+
+trend-magic-verify config="mantis-v2/configs/trend-magic-topstep-100k.toml":
+    uv run mantis-v2 downstream-verify --config {{config}}
+
+trend-magic-prepare config="mantis-v2/configs/trend-magic-topstep-100k.toml":
+    uv run mantis-v2 downstream-prepare --config {{config}}
+
+trend-magic-embed config="mantis-v2/configs/trend-magic-topstep-100k.toml":
+    uv run mantis-v2 downstream-embed --config {{config}}
+
+trend-magic-head config="mantis-v2/configs/trend-magic-topstep-100k-head-c0001-v2.toml":
+    uv run mantis-v2 downstream-walk-forward --config {{config}}
 
 downstream-holdout config unlock="":
     uv run mantis-v2 downstream-holdout --config {{config}} --unlock {{unlock}}
