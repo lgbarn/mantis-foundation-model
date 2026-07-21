@@ -75,6 +75,44 @@ server to `127.0.0.1:6006` and view it through an SSH tunnel; do not expose a
 public TensorBoard HTTP port. JSON manifests and atomic checkpoints remain the
 authoritative provenance and resume records.
 
+## Transfer and storage contract
+
+Use one 150 GB Standard network volume and enforce a 120 GB high-water mark
+with at least 30,000,000,000 free bytes before a stage starts. At the documented
+$0.07/GB/month rate, the volume costs $10.50/month. Select a datacenter that
+supports both the chosen Pod and RunPod's S3-compatible network-volume API.
+
+Stage manifest-owned files through the S3 API without a running Pod, then
+verify every byte size and SHA-256 inside the attached volume before atomically
+promoting the incoming directory. S3 ETags are not provenance. Use rsync over
+SSH only as a fallback because it requires paid Pod uptime. Never use a
+destructive sync or overwrite an immutable run identity.
+
+The clean disaster-recovery input bundle is 1,395,349,697 bytes: three original
+DBN.ZST archives, the 64-file repaired corpus, and the pinned official
+MantisV2 cache. The 24.675 GiB existing continuation bundle is optional
+reference state, not an input to the fresh CUDA run. Do not copy the 54.6 GB
+historical artifact tree wholesale.
+
+Use this persistent layout:
+
+```text
+/workspace/mantis/
+|-- inputs/{raw,corpus,upstream}/<content-identity>/
+|-- cache/{huggingface,uv}/
+|-- runs/<immutable-run-name>/
+|-- exports/<immutable-run-name>/
+|-- logs/tensorboard/<immutable-run-name>/
+`-- transfer/{incoming,outgoing}/<bundle-sha256>/
+```
+
+Before cloud upload, make and verify an immutable source snapshot on the Mac's
+internal SSD. Download and verify every completed expensive stage to that SSD,
+then make a second verified copy on the external drive. The external USB/APFS
+drive is excluded from Time Machine and is not a sufficient sole backup.
+Deletion remains an explicit operator action and is permitted only after both
+copies match the transfer manifest.
+
 ## Accuracy-first training contract
 
 The RunPod candidate is a fresh domain-adaptation run from the pinned official
