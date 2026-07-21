@@ -475,6 +475,56 @@ def test_plan_command_rejects_each_policy_violation(
         assert "offer_not_found" not in decision["reasons"]
 
 
+def test_plan_command_rejects_exact_ordinary_launch_cutoff(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    paths = _write_inputs(tmp_path)
+    ledger = json.loads(paths["ledger"].read_text())
+    ledger["actual_spend_usd"] = "124.10"
+    ledger["bucket_actual_spend_usd"]["production"] = "124.10"
+    paths["ledger"].write_text(json.dumps(ledger) + "\n")
+    authorization = _authorization_for(paths, tmp_path, monkeypatch, capsys)
+
+    decision = _run_plan(
+        paths, tmp_path / "exact-ordinary-cutoff.json", monkeypatch, capsys, authorization
+    )
+
+    assert decision["projected_spend_usd"] == "0.90"
+    assert decision["reasons"] == ["ordinary_launch_cutoff_reached"]
+
+
+def test_plan_command_accepts_exact_minimum_free_bytes(tmp_path: Path, monkeypatch, capsys) -> None:
+    paths = _write_inputs(tmp_path)
+    inventory = json.loads(paths["inventory"].read_text())
+    inventory["volumes"][0]["free_bytes"] = 30_000_000_000
+    paths["inventory"].write_text(json.dumps(inventory) + "\n")
+    authorization = _authorization_for(paths, tmp_path, monkeypatch, capsys)
+
+    decision = _run_plan(
+        paths, tmp_path / "exact-minimum-storage.json", monkeypatch, capsys, authorization
+    )
+
+    assert decision["allowed"] is True
+    assert decision["reasons"] == []
+
+
+def test_plan_command_accepts_free_bytes_equal_to_declared_capacity(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    paths = _write_inputs(tmp_path)
+    inventory = json.loads(paths["inventory"].read_text())
+    inventory["volumes"][0]["free_bytes"] = 150_000_000_000
+    paths["inventory"].write_text(json.dumps(inventory) + "\n")
+    authorization = _authorization_for(paths, tmp_path, monkeypatch, capsys)
+
+    decision = _run_plan(
+        paths, tmp_path / "exact-volume-capacity.json", monkeypatch, capsys, authorization
+    )
+
+    assert decision["allowed"] is True
+    assert decision["reasons"] == []
+
+
 def test_runpod_configs_have_separate_canonical_identities(tmp_path: Path) -> None:
     paths = _write_inputs(tmp_path)
     platform = load_platform_config(paths["platform"])
@@ -533,6 +583,23 @@ def test_spend_ledger_rejects_aggregate_understatement(tmp_path: Path, monkeypat
         _run_plan(paths, output, monkeypatch, capsys)
 
     assert "actual_spend_usd must equal the sum" in capsys.readouterr().err
+    assert not output.exists()
+
+
+def test_spend_ledger_rejects_reserved_aggregate_mismatch_without_active_reservation(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    paths = _write_inputs(tmp_path)
+    ledger = json.loads(paths["ledger"].read_text())
+    ledger["bucket_reserved_spend_usd"]["qualification"] = "0.90"
+    assert ledger["active_reservations"] == []
+    paths["ledger"].write_text(json.dumps(ledger) + "\n")
+    output = tmp_path / "mismatched-reserved-ledger.json"
+
+    with pytest.raises(SystemExit, match="2"):
+        _run_plan(paths, output, monkeypatch, capsys)
+
+    assert "reserved_spend_usd must equal the sum" in capsys.readouterr().err
     assert not output.exists()
 
 
