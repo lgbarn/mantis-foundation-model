@@ -74,3 +74,31 @@ TensorBoard event files belong under the persistent run directory. Bind the
 server to `127.0.0.1:6006` and view it through an SSH tunnel; do not expose a
 public TensorBoard HTTP port. JSON manifests and atomic checkpoints remain the
 authoritative provenance and resume records.
+
+## Accuracy-first training contract
+
+The RunPod candidate is a fresh domain-adaptation run from the pinned official
+MantisV2 checkpoint, not a resume from the existing local fine-tune and not a
+randomly initialized encoder. The verified corpus covers nine instruments
+(`ES`, `NQ`, `RTY`, `YM`, `GC`, `SI`, `CL`, `ZB`, `ZN`) at four timeframes
+(`1min`, `3min`, `5min`, `15min`). The 3-minute slice is the primary trading
+horizon and evaluation slice.
+
+Full-model fine-tuning is the primary accuracy arm. Test LoRA ranks 8 and 16
+against MantisV2's `wQKV` and `wO` projections only as non-inferiority arms;
+the older FFM Mantis-8M module names are not compatible. Keep the local adapter
+and task heads trainable, retain base and adapter hashes separately, and merge
+only after native-versus-merged parity passes.
+
+First compare the current three-timeframe recipe with a compute-matched
+four-timeframe recipe. If 5-minute data is promoted, preserve per-stream epoch
+exposure with 267 training batches and 27 validation batches at batch size 128,
+subject to the measured A40 memory and throughput gate. Screen seeds 42-44 and
+confirm with seeds 42-46. Promotion requires improvement on at least four of
+five confirmation seeds, improved median macro 3-minute performance, no
+material instrument-family regression, and improved downstream log loss and
+Brier score. Keep the sealed 2026 holdout unavailable to selection.
+
+Checkpoint selection uses validation total, candle, and leg loss. TensorBoard
+also records learning rate, gradient norm, examples per second, data wait, GPU
+memory, host RSS, and checkpoint state. JSON provenance remains authoritative.
