@@ -10,9 +10,28 @@ from pathlib import Path, PurePosixPath
 
 FORBIDDEN_SUFFIXES = (".dbn", ".dbn.zst", ".parquet", ".pt", ".pth", ".safetensors")
 FORBIDDEN_PARTS = {"artifacts", "checkpoints", ".git"}
+APPLICATION_ROOTS = {"artifacts", "checkpoints", "data", "datasets", "workspace"}
 SECRET_PATTERN = re.compile(
     rb"(?:RUNPOD_API_KEY|RUNPOD_S3_SECRET_ACCESS_KEY|AWS_SECRET_ACCESS_KEY|REGISTRY_PASSWORD)\s*=\s*\S+"
 )
+PRIVATE_KEY_PATTERN = re.compile(
+    rb"-----BEGIN OPENSSH PRIVATE KEY-----\r?\n"
+    rb"[A-Za-z0-9+/=\r\n]{32,}"
+    rb"-----END OPENSSH PRIVATE KEY-----"
+)
+
+
+def _is_application_payload(path: PurePosixPath) -> bool:
+    parts = path.parts
+    if not parts:
+        return False
+    if parts[0] in APPLICATION_ROOTS:
+        return True
+    return (
+        len(parts) >= 2
+        and parts[:2] == ("opt", "mantis")
+        and (len(parts) < 3 or parts[2] != ".venv")
+    )
 
 
 def scan_archive(path: Path, history: bytes) -> tuple[int, list[str]]:
@@ -36,14 +55,15 @@ def scan_archive(path: Path, history: bytes) -> tuple[int, list[str]]:
                 for member in layer.getmembers():
                     normalized = PurePosixPath(member.name.lstrip("./"))
                     lower_name = str(normalized).lower()
-                    if lower_name.endswith(FORBIDDEN_SUFFIXES) or FORBIDDEN_PARTS.intersection(
-                        normalized.parts
+                    if _is_application_payload(normalized) and (
+                        lower_name.endswith(FORBIDDEN_SUFFIXES)
+                        or FORBIDDEN_PARTS.intersection(normalized.parts)
                     ):
                         violations.add(f"forbidden path in layer: {normalized}")
                     if member.isfile() and member.size <= 8 * 1024 * 1024:
                         handle = layer.extractfile(member)
                         content = handle.read() if handle is not None else b""
-                        if b"-----BEGIN OPENSSH PRIVATE KEY-----" in content:
+                        if PRIVATE_KEY_PATTERN.search(content):
                             violations.add(f"private key material in layer: {normalized}")
                         if SECRET_PATTERN.search(content):
                             violations.add(f"secret-like assignment in layer: {normalized}")

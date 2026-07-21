@@ -169,7 +169,11 @@ def test_layer_scan_rejects_data_weights_artifacts_and_secrets(tmp_path: Path) -
         archive,
         {
             "opt/mantis/data/input.parquet": b"market",
-            "root/.ssh/id_ed25519": b"-----BEGIN OPENSSH PRIVATE KEY-----",
+            "root/.ssh/id_ed25519": (
+                b"-----BEGIN OPENSSH PRIVATE KEY-----\n"
+                b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"
+                b"-----END OPENSSH PRIVATE KEY-----"
+            ),
             "opt/mantis/checkpoints/best.safetensors": b"weights",
             "etc/leak": b"RUNPOD_API_KEY=secret-value",
         },
@@ -179,6 +183,24 @@ def test_layer_scan_rejects_data_weights_artifacts_and_secrets(tmp_path: Path) -
 
     assert layers == 1
     assert len(violations) >= 4
+
+
+def test_layer_scan_allows_dependency_metadata_and_embedded_key_labels(tmp_path: Path) -> None:
+    archive = tmp_path / "image.tar"
+    _docker_archive(
+        archive,
+        {
+            "opt/mantis/.venv/lib/python3.12/site-packages/project.pth": b"metadata",
+            "opt/mantis/.venv/lib/python3.12/site-packages/optuna/artifacts/__init__.py": b"",
+            "root/.cache/uv/archive-v0/package/tests/fixture.parquet": b"fixture",
+            "usr/bin/ssh": b"binary-----BEGIN OPENSSH PRIVATE KEY-----label",
+        },
+    )
+
+    layers, violations = _scan_module().scan_archive(archive, b"")
+
+    assert layers == 1
+    assert violations == []
 
 
 def test_image_contract_is_digest_pinned_frozen_and_localhost_only() -> None:
