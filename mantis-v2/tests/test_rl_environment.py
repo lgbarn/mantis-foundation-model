@@ -229,6 +229,13 @@ def test_environment_validation_emits_baselines_benchmarks_and_provenance(
     assert result["action_mask_parity"]["mismatches"] == 0
     assert result["independent_replay_oracles"]["passed"] is True
     assert result["independent_replay_oracles"]["case_count"] == 17
+    economics = [case for case in result["independent_replay_oracles"]["cases"] if "ticker" in case]
+    assert len(economics) == 13
+    assert all(case["actions"] == [1, 0, 0, 0, 0] for case in economics)
+    assert all(case["accepted_trades"] == 1 for case in economics)
+    assert all(case["status"] == "TIMEOUT" for case in economics)
+    assert all(case["checks"]["pre_activation_retrace"] for case in economics)
+    assert all(case["checks"]["quantity"] for case in economics)
     assert result["baseline_fit"]["threshold_source"] == "validation"
     assert {
         replay["policy"] for episode in result["baseline_replays"] for replay in episode["results"]

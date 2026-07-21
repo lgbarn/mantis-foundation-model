@@ -75,33 +75,59 @@ def _independent_replay_oracles(config: RlConfig) -> dict[str, Any]:
         bars = (
             BarData(origin, 100.0, 100.2, 99.8, 100.0, 1.0, _oracle_candidate()),
             BarData(origin + timedelta(minutes=3), 100.0, 100.5, 99.5, 100.0, 1.0),
-            BarData(origin + timedelta(minutes=6), 100.0, 103.1, 100.0, 103.0, 1.0),
-            BarData(origin + timedelta(minutes=9), 103.0, 103.0, 102.0, 102.5, 1.0),
+            BarData(origin + timedelta(minutes=6), 100.0, 101.9, 100.0, 101.5, 1.0),
+            BarData(origin + timedelta(minutes=9), 101.5, 101.6, 99.5, 100.0, 1.0),
+            BarData(origin + timedelta(minutes=12), 100.0, 103.1, 100.0, 103.0, 1.0),
+            BarData(origin + timedelta(minutes=15), 103.0, 103.0, 102.0, 102.5, 1.0),
         )
         environment = TopstepEntryEnvironment(config, EnvironmentEpisode(ticker, profile, bars))
-        environment.reset(seed=7)
+        reset_observation, _ = environment.reset(seed=7)
+        actions = (1, 0, 0, 0, 0)
+        submitted_actions: list[int] = []
+        observations = []
         infos = []
-        for action in (1, 0, 0):
-            _, _, terminated, truncated, info = environment.step(action)
+        for action in actions:
+            observation, _, terminated, truncated, info = environment.step(action)
+            submitted_actions.append(action)
+            observations.append(observation)
             infos.append(info)
             if terminated or truncated:
                 break
         expected = 100_000.0 + 2.35 * multiplier - 2.0 * tick_value - fee
         state = environment.account_state
         checks = {
-            "quantity": environment.observation_schema.index("quantity") >= 0,
+            "quantity": math.isclose(
+                float(reset_observation.vector[environment.observation_schema.index("quantity")]),
+                float(quantity),
+                abs_tol=1e-6,
+            ),
+            "actions": tuple(submitted_actions) == actions,
+            "accepted_trades": state["accepted_trades"] == 1,
+            "terminal_status": state["status"] == "TIMEOUT",
             "fill_timestamp": infos[0].get("fill_timestamp") == bars[1].timestamp.isoformat(),
             "fill_price": infos[0].get("fill_price") == 100.0,
             "fee": infos[0].get("booked_round_trip_fee") == fee,
+            "pre_activation_retrace": observations[2].positioned == 1.0,
             "trail_exit": infos[-1].get("event") == "STOP",
             "balance": math.isclose(cast(float, state["balance"]), expected, abs_tol=1e-6),
             "equity": math.isclose(cast(float, state["equity"]), expected, abs_tol=1e-6),
         }
         if not all(checks.values()):
+            failed = ", ".join(name for name, passed in checks.items() if not passed)
             raise EnvironmentValidationError(
-                f"independent replay oracle failed: {ticker} {profile}"
+                f"independent replay oracle failed: {ticker} {profile}: {failed}"
             )
-        cases.append({"ticker": ticker, "profile": profile, "quantity": quantity, "checks": checks})
+        cases.append(
+            {
+                "ticker": ticker,
+                "profile": profile,
+                "quantity": quantity,
+                "actions": submitted_actions,
+                "accepted_trades": state["accepted_trades"],
+                "status": state["status"],
+                "checks": checks,
+            }
+        )
 
     def lifecycle(name: str, episode: EnvironmentEpisode, expected: dict[str, Any]) -> None:
         environment = TopstepEntryEnvironment(config, episode)

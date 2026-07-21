@@ -351,9 +351,9 @@ Build training and validation schedules for the same fold, then validate them:
 just rl-build-episodes mantis-v2/configs/rl-entry-topstep-100k.toml 0 training 21
 just rl-build-episodes mantis-v2/configs/rl-entry-topstep-100k.toml 0 validation 21
 just rl-validate-environment \
-  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v3/episodes/fold-00-training-seed-42.json \
-  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v3/episodes/fold-00-validation-seed-42.json \
-  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v3/environment-validation.json \
+  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v4/episodes/fold-00-training-seed-42.json \
+  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v4/episodes/fold-00-validation-seed-42.json \
+  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v4/environment-validation.json \
   mantis-v2/configs/rl-entry-topstep-100k.toml
 ```
 
@@ -367,15 +367,19 @@ mmap p95 latency with at least 100x headroom against three minutes, and at least
 logistic baseline is loaded from the exact rejected fold head. The fixed
 HistGradientBoosting baseline fits training only and obtains its threshold from
 validation only. Test schedules and January-July 2026 holdout data are rejected.
-The v3 schedule uses an independent versioned weekday exchange calendar and a
+The v4 schedule uses an independent versioned weekday exchange calendar and a
 15-minute maximum observed gap. Observation schema v1 records explicit contract,
 quantity, stop-risk, tick, fee, best-day, consistency, and action-mask fields.
 Unit tests verify deterministic benchmark contracts; real timing thresholds are
 enforced only by the target-Mac validation command above.
 Validation also executes 17 independent literal replay oracles covering every
 supported ticker/profile economics tuple plus discontinuity, MLL, DLL, and
-session-flatten account paths. Any fill, fee, exit, balance, equity, best-day,
-consistency, event, or terminal mismatch fails publication.
+session-flatten account paths. The economics cases read the emitted quantity,
+submit and record the literal action sequence, require one accepted trade and a
+TIMEOUT terminal status, and include a sub-2R retrace before the 3.1R excursion
+that activates the locked 2R/0.75R trail. Any action, quantity, fill, fee, exit,
+balance, equity, best-day, consistency, event, or terminal mismatch fails
+publication.
 
 ### Prepare
 
