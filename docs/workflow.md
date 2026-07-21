@@ -511,8 +511,8 @@ schedule. The default candidate and both preregistered ablations share one seam:
 
 ```bash
 just rl-train \
-  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v8/episodes/fold-00-training-seed-42.json \
-  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v8/training/shared-ticker-value \
+  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v9/episodes/fold-00-training-seed-42.json \
+  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v9/training/shared-ticker-value \
   mantis-v2/configs/rl-entry-topstep-100k.toml \
   shared_ticker_value
 ```
