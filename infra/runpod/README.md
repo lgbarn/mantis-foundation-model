@@ -150,3 +150,31 @@ Brier score. Keep the sealed 2026 holdout unavailable to selection.
 Checkpoint selection uses validation total, candle, and leg loss. TensorBoard
 also records learning rate, gradient norm, examples per second, data wait, GPU
 memory, host RSS, and checkpoint state. JSON provenance remains authoritative.
+
+## Compute qualification contract
+
+No RunPod shape is qualified yet. The provisional target is one Secure Cloud
+NVIDIA A40 with 48 GB VRAM, at least 8 vCPU, and at least 32 GB host RAM. A
+read-only query on 2026-07-21 returned $0.44/hour with Low availability; always
+re-query immediately before launch.
+
+Do not spend on a benchmark until the repository has a pinned CUDA image, a
+real-data CUDA probe, TensorBoard event writing, precision configuration,
+cross-device and interrupted-resume parity fixtures, CUDA embedding support,
+resource instrumentation, transfer verification, and an independent shutdown
+watchdog. The benchmark is the first post-implementation acceptance gate, not
+a planning-time claim that CUDA is already qualified.
+
+Run the A40 alone first. Bound it to eight hours and $3.52 at the observed
+price. L40, L40S, and A100 PCIe are explicit sequential fallbacks only; the
+worst-case approved matrix is $8.53 compute and must remain below the $10
+qualification allocation after container-disk overhead. Never launch a
+fallback automatically.
+
+The matrix covers environment and network-volume I/O; FP32 batch doubling;
+CPU/CUDA output, loss, gradient, and update parity; BF16 qualification;
+uninterrupted-versus-resumed equivalence; full-upstream versus transformer-only
+resource use; CPU/CUDA embedding parity and throughput; CPU RL validation; and
+TensorBoard/JSON/checkpoint verification. Keep GPU and host peak memory below
+80%, require the existing RL 5,000 steps/second and 100x mmap-latency gates,
+and reject any production projection that exceeds the $100 production pool.
