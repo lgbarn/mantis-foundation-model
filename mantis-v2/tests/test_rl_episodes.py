@@ -176,7 +176,30 @@ def test_session_calendar_detects_whole_and_partial_session_gaps() -> None:
         )
     )
     assert _session_is_complete(complete)
+    assert _session_is_complete(complete.drop(index=100))
     assert not _session_is_complete(complete.iloc[:2])
+
+
+def test_exchange_calendar_rejects_ticker_local_missing_or_rollover_session() -> None:
+    complete = _rows("ES", "2025-01-02", sessions=20)
+    sessions = tuple(
+        dict.fromkeys(_session_id(pd.Timestamp(value)) for value in complete["decision_ts"])
+    )
+    partition = Partition(
+        name="training",
+        start=pd.Timestamp("2025-01-01", tz="UTC"),
+        end=pd.Timestamp("2025-03-01", tz="UTC"),
+    )
+
+    with pytest.raises(EpisodeContractError, match="no complete episode"):
+        build_episode_schedule(
+            {"ES": complete},
+            partition,
+            seed=5,
+            episode_count=1,
+            session_calendars={"ES": sessions},
+            unsafe_sessions={"ES": frozenset({sessions[10]})},
+        )
 
 
 def test_schedule_contains_complete_lookback_exit_and_terminal_horizons() -> None:
