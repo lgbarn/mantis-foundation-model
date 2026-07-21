@@ -58,6 +58,9 @@ them can make a checkpoint intentionally non-resumable.
 | `just rl-dry-run <config>` | Validates the locked RL identity | Atomic dry-run manifest | CPU; no holdout access |
 | `just rl-account-replay <input> <output> <config>` | Replays marked-equity account fixtures | Atomic replay manifest | CPU; refuses overwrite |
 | `just rl-smoke <output> <config> [--resume]` | Trains the bounded synthetic MaskablePPO qualification | Atomic checkpoint, state, metrics, manifest | 50K CPU steps; no production or holdout data |
+| `just runpod-image-build <image>` | Builds the pinned Linux amd64 CUDA image from a clean commit | Local Docker image | Docker CPU/disk/network use; no Pod or registry push |
+| `just runpod-image-scan <image> <output>` | Scans saved image layers and history | Canonical scan JSON | Requires a local Docker daemon |
+| `just runpod-image-self-check <image> <output>` | Verifies CUDA, driver, tools, lock, and runtime inventory | Canonical runtime JSON | Requires Docker plus a compatible NVIDIA GPU |
 
 ## Phase 1: inspect the repository
 
@@ -112,6 +115,14 @@ just sync
 
 This materializes all workspace packages from `uv.lock`. Do not run it during a
 protected training run unless changing the environment is explicitly intended.
+
+### RunPod image preflight
+
+Before any paid CUDA qualification, follow the image workflow in
+`infra/runpod/README.md`. Build only from a clean commit, scan every layer, and
+run the self-check on a compatible NVIDIA host. Record both canonical JSON
+outputs with the exact immutable image reference. Local static tests do not
+substitute for the unavailable Docker build or GPU-host self-check.
 
 ## Phase 4: run synthetic correctness checks
 

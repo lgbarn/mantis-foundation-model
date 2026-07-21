@@ -31,6 +31,49 @@ implementation route is [IMPLEMENTATION_HANDOFF.md](IMPLEMENTATION_HANDOFF.md).
 - Preserve immutable run identities, artifact hashes, atomic checkpoints, and
   fail-closed resume checks on remote workers.
 
+## Reproducible CUDA image
+
+The public image workflow builds Linux amd64 only. The Dockerfile pins the
+platform-specific NVIDIA CUDA 13.0.2 cuDNN runtime manifest and the official
+`uv` 0.11.30 manifest by SHA-256. It installs Python 3.12 and pinned system
+packages, then materializes the committed workspace exclusively with
+`uv sync --frozen`. The build refuses a dirty worktree so uncommitted source
+cannot enter the declared source identity.
+
+From a clean committed checkout, build and record the two zero-cost contracts:
+
+```bash
+just runpod-image-build ghcr.io/lgbarn/mantis-v2-cuda:SOURCE_SHA
+just runpod-image-scan ghcr.io/lgbarn/mantis-v2-cuda:SOURCE_SHA reports/image-scan.json
+just runpod-image-self-check \
+  ghcr.io/lgbarn/mantis-v2-cuda:SOURCE_SHA reports/runtime-inventory.json
+```
+
+The scan examines every saved layer plus image history and rejects datasets,
+checkpoints, weights, artifacts, private keys, and secret-like assignments. The
+self-check runs with GPU access and writes canonical no-overwrite JSON containing
+the base, source tree, source revision, lock, and image-contract identities;
+Python, `uv`, Git, SSH, Torch, CUDA, driver, architecture, compatibility, and the
+complete installed Python package inventory. Missing CUDA, a failed allocation,
+a non-CUDA-13 runtime, or an unavailable driver exits nonzero before any market
+data or run directory is touched. Rebuilding the same clean commit and lock
+preserves the declared source, lock, base, tool, and image-contract identities.
+
+Use a public registry and immutable digest reference by default. If a private
+pull is unavoidable, configure a scoped RunPod registry-auth object on the Pod
+template. Never pass registry credentials through Pod environment variables.
+The image exposes SSH port 22 only. Run TensorBoard inside the Pod on
+`127.0.0.1:6006`, then use the existing localhost tunnel contract:
+
+```bash
+ssh -L 6006:127.0.0.1:6006 root@POD_HOST -p POD_SSH_PORT
+```
+
+Do not publish this image or create a Pod until the local scan is clean and a
+GPU-host self-check records `driver.compatible=true`. A local machine without a
+Docker daemon can run the static/unit tests, but it cannot honestly claim build,
+layer-scan, or CUDA self-check verification.
+
 ## Sizing gate
 
 Do not add deployable Terraform resources until these decisions are resolved:

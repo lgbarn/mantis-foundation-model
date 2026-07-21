@@ -1,0 +1,16 @@
+**
+!pyproject.toml
+!uv.lock
+!mantis-v2/
+mantis-v2/**
+!mantis-v2/pyproject.toml
+!mantis-v2/src/
+!mantis-v2/src/**
+!infra/
+infra/**
+!infra/runpod/
+infra/runpod/**
+!infra/runpod/Dockerfile
+!infra/runpod/scripts/
+infra/runpod/scripts/**
+!infra/runpod/scripts/container-entrypoint.sh
