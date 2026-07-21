@@ -15,6 +15,7 @@ from mantis_v2.runpod_config import (
     ExperimentConfig,
     InventoryOffer,
     InventorySnapshot,
+    InventoryVolume,
     LaunchAuthorization,
     LaunchIntent,
     LocalConfig,
@@ -96,6 +97,17 @@ def _matching_offer(intent: LaunchIntent, inventory: InventorySnapshot) -> Inven
     return matches[0] if len(matches) == 1 else None
 
 
+def _matching_volume(intent: LaunchIntent, inventory: InventorySnapshot) -> InventoryVolume | None:
+    matches = tuple(
+        volume
+        for volume in inventory.volumes
+        if volume.volume_id == intent.volume_id
+        and volume.datacenter_id == intent.datacenter_id
+        and volume.size_gb == intent.volume_size_gb
+    )
+    return matches[0] if len(matches) == 1 else None
+
+
 def _projected_spend(
     platform: PlatformConfig, intent: LaunchIntent, price_per_gpu_hour: Decimal
 ) -> Decimal:
@@ -123,6 +135,7 @@ def _policy_reasons(
 ) -> tuple[str, ...]:
     reasons: list[str] = []
     offer = _matching_offer(intent, inventory)
+    volume = _matching_volume(intent, inventory)
     inventory_age = evaluated_at - inventory.observed_at
     if inventory_age < timedelta(0) or inventory_age > timedelta(
         seconds=platform.lifecycle.maximum_inventory_age_seconds
@@ -140,6 +153,8 @@ def _policy_reasons(
         reasons.append("offer_not_found")
     elif not offer.available:
         reasons.append("offer_unavailable")
+    if offer is not None and offer.cloud_type != "secure":
+        reasons.append("secure_cloud_required")
     if intent.vcpu < platform.provider.minimum_vcpu:
         reasons.append("insufficient_vcpu")
     if intent.ram_gb < platform.provider.minimum_ram_gb:
@@ -150,8 +165,15 @@ def _policy_reasons(
         reasons.append("volume_size_mismatch")
     if intent.maximum_duration_seconds > platform.lifecycle.maximum_duration_seconds:
         reasons.append("duration_exceeds_limit")
-    if inventory.volume_free_bytes < platform.storage.minimum_free_bytes:
-        reasons.append("insufficient_storage")
+    if volume is None:
+        reasons.append("volume_not_found")
+    else:
+        required_free_bytes = max(
+            platform.storage.minimum_free_bytes,
+            intent.volume_size_gb * 1_000_000_000 - platform.storage.high_water_bytes,
+        )
+        if volume.free_bytes < required_free_bytes:
+            reasons.append("insufficient_storage")
     if inventory.live_pods:
         reasons.append("live_pod_exists")
     if ledger.active_reservations:

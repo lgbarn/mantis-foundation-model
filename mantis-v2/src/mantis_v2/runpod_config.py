@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 
 class RunpodConfigError(ValueError):
@@ -69,6 +69,12 @@ def _text(value: Any, field: str) -> str:
 def _boolean(value: Any, field: str) -> bool:
     if not isinstance(value, bool):
         raise RunpodConfigError(f"{field} must be true or false")
+    return value
+
+
+def _choice(value: Any, field: str, choices: set[str]) -> str:
+    if not isinstance(value, str) or value not in choices:
+        raise RunpodConfigError(f"{field} must be one of: {', '.join(sorted(choices))}")
     return value
 
 
@@ -250,6 +256,15 @@ class InventoryOffer:
     datacenter_id: str
     price_usd_per_gpu_hour: Decimal
     available: bool
+    cloud_type: Literal["secure", "community"]
+
+
+@dataclass(frozen=True)
+class InventoryVolume:
+    volume_id: str
+    datacenter_id: str
+    size_gb: int
+    free_bytes: int
 
 
 @dataclass(frozen=True)
@@ -257,8 +272,8 @@ class InventorySnapshot:
     schema_version: int
     observed_at: datetime
     account_balance_usd: Decimal
-    volume_free_bytes: int
     offers: tuple[InventoryOffer, ...]
+    volumes: tuple[InventoryVolume, ...]
     live_pods: tuple[str, ...]
 
     @property
@@ -512,7 +527,7 @@ def load_launch_intent(path: str | Path) -> LaunchIntent:
 def load_inventory_snapshot(path: str | Path) -> InventorySnapshot:
     raw = _versioned(
         _read_json(path),
-        {"observed_at", "account_balance_usd", "volume_free_bytes", "offers", "live_pods"},
+        {"observed_at", "account_balance_usd", "offers", "volumes", "live_pods"},
         "inventory snapshot",
     )
     if not isinstance(raw["offers"], list) or not raw["offers"]:
@@ -521,7 +536,13 @@ def load_inventory_snapshot(path: str | Path) -> InventorySnapshot:
     for index, item in enumerate(raw["offers"]):
         offer = _exact(
             item,
-            {"gpu_type", "datacenter_id", "price_usd_per_gpu_hour", "available"},
+            {
+                "gpu_type",
+                "datacenter_id",
+                "price_usd_per_gpu_hour",
+                "available",
+                "cloud_type",
+            },
             f"inventory.offers[{index}]",
         )
         offers.append(
@@ -535,6 +556,38 @@ def load_inventory_snapshot(path: str | Path) -> InventorySnapshot:
                     f"inventory.offers[{index}].price_usd_per_gpu_hour",
                 ),
                 available=_boolean(offer["available"], f"inventory.offers[{index}].available"),
+                cloud_type=cast(
+                    Literal["secure", "community"],
+                    _choice(
+                        offer["cloud_type"],
+                        f"inventory.offers[{index}].cloud_type",
+                        {"secure", "community"},
+                    ),
+                ),
+            )
+        )
+    if not isinstance(raw["volumes"], list) or not raw["volumes"]:
+        raise RunpodConfigError("inventory.volumes must be a non-empty array")
+    volumes = []
+    for index, item in enumerate(raw["volumes"]):
+        volume = _exact(
+            item,
+            {"volume_id", "datacenter_id", "size_gb", "free_bytes"},
+            f"inventory.volumes[{index}]",
+        )
+        volumes.append(
+            InventoryVolume(
+                volume_id=_text(volume["volume_id"], f"inventory.volumes[{index}].volume_id"),
+                datacenter_id=_text(
+                    volume["datacenter_id"],
+                    f"inventory.volumes[{index}].datacenter_id",
+                ),
+                size_gb=_integer(volume["size_gb"], f"inventory.volumes[{index}].size_gb"),
+                free_bytes=_integer(
+                    volume["free_bytes"],
+                    f"inventory.volumes[{index}].free_bytes",
+                    minimum=0,
+                ),
             )
         )
     live_pods = raw["live_pods"]
@@ -544,10 +597,8 @@ def load_inventory_snapshot(path: str | Path) -> InventorySnapshot:
         schema_version=1,
         observed_at=_timestamp(raw["observed_at"], "inventory.observed_at"),
         account_balance_usd=_decimal(raw["account_balance_usd"], "inventory.account_balance_usd"),
-        volume_free_bytes=_integer(
-            raw["volume_free_bytes"], "inventory.volume_free_bytes", minimum=0
-        ),
         offers=tuple(offers),
+        volumes=tuple(volumes),
         live_pods=tuple(live_pods),
     )
 
@@ -565,7 +616,7 @@ def load_spend_ledger(path: str | Path) -> SpendLedger:
         },
         "spend ledger",
     )
-    buckets = {"qualification", "production", "recovery"}
+    buckets = {"storage", "qualification", "production", "recovery"}
     actual = _exact(raw["bucket_actual_spend_usd"], buckets, "ledger bucket actual spend")
     reserved = _exact(raw["bucket_reserved_spend_usd"], buckets, "ledger bucket reserved spend")
     reservations = raw["active_reservations"]
@@ -576,7 +627,7 @@ def load_spend_ledger(path: str | Path) -> SpendLedger:
         raise RunpodConfigError("ledger.active_reservations must be an array of strings")
     if not isinstance(consumed, list) or any(not isinstance(item, str) for item in consumed):
         raise RunpodConfigError("ledger.consumed_authorization_digests must be an array of strings")
-    return SpendLedger(
+    ledger = SpendLedger(
         schema_version=1,
         actual_spend_usd=_decimal(raw["actual_spend_usd"], "ledger.actual_spend_usd"),
         reserved_spend_usd=_decimal(raw["reserved_spend_usd"], "ledger.reserved_spend_usd"),
@@ -591,6 +642,17 @@ def load_spend_ledger(path: str | Path) -> SpendLedger:
         active_reservations=tuple(reservations),
         consumed_authorization_digests=tuple(consumed),
     )
+    if ledger.actual_spend_usd != sum(ledger.bucket_actual_spend_usd.values(), start=Decimal("0")):
+        raise RunpodConfigError(
+            "ledger.actual_spend_usd must equal the sum of bucket_actual_spend_usd"
+        )
+    if ledger.reserved_spend_usd != sum(
+        ledger.bucket_reserved_spend_usd.values(), start=Decimal("0")
+    ):
+        raise RunpodConfigError(
+            "ledger.reserved_spend_usd must equal the sum of bucket_reserved_spend_usd"
+        )
+    return ledger
 
 
 def load_launch_authorization(path: str | Path) -> LaunchAuthorization:

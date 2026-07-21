@@ -27,8 +27,8 @@ schema_version = 1
 
 [provider]
 secure_cloud = true
-allowed_gpu_types = ["NVIDIA A40"]
-allowed_datacenters = ["US-CA-2"]
+allowed_gpu_types = ["NVIDIA A40", "NVIDIA L40"]
+allowed_datacenters = ["US-CA-2", "EU-RO-1"]
 minimum_vcpu = 8
 minimum_ram_gb = 32
 container_disk_gb = 50
@@ -113,13 +113,35 @@ sealed_holdout = false
                 "schema_version": 1,
                 "observed_at": "2026-07-21T12:00:00Z",
                 "account_balance_usd": "150.00",
-                "volume_free_bytes": 100000000000,
                 "offers": [
                     {
                         "gpu_type": "NVIDIA A40",
                         "datacenter_id": "US-CA-2",
                         "price_usd_per_gpu_hour": "0.44",
                         "available": True,
+                        "cloud_type": "secure",
+                    },
+                    {
+                        "gpu_type": "NVIDIA L40",
+                        "datacenter_id": "US-CA-2",
+                        "price_usd_per_gpu_hour": "0.82",
+                        "available": True,
+                        "cloud_type": "secure",
+                    },
+                    {
+                        "gpu_type": "NVIDIA A40",
+                        "datacenter_id": "EU-RO-1",
+                        "price_usd_per_gpu_hour": "0.50",
+                        "available": True,
+                        "cloud_type": "secure",
+                    },
+                ],
+                "volumes": [
+                    {
+                        "volume_id": "volume-fixture",
+                        "datacenter_id": "US-CA-2",
+                        "size_gb": 150,
+                        "free_bytes": 100000000000,
                     }
                 ],
                 "live_pods": [],
@@ -135,11 +157,13 @@ sealed_holdout = false
                 "actual_spend_usd": "0.00",
                 "reserved_spend_usd": "0.00",
                 "bucket_actual_spend_usd": {
+                    "storage": "0.00",
                     "qualification": "0.00",
                     "production": "0.00",
                     "recovery": "0.00",
                 },
                 "bucket_reserved_spend_usd": {
+                    "storage": "0.00",
                     "qualification": "0.00",
                     "production": "0.00",
                     "recovery": "0.00",
@@ -376,6 +400,8 @@ def test_plan_command_with_exact_authorization_binds_terms_and_approves(
         ("ordinary_launch_cutoff", "ordinary_launch_cutoff_reached"),
         ("ordinary_launch_crosses_cutoff", "ordinary_launch_cutoff_reached"),
         ("insufficient_storage", "insufficient_storage"),
+        ("changed_volume", "volume_not_found"),
+        ("community_cloud_offer", "secure_cloud_required"),
     ),
 )
 def test_plan_command_rejects_each_policy_violation(
@@ -397,7 +423,7 @@ def test_plan_command_rejects_each_policy_violation(
         elif case == "insufficient_balance":
             inventory["account_balance_usd"] = "0.10"
         else:
-            inventory["volume_free_bytes"] = 29_999_999_999
+            inventory["volumes"][0]["free_bytes"] = 29_999_999_999
         paths["inventory"].write_text(json.dumps(inventory) + "\n")
     elif case in {"changed_gpu", "changed_datacenter"}:
         intent = json.loads(paths["intent"].read_text())
@@ -406,6 +432,14 @@ def test_plan_command_rejects_each_policy_violation(
         else:
             intent["datacenter_id"] = "EU-RO-1"
         paths["intent"].write_text(json.dumps(intent) + "\n")
+    elif case == "changed_volume":
+        intent = json.loads(paths["intent"].read_text())
+        intent["volume_id"] = "different-volume"
+        paths["intent"].write_text(json.dumps(intent) + "\n")
+    elif case == "community_cloud_offer":
+        inventory = json.loads(paths["inventory"].read_text())
+        inventory["offers"][0]["cloud_type"] = "community"
+        paths["inventory"].write_text(json.dumps(inventory) + "\n")
     elif case == "expired_authorization":
         approved = json.loads(authorization.read_text())
         approved["expires_at"] = "2026-07-21T12:02:00Z"
@@ -423,14 +457,22 @@ def test_plan_command_rejects_each_policy_violation(
             ledger["bucket_reserved_spend_usd"]["qualification"] = "0.90"
         elif case == "ordinary_launch_cutoff":
             ledger["actual_spend_usd"] = "125.00"
+            ledger["bucket_actual_spend_usd"]["production"] = "125.00"
         else:
             ledger["actual_spend_usd"] = "124.50"
+            ledger["bucket_actual_spend_usd"]["production"] = "124.50"
         paths["ledger"].write_text(json.dumps(ledger) + "\n")
 
     decision = _run_plan(paths, tmp_path / f"{case}.json", monkeypatch, capsys, authorization)
 
     assert decision["allowed"] is False
     assert reason in decision["reasons"]
+    if case == "changed_gpu":
+        assert "gpu_not_allowed" not in decision["reasons"]
+        assert "offer_not_found" not in decision["reasons"]
+    if case == "changed_datacenter":
+        assert "datacenter_not_allowed" not in decision["reasons"]
+        assert "offer_not_found" not in decision["reasons"]
 
 
 def test_runpod_configs_have_separate_canonical_identities(tmp_path: Path) -> None:
@@ -480,6 +522,38 @@ def test_platform_config_rejects_incompatible_policy(
         load_platform_config(paths["platform"])
 
 
+def test_spend_ledger_rejects_aggregate_understatement(tmp_path: Path, monkeypatch, capsys) -> None:
+    paths = _write_inputs(tmp_path)
+    ledger = json.loads(paths["ledger"].read_text())
+    ledger["bucket_actual_spend_usd"]["production"] = "124.50"
+    paths["ledger"].write_text(json.dumps(ledger) + "\n")
+    output = tmp_path / "understated-ledger.json"
+
+    with pytest.raises(SystemExit, match="2"):
+        _run_plan(paths, output, monkeypatch, capsys)
+
+    assert "actual_spend_usd must equal the sum" in capsys.readouterr().err
+    assert not output.exists()
+
+
+def test_high_water_policy_can_be_stricter_than_minimum_free_bytes(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    paths = _write_inputs(tmp_path)
+    paths["platform"].write_text(
+        paths["platform"]
+        .read_text()
+        .replace("high_water_bytes = 120000000000", "high_water_bytes = 100000000000")
+    )
+    inventory = json.loads(paths["inventory"].read_text())
+    inventory["volumes"][0]["free_bytes"] = 40_000_000_000
+    paths["inventory"].write_text(json.dumps(inventory) + "\n")
+
+    decision = _run_plan(paths, tmp_path / "high-water.json", monkeypatch, capsys)
+
+    assert "insufficient_storage" in decision["reasons"]
+
+
 def test_plan_command_rejects_unknown_config_key_without_output(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
@@ -520,6 +594,61 @@ def test_plan_command_rejects_unknown_config_key_without_output(
 
     captured = capsys.readouterr()
     assert "unknown platform keys: surprise" in captured.err
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    "target",
+    (
+        "platform_provider",
+        "local_paths",
+        "experiment",
+        "intent",
+        "inventory_offer",
+        "inventory_volume",
+        "ledger",
+        "authorization",
+    ),
+)
+def test_plan_command_rejects_unknown_nested_input_key(
+    tmp_path: Path, monkeypatch, capsys, target: str
+) -> None:
+    paths = _write_inputs(tmp_path)
+    authorization = _authorization_for(paths, tmp_path, monkeypatch, capsys)
+    if target in {"platform_provider", "local_paths", "experiment"}:
+        path = {
+            "platform_provider": paths["platform"],
+            "local_paths": paths["local"],
+            "experiment": paths["experiment"],
+        }[target]
+        marker = {
+            "platform_provider": "secure_cloud = true\n",
+            "local_paths": "[paths]\n",
+            "experiment": "[experiment]\n",
+        }[target]
+        path.write_text(path.read_text().replace(marker, f"{marker}surprise = true\n", 1))
+    else:
+        path = {
+            "intent": paths["intent"],
+            "inventory_offer": paths["inventory"],
+            "inventory_volume": paths["inventory"],
+            "ledger": paths["ledger"],
+            "authorization": authorization,
+        }[target]
+        raw = json.loads(path.read_text())
+        if target == "inventory_offer":
+            raw["offers"][0]["surprise"] = True
+        elif target == "inventory_volume":
+            raw["volumes"][0]["surprise"] = True
+        else:
+            raw["surprise"] = True
+        path.write_text(json.dumps(raw) + "\n")
+    output = tmp_path / f"unknown-{target}.json"
+
+    with pytest.raises(SystemExit, match="2"):
+        _run_plan(paths, output, monkeypatch, capsys, authorization)
+
+    assert "unknown" in capsys.readouterr().err
     assert not output.exists()
 
 
@@ -584,3 +713,32 @@ def test_runpod_plan_recipe_requires_explicit_target_paths() -> None:
     )
     assert missing.returncode != 0
     assert "Recipe `runpod-plan` got 0 positional arguments but takes 8" in missing.stderr
+
+
+def test_runpod_plan_recipe_preserves_paths_with_spaces(tmp_path: Path) -> None:
+    inputs = tmp_path / "inputs with spaces"
+    inputs.mkdir()
+    paths = _write_inputs(inputs)
+    output = tmp_path / "output with spaces" / "decision.json"
+
+    completed = subprocess.run(
+        [
+            "just",
+            "runpod-plan",
+            str(paths["platform"]),
+            str(paths["local"]),
+            str(paths["experiment"]),
+            str(paths["intent"]),
+            str(paths["inventory"]),
+            str(paths["ledger"]),
+            "2026-07-21T12:02:00Z",
+            str(output),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(output.read_text())["reasons"] == ["authorization_required"]

@@ -51,10 +51,10 @@ runpod-image-scan image output:
     infra/runpod/scripts/scan-image.sh {{quote(image)}} {{quote(output)}}
 
 runpod-plan platform local experiment intent inventory ledger evaluated_at output:
-    uv run mantis-v2 runpod-plan --platform {{platform}} --local {{local}} --experiment {{experiment}} --intent {{intent}} --inventory {{inventory}} --ledger {{ledger}} --evaluated-at {{evaluated_at}} --output {{output}}
+    uv run mantis-v2 runpod-plan --platform {{quote(platform)}} --local {{quote(local)}} --experiment {{quote(experiment)}} --intent {{quote(intent)}} --inventory {{quote(inventory)}} --ledger {{quote(ledger)}} --evaluated-at {{quote(evaluated_at)}} --output {{quote(output)}}
 
 runpod-plan-authorized platform local experiment intent inventory ledger authorization evaluated_at output:
-    uv run mantis-v2 runpod-plan --platform {{platform}} --local {{local}} --experiment {{experiment}} --intent {{intent}} --inventory {{inventory}} --ledger {{ledger}} --authorization {{authorization}} --evaluated-at {{evaluated_at}} --output {{output}}
+    uv run mantis-v2 runpod-plan --platform {{quote(platform)}} --local {{quote(local)}} --experiment {{quote(experiment)}} --intent {{quote(intent)}} --inventory {{quote(inventory)}} --ledger {{quote(ledger)}} --authorization {{quote(authorization)}} --evaluated-at {{quote(evaluated_at)}} --output {{quote(output)}}
 
 train config:
     uv run mantis-v2 train --config {{config}}
