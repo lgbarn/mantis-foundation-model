@@ -160,6 +160,12 @@ def _embedding_manifest_input(
         ):
             raise DownstreamPipelineError("reusable embed producer config digest mismatch")
         producer = load_downstream_config(producer_path)
+        if "strategy_contract" in manifest and manifest["strategy_contract"] != (
+            producer.strategy_contract
+        ):
+            raise DownstreamPipelineError(
+                "reusable embed manifest identity mismatch: strategy_contract"
+            )
         producer_workflow_digests = {
             producer.workflow_digest,
             producer.legacy_workflow_digest,

@@ -28,6 +28,7 @@ from mantis_v2.embedding import EmbeddingContractError, _validated_evidence, loa
 from mantis_v2.model import sha256_file
 from mantis_v2.strategy import (
     _label_chunk,
+    _session_horizons,
     build_symbol_candidates,
     causal_context_indices,
     load_market_frame,
@@ -286,6 +287,41 @@ def test_reusable_embed_manifest_requires_its_exact_digest(
     manifest_path.write_text("{}")
     with pytest.raises(DownstreamPipelineError, match="digest mismatch"):
         _embedding_manifest_input(config)
+
+
+def test_reusable_embed_manifest_rejects_declared_strategy_contract_drift(
+    tmp_path: Path,
+) -> None:
+    producer = load_downstream_config(TREND_MAGIC_CONFIG)
+    manifest_path = tmp_path / "embed-manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "stage": "embed",
+                "workflow_digest": producer.workflow_digest,
+                "strategy_contract": {"version": "tampered"},
+                "foundation_weights_sha256": producer.foundation.weights_sha256,
+                "embedding_dim_per_channel": 256,
+                "feature_width": 3840,
+                "rows": 1,
+                "outputs": [{"rows": 1}],
+            }
+        )
+    )
+    consumer = replace(
+        producer,
+        walk_forward=replace(
+            producer.walk_forward,
+            embed_manifest_path=manifest_path,
+            embed_manifest_sha256=sha256_file(manifest_path),
+            embed_producer_config_path=TREND_MAGIC_CONFIG,
+            embed_producer_config_sha256=sha256_file(TREND_MAGIC_CONFIG),
+        ),
+    )
+
+    with pytest.raises(DownstreamPipelineError, match="strategy_contract"):
+        _embedding_manifest_input(consumer)
 
 
 def test_reusable_embed_manifest_rejects_same_width_semantic_changes(
@@ -745,6 +781,36 @@ def test_next_open_label_resolves_same_bar_tie_as_stop() -> None:
     assert mae[0] == pytest.approx(-1.03)
     assert exit_price.tolist() == [99.0]
     assert exit_index.tolist() == [1]
+
+
+def test_session_horizon_enforces_the_configured_1510_chicago_cutoff() -> None:
+    config = load_downstream_config(TREND_MAGIC_CONFIG)
+    close_timestamps = pd.Series(
+        pd.to_datetime(
+            [
+                "2025-01-06T21:03:00Z",
+                "2025-01-06T21:06:00Z",
+                "2025-01-06T21:09:00Z",
+                "2025-01-06T21:12:00Z",
+            ],
+            utc=True,
+        )
+    )
+    entry_timestamps = pd.Series(
+        pd.to_datetime(
+            ["2025-01-06T21:06:00Z", "2025-01-06T21:12:00Z"],
+            utc=True,
+        )
+    )
+
+    horizons = _session_horizons(
+        entry_timestamps,
+        close_timestamps,
+        np.array([1, 3]),
+        config,
+    )
+
+    np.testing.assert_array_equal(horizons, [2, 0])
 
 
 @pytest.mark.parametrize(
