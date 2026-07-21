@@ -401,13 +401,21 @@ just rl-smoke \
   --resume
 ```
 
-The smoke uses Gymnasium 1.x, Stable-Baselines3 and SB3-Contrib MaskablePPO on
+The smoke uses the MIT-licensed, hash-locked local stack: Gymnasium 1.3.0,
+Stable-Baselines3 2.9.0, SB3-Contrib 2.9.0, and Optuna 4.9.0. No paid or hosted
+service is enabled. The first three provide the local CPU training path; Optuna
+is pinned for the later search stage and is not invoked by this smoke.
+MaskablePPO runs on
 CPU. It trains for exactly 50,000 steps on deterministic synthetic episodes
 that exercise the same production observation, transition, and action-mask
 adapter. It must beat reject-all, keep every policy value finite, submit no
 illegal action, reproduce the seeded schedule, and match deterministic actions
-after checkpoint reload. `manifest.json` binds the checkpoint and metrics to
-the exact config, source, lock, schedule, policy, dependency versions, and seed.
+after checkpoint reload. Immutable 10K checkpoint bundles contain model,
+optimizer, Python/NumPy/Torch/Gym RNG, schedule trace, and numerical-audit
+state. Atomic `state.json` points at the last complete bundle, so a failed save
+or pointer swap cannot invalidate it. `manifest.json` binds the checkpoint and
+metrics to the exact config, source, lock, schedule, policy, dependency
+versions, and seed.
 The command never reads a production episode manifest, market corpus, embedding
 shard, or sealed-holdout file. Passing this smoke permits later bounded fold
 work; it is not evidence of trading quality or permission to start Optuna.

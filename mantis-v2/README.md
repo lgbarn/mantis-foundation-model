@@ -122,12 +122,31 @@ Stable-Baselines3 environment checks through the production entry adapter, then
 trains MaskablePPO for exactly 50,000 steps on a balanced, deterministic,
 learnable synthetic schedule. Completion requires finite policy parameters,
 zero illegal actions, better reward than reject-all, identical deterministic
-actions after native reload, and a reproduced schedule. The command writes
-atomic `checkpoint.zip`, `state.json`, `metrics.json`, and `manifest.json`
-files. A partial run resumes only with `--resume` and exact source, config,
-lock, policy, dependency, seed, and schedule identities. Completed or changed
-run identities are never overwritten. This smoke does not read production data
-or the sealed holdout and does not qualify MPS for policy training.
+actions after native reload, and a reproduced schedule. Every 10,000 steps is
+an immutable `checkpoints/step-N/` bundle containing the model, RNG/runtime
+state, and a hash manifest. One atomic `state.json` pointer commits a completed
+bundle; an interrupted save or pointer swap leaves the prior bundle resumable.
+A trained pointer can resume evaluation and publication without retraining.
+Resume requires the loaded model step, pointer step, source, config, lock,
+policy, dependencies, seed, schedule, Python/NumPy/Torch/Gym RNG state, and
+checkpoint hashes to agree. Completed or changed run identities are never
+overwritten. This smoke does not read production data or the sealed holdout and
+does not qualify MPS for policy training.
+
+The approved CPU RL supply chain resolves from hash-locked `uv.lock` entries:
+
+| Package | Resolved version | License | Accepted use |
+| --- | --- | --- | --- |
+| Gymnasium | 1.3.0 | MIT | Environment protocol and official checks |
+| Stable-Baselines3 | 2.9.0 | MIT | CPU policy utilities and persistence |
+| SB3-Contrib | 2.9.0 | MIT | MaskablePPO and action-mask utilities |
+| Optuna | 4.9.0 | MIT | Later local persistent search; unused by this smoke |
+
+These are free local libraries. No API key, hosted service, telemetry service,
+or metered dependency is enabled. Version ranges are constrained in
+`mantis-v2/pyproject.toml`; exact wheel/source hashes and transitive versions are
+recorded in `uv.lock`. Any future upgrade must update the lock, verify installed
+versions and licenses, refresh provenance identities, and rerun this gate.
 
 ### Bar-level Topstep account replay
 
