@@ -16,6 +16,8 @@ artifacts/
 checkpoints/
 data/
 reports/
+output/
+tmp/
 *.pt
 *.pth
 *.onnx

@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MantisV2 Official Pipeline Audit</title>
+<style>
+:root { --fg:#1a1a1a; --fg-muted:#57606a; --bg:#fff; --bg-soft:#f6f8fa; --border:#d0d7de; --accent:#0969da; --pos:#1a7f37; --neg:#cf222e; --warn:#9a6700; --code-bg:#f6f8fa; --radius:8px; }
+@media (prefers-color-scheme: dark) { :root { --fg:#e6edf3; --fg-muted:#9198a1; --bg:#0d1117; --bg-soft:#161b22; --border:#30363d; --accent:#4493f8; --pos:#3fb950; --neg:#f85149; --warn:#d29922; --code-bg:#161b22; } }
+*,*::before,*::after{box-sizing:border-box} html{font-size:100%;-webkit-text-size-adjust:100%}
+body{max-width:980px;margin:0 auto;padding:2.5rem 1.5rem 4rem;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:1rem;line-height:1.65;color:var(--fg);background:var(--bg)}
+h1,h2,h3,h4{line-height:1.25;font-weight:600;margin:2rem 0 1rem} h1{font-size:2rem;padding-bottom:.3rem;border-bottom:2px solid var(--border);margin-top:0} h2{font-size:1.5rem;padding-bottom:.25rem;border-bottom:1px solid var(--border)} h3{font-size:1.25rem} h4{font-size:1.05rem;color:var(--fg-muted)}
+p,ul,ol{margin:0 0 1rem} li{margin:.25rem 0} a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline} strong{font-weight:600} hr{border:0;border-top:1px solid var(--border);margin:2rem 0}
+blockquote{margin:1rem 0;padding:.5rem 1rem;border-left:4px solid var(--border);color:var(--fg-muted);background:var(--bg-soft)}
+code{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;font-size:.9em;background:var(--code-bg);padding:.15em .4em;border-radius:4px} pre{background:var(--code-bg);padding:1rem;border-radius:var(--radius);overflow-x:auto;border:1px solid var(--border)} pre code{background:none;padding:0}
+table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.92rem} th,td{padding:.55rem .7rem;border:1px solid var(--border);text-align:left;vertical-align:top} th{background:var(--bg-soft);font-weight:600} tbody tr:nth-child(even){background:var(--bg-soft)}
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1rem;margin:1.5rem 0}.stat{padding:1rem;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg-soft)}.stat .value{font-size:1.6rem;font-weight:700}.stat .label{font-size:.8rem;color:var(--fg-muted);text-transform:uppercase;letter-spacing:.03em}.pos{color:var(--pos)}.neg{color:var(--neg)}
+.callout{padding:.75rem 1rem;border-radius:var(--radius);border-left:4px solid var(--accent);background:var(--bg-soft);margin:1rem 0}.callout.warn{border-left-color:var(--warn)}
+.tag{display:inline-block;padding:.1rem .45rem;border-radius:999px;font-size:.76rem;font-weight:600;background:var(--bg-soft);border:1px solid var(--border)}
+@media(max-width:600px){body{padding:1.5rem 1rem 3rem}h1{font-size:1.6rem}h2{font-size:1.3rem}table{font-size:.82rem}}
+@media print{body{max-width:none;color:#000;background:#fff}a{color:#000}}
+</style>
+</head>
+<body>
+<h1>MantisV2 Official Pipeline Audit</h1>
+<p><strong>Date:</strong> 2026-07-20. <strong>Scope:</strong> pinned official paper, source revision, and Hugging Face snapshot versus the local foundation, embedding, probe, and RL pipeline.</p>
+
+<div class="callout"><strong>Conclusion.</strong> The current trading pipeline correctly consumes the pinned MantisV2 checkpoint and implements the essential 512-sample, channel-independent feature path. It is not a reproduction of official foundation pretraining, and it does not run the paper's strongest frozen-feature variants. Those are distinct gaps: pretraining matters to the repository's long-term foundation-model mission, while the frozen-feature variants are the most relevant next experiments for the currently rejected Trend Magic head.</div>
+
+<h2>Official sources</h2>
+<ul>
+  <li><a href="https://arxiv.org/abs/2602.17868">MantisV2 paper, arXiv 2602.17868</a>.</li>
+  <li><a href="https://github.com/vfeofanov/mantis/tree/0c94f8ceb9f1d1421dd292ed917090df8c31605b">Official source at commit 0c94f8c</a>, including <a href="https://github.com/vfeofanov/mantis/blob/0c94f8ceb9f1d1421dd292ed917090df8c31605b/src/mantis/architecture/version2.py">MantisV2 architecture</a>, <a href="https://github.com/vfeofanov/mantis/blob/0c94f8ceb9f1d1421dd292ed917090df8c31605b/src/mantis/trainer/trainer.py">trainer</a>, and <a href="https://github.com/vfeofanov/mantis/blob/0c94f8ceb9f1d1421dd292ed917090df8c31605b/getting_started/pretrain.py">pretraining example</a>.</li>
+  <li><a href="https://huggingface.co/paris-noah/MantisV2/tree/99fe0f548960e272fbfa4b82fd9b5b5956779dfd">Hugging Face snapshot 99fe0f5</a>; its <a href="https://huggingface.co/paris-noah/MantisV2/blob/99fe0f548960e272fbfa4b82fd9b5b5956779dfd/config.json">config</a> records length-agnostic 32 patches, last layer, CLS token, and <code>pre_training=false</code>.</li>
+</ul>
+
+<h2>Implemented</h2>
+<table>
+<thead><tr><th>Official behavior</th><th>Local evidence</th><th>Assessment</th></tr></thead>
+<tbody>
+<tr><td>Pinned pretrained MantisV2 weights.</td><td><code>mantis-v2/configs/nextleg-parquet-v2.toml:24-32</code>; digest verification and revision-pinned load at <code>mantis-v2/src/mantis_v2/model.py:41-71</code>.</td><td><span class="tag pos">Implemented</span> Stronger provenance than the upstream examples.</td></tr>
+<tr><td>Resize to 512, with length divisible by 32.</td><td><code>mantis-v2/src/mantis_v2/data.py:304-324</code>; runtime enforcement at <code>mantis-v2/src/mantis_v2/model.py:75-82</code>; downstream interpolation at <code>mantis-v2/src/mantis_v2/embedding.py:153-170</code>.</td><td><span class="tag pos">Implemented</span></td></tr>
+<tr><td>Encode multivariate channels independently and concatenate.</td><td><code>mantis-v2/src/mantis_v2/model.py:83-90</code>; timeframes and channels concatenate at <code>mantis-v2/src/mantis_v2/embedding.py:173-203</code>.</td><td><span class="tag pos">Implemented</span></td></tr>
+<tr><td>Frozen-feature classifier using StandardScaler and logistic regression.</td><td><code>mantis-v2/src/mantis_v2/walk_forward.py:141-192</code>; chronological purged folds at <code>mantis-v2/src/mantis_v2/walk_forward.py:65-130</code>.</td><td><span class="tag pos">Implemented</span> Leakage controls exceed the generic official benchmark.</td></tr>
+<tr><td>Hub defaults: final transformer layer, CLS-only, 256 dimensions per channel.</td><td>Production downstream config uses <code>return_transf_layer=-1</code> and <code>output_token="cls_token"</code> at <code>mantis-v2/configs/trend-magic-topstep-100k.toml:24-33</code>; loader applies both at <code>mantis-v2/src/mantis_v2/embedding.py:118-149</code>.</td><td><span class="tag pos">Implemented</span> Exact pinned Hub default, but not the paper's strongest zero-shot recipe.</td></tr>
+</tbody>
+</table>
+
+<h2>Intentional task adaptations</h2>
+<table>
+<thead><tr><th>Difference</th><th>Why it is not an upstream defect</th></tr></thead>
+<tbody>
+<tr><td>Supervised NextLeg regression replaces official InfoNCE pretraining and ordinary class-label fine-tuning.</td><td>The local package explicitly declares this at <code>mantis-v2/README.md:138-146</code>. Its candle MSE and leg SmoothL1 heads are defined at <code>mantis-v2/src/mantis_v2/model.py:103-162</code>. This is a custom financial downstream objective, not a claimed paper reproduction.</td></tr>
+<tr><td>Context-only standardization and clipping before MantisV2.</td><td><code>mantis-v2/src/mantis_v2/data.py:304-333</code> implements the training contract; downstream repeats it at <code>mantis-v2/src/mantis_v2/embedding.py:153-170</code>. The official encoder also normalizes its convolution branches internally, but the local preprocessing is required to match the fine-tuned export and keep targets bounded.</td></tr>
+<tr><td>Transformer-only fine-tuning on MPS.</td><td>The production config selects <code>transformer_finetune</code> at <code>mantis-v2/configs/nextleg-parquet-v2.toml:24-32</code>; <code>mantis-v2/src/mantis_v2/model.py:92-100,134-142</code> freezes the tokenizer and unused projection. This differs from upstream <code>fit(..., fine_tuning_type="full")</code>, but is documented as an MPS stability choice.</td></tr>
+<tr><td>Walk-forward, Topstep rules, Trend Magic labels, RL, manifests, and export parity.</td><td>These are trading-specific layers outside the MantisV2 paper. They should be judged by causality, execution, account, and out-of-sample tests, not by upstream API similarity.</td></tr>
+</tbody>
+</table>
+
+<h2>Missed or deferred steps</h2>
+<table>
+<thead><tr><th>Priority</th><th>Official step</th><th>Local gap and impact</th></tr></thead>
+<tbody>
+<tr><td><span class="tag neg">Mission-level</span></td><td>Foundation pretraining on synthetic CauKer2M using two RandomCropResize views, InfoNCE contrastive loss, projection head, AdamW, and cosine schedule.</td><td>No local pretraining command, config, contrastive loss, augmentation pipeline, or CauKer2M reader exists. The official trainer documents these operations in <code>trainer.py</code> and the official README says CauKer2M produced MantisV2. This does not block using the pinned checkpoint, but it means the repository cannot yet build a MantisV2 foundation model from pretraining data.</td></tr>
+<tr><td><span class="tag warn">Current downstream</span></td><td>Paper zero-shot recipe: transformer layer index 2 (third layer) plus combined CLS and mean token, yielding 512 dimensions per channel.</td><td>The local schema supports it, but production uses final-layer CLS. The decision is explicitly deferred at <code>docs/research/2026-07-19-mantisv2-supertrend-topstep-spec.md:66-78</code>. Because the deployed encoder was NextLeg-fine-tuned using final CLS, this must be an isolated upstream-weight benchmark, not an in-place switch on existing embeddings.</td></tr>
+<tr><td><span class="tag warn">Current downstream</span></td><td>Self-ensemble across interpolation lengths 128, 256, 512, and 1024, plus the same set for the first-order difference.</td><td>The local extractor uses only one 512 interpolation (<code>mantis-v2/src/mantis_v2/embedding.py:153-170</code>). The paper reports this as a test-time performance enhancement. It is optional, but consequential enough to benchmark after the intermediate-layer baseline; it multiplies embedding width and inference/storage cost.</td></tr>
+<tr><td><span class="tag warn">Current downstream</span></td><td>Official classifier baselines: StandardScaler plus default logistic regression with <code>max_iter=500</code>, and retain Random Forest as a comparison.</td><td>The local implementation has the right scaler/logistic structure but production changes class weights, <code>C</code>, and iteration limit (<code>mantis-v2/configs/trend-magic-topstep-100k-head-c0001-v2.toml:49-62</code>). There is no Random Forest path. Because the tuned logistic head failed its proper-score baseline, the official-default logistic and RF comparisons are useful controls, not production defaults.</td></tr>
+<tr><td><span class="tag">Optional research</span></td><td>Cross-model fusion, especially MantisV2 with TiViT-H or TiConvNext.</td><td>Not implemented. The paper presents it as an additional performance strategy, not a requirement for MantisV2. It adds large models, new provenance, compute, and license review, so it should not precede the cheaper MantisV2-only ablations.</td></tr>
+</tbody>
+</table>
+
+<h2>One local documentation inconsistency</h2>
+<div class="callout warn"><code>docs/workflow.md:215-225</code> says production uses "Full encoder fine-tuning," while the committed production config selects <code>transformer_finetune</code> and the implementation freezes everything outside the transformer. The config and code agree with each other; the workflow wording is stale.</div>
+
+<h2>Recommended order</h2>
+<ol>
+  <li>Do not retrain the existing NextLeg model merely to imitate the paper. Its custom objective and preprocessing are deliberate.</li>
+  <li>Create a separate, immutable official-weight feature experiment: layer 2 plus combined token, official-style 512 input, same purged Trend Magic folds.</li>
+  <li>Compare against the current final-CLS embeddings using the official-default logistic control and Random Forest, while retaining the local proper-score gates.</li>
+  <li>Only if that improves untouched walk-forward results, test the multi-length/difference self-ensemble.</li>
+  <li>Track CauKer2M contrastive pretraining as a separate repository capability; it is not a prerequisite for the current Topstep pipeline.</li>
+</ol>
+</body>
+</html>
