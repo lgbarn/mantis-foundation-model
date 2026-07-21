@@ -32,7 +32,15 @@ def _sha256(path: Path) -> str:
 
 
 def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, check=False, capture_output=True, text=True)
+    try:
+        return subprocess.run(command, check=False, capture_output=True, text=True)
+    except OSError as exc:
+        return subprocess.CompletedProcess(
+            command,
+            127,
+            "",
+            f"{type(exc).__name__}: {exc}",
+        )
 
 
 def _version(runner: Runner, command: list[str]) -> str:
@@ -83,6 +91,7 @@ def runtime_inventory(
     driver_version = (
         driver.stdout.strip().splitlines()[0] if driver.returncode == 0 else "unavailable"
     )
+    driver_error = driver.stderr.strip() if driver.returncode != 0 else ""
     compatible = cuda_available and cuda_runtime.startswith("13.") and driver.returncode == 0
     packages = sorted(
         (
@@ -118,7 +127,7 @@ def runtime_inventory(
         "driver": {
             "version": driver_version,
             "compatible": compatible,
-            "error": cuda_error,
+            "error": cuda_error or driver_error,
         },
         "packages": packages,
     }

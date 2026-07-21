@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from mantis_v2.runpod_image import ImageContractError, runtime_inventory
+from mantis_v2.runpod_image import ImageContractError, _run, runtime_inventory
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -123,6 +123,19 @@ def test_cuda_failure_is_nonzero_before_workload_paths(
     assert not run_directory.exists()
 
 
+def test_missing_executable_becomes_a_nonzero_command_result(monkeypatch) -> None:
+    def missing(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        del args, kwargs
+        raise FileNotFoundError("nvidia-smi")
+
+    monkeypatch.setattr(subprocess, "run", missing)
+
+    completed = _run(["nvidia-smi"])
+
+    assert completed.returncode == 127
+    assert "FileNotFoundError" in completed.stderr
+
+
 def _scan_module() -> Any:
     path = ROOT / "infra" / "runpod" / "scripts" / "scan_image_archive.py"
     spec = importlib.util.spec_from_file_location("scan_image_archive", path)
@@ -178,6 +191,7 @@ def test_image_contract_is_digest_pinned_frozen_and_localhost_only() -> None:
     assert "EXPOSE 22" in dockerfile
     assert "EXPOSE 6006" not in dockerfile
     assert "GatewayPorts no" in dockerfile
+    assert "rm -f /etc/ssh/ssh_host_*" in dockerfile
     assert "COPY ." not in dockerfile
     assert dockerignore.startswith("**\n")
     build_script = (ROOT / "infra" / "runpod" / "scripts" / "build-image.sh").read_text()

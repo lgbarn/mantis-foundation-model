@@ -49,7 +49,8 @@ RUN apt-get update \
        'AllowTcpForwarding yes' \
        'GatewayPorts no' \
        'X11Forwarding no' \
-       >> /etc/ssh/sshd_config
+       >> /etc/ssh/sshd_config \
+    && rm -f /etc/ssh/ssh_host_*
 
 COPY --from=uv /uv /uvx /usr/local/bin/
 WORKDIR /opt/mantis
