@@ -530,8 +530,8 @@ def load_inventory_snapshot(path: str | Path) -> InventorySnapshot:
         {"observed_at", "account_balance_usd", "offers", "volumes", "live_pods"},
         "inventory snapshot",
     )
-    if not isinstance(raw["offers"], list) or not raw["offers"]:
-        raise RunpodConfigError("inventory.offers must be a non-empty array")
+    if not isinstance(raw["offers"], list):
+        raise RunpodConfigError("inventory.offers must be an array")
     offers = []
     for index, item in enumerate(raw["offers"]):
         offer = _exact(
@@ -566,8 +566,8 @@ def load_inventory_snapshot(path: str | Path) -> InventorySnapshot:
                 ),
             )
         )
-    if not isinstance(raw["volumes"], list) or not raw["volumes"]:
-        raise RunpodConfigError("inventory.volumes must be a non-empty array")
+    if not isinstance(raw["volumes"], list):
+        raise RunpodConfigError("inventory.volumes must be an array")
     volumes = []
     for index, item in enumerate(raw["volumes"]):
         volume = _exact(
@@ -575,21 +575,24 @@ def load_inventory_snapshot(path: str | Path) -> InventorySnapshot:
             {"volume_id", "datacenter_id", "size_gb", "free_bytes"},
             f"inventory.volumes[{index}]",
         )
-        volumes.append(
-            InventoryVolume(
-                volume_id=_text(volume["volume_id"], f"inventory.volumes[{index}].volume_id"),
-                datacenter_id=_text(
-                    volume["datacenter_id"],
-                    f"inventory.volumes[{index}].datacenter_id",
-                ),
-                size_gb=_integer(volume["size_gb"], f"inventory.volumes[{index}].size_gb"),
-                free_bytes=_integer(
-                    volume["free_bytes"],
-                    f"inventory.volumes[{index}].free_bytes",
-                    minimum=0,
-                ),
-            )
+        parsed_volume = InventoryVolume(
+            volume_id=_text(volume["volume_id"], f"inventory.volumes[{index}].volume_id"),
+            datacenter_id=_text(
+                volume["datacenter_id"],
+                f"inventory.volumes[{index}].datacenter_id",
+            ),
+            size_gb=_integer(volume["size_gb"], f"inventory.volumes[{index}].size_gb"),
+            free_bytes=_integer(
+                volume["free_bytes"],
+                f"inventory.volumes[{index}].free_bytes",
+                minimum=0,
+            ),
         )
+        if parsed_volume.free_bytes > parsed_volume.size_gb * 1_000_000_000:
+            raise RunpodConfigError(
+                f"inventory.volumes[{index}].free_bytes cannot exceed declared capacity"
+            )
+        volumes.append(parsed_volume)
     live_pods = raw["live_pods"]
     if not isinstance(live_pods, list) or any(not isinstance(item, str) for item in live_pods):
         raise RunpodConfigError("inventory.live_pods must be an array of strings")

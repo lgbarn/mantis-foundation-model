@@ -554,6 +554,42 @@ def test_high_water_policy_can_be_stricter_than_minimum_free_bytes(
     assert "insufficient_storage" in decision["reasons"]
 
 
+@pytest.mark.parametrize(
+    ("inventory_field", "reason"),
+    (("offers", "offer_not_found"), ("volumes", "volume_not_found")),
+)
+def test_empty_provider_inventory_writes_durable_rejection(
+    tmp_path: Path, monkeypatch, capsys, inventory_field: str, reason: str
+) -> None:
+    paths = _write_inputs(tmp_path)
+    inventory = json.loads(paths["inventory"].read_text())
+    inventory[inventory_field] = []
+    paths["inventory"].write_text(json.dumps(inventory) + "\n")
+    output = tmp_path / f"empty-{inventory_field}.json"
+
+    decision = _run_plan(paths, output, monkeypatch, capsys)
+
+    assert decision["allowed"] is False
+    assert reason in decision["reasons"]
+    assert output.exists()
+
+
+def test_inventory_rejects_free_bytes_above_declared_volume_capacity(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    paths = _write_inputs(tmp_path)
+    inventory = json.loads(paths["inventory"].read_text())
+    inventory["volumes"][0]["free_bytes"] = 150_000_000_001
+    paths["inventory"].write_text(json.dumps(inventory) + "\n")
+    output = tmp_path / "impossible-volume.json"
+
+    with pytest.raises(SystemExit, match="2"):
+        _run_plan(paths, output, monkeypatch, capsys)
+
+    assert "free_bytes cannot exceed declared capacity" in capsys.readouterr().err
+    assert not output.exists()
+
+
 def test_plan_command_rejects_unknown_config_key_without_output(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
