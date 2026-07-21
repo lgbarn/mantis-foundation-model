@@ -99,8 +99,23 @@ class EntryActorCritic(nn.Module):
         self.critic_trunk = trunk()
         self.shared_actor_trunk = trunk()
         self.independent_actor_trunks = nn.ModuleDict()
+        self.independent_profile_embeddings = nn.ModuleDict()
         if self.variant is PolicyVariant.INDEPENDENT_ACTOR:
-            self.independent_actor_trunks = nn.ModuleDict({ticker: trunk() for ticker in TICKERS})
+            self.independent_profile_embeddings = nn.ModuleDict(
+                {ticker: nn.Embedding(len(PROFILES), 2) for ticker in TICKERS}
+            )
+
+            def independent_trunk() -> nn.Sequential:
+                return nn.Sequential(
+                    nn.Linear(observation_width + 2, hidden_width),
+                    nn.Tanh(),
+                    nn.Linear(hidden_width, hidden_width),
+                    nn.Tanh(),
+                )
+
+            self.independent_actor_trunks = nn.ModuleDict(
+                {ticker: independent_trunk() for ticker in TICKERS}
+            )
         self.actor_head: nn.Linear | None
         if self.variant is PolicyVariant.INDEPENDENT_ACTOR:
             self.actor_heads = nn.ModuleDict(
@@ -153,8 +168,23 @@ class EntryActorCritic(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         conditioned = self._conditioned(observations, tickers, profiles)
         if self.actor_head is None:
+            actor_input = torch.empty(
+                (len(observations), self.observation_width + 2),
+                dtype=observations.dtype,
+                device=observations.device,
+            )
+            for index, ticker in enumerate(TICKERS):
+                owned = tickers == index
+                if bool(owned.any()):
+                    actor_input[owned] = torch.cat(
+                        (
+                            observations[owned],
+                            self.independent_profile_embeddings[ticker](profiles[owned]),
+                        ),
+                        dim=1,
+                    )
             actor_hidden = self._owned_output(
-                conditioned, tickers, self.independent_actor_trunks, self.hidden_width
+                actor_input, tickers, self.independent_actor_trunks, self.hidden_width
             )
             logits = self._owned_output(actor_hidden, tickers, self.actor_heads, 2)
         else:
@@ -177,6 +207,11 @@ class EntryActorCritic(nn.Module):
         if self.actor_head is None:
             heads = self.actor_heads.parameters()
             trunks = self.independent_actor_trunks.parameters()
+            return (
+                *self.independent_profile_embeddings.parameters(),
+                *trunks,
+                *heads,
+            )
         else:
             heads = self.actor_head.parameters()
             trunks = self.shared_actor_trunk.parameters()
@@ -185,4 +220,16 @@ class EntryActorCritic(nn.Module):
             *self.profile_embedding.parameters(),
             *trunks,
             *heads,
+        )
+
+    def owned_actor_parameters(self, ticker: str) -> tuple[nn.Parameter, ...]:
+        """Return actor parameters reachable from one ticker's policy."""
+        if ticker not in TICKERS:
+            raise ValueError(f"unknown ticker: {ticker}")
+        if self.actor_head is not None:
+            return self.actor_parameters()
+        return (
+            *self.independent_profile_embeddings[ticker].parameters(),
+            *self.independent_actor_trunks[ticker].parameters(),
+            *self.actor_heads[ticker].parameters(),
         )

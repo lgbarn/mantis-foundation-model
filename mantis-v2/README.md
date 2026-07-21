@@ -366,7 +366,14 @@ The candidate is `shared_ticker_value`; `independent_actor` and `shared_critic`
 use the identical command and checkpoint contract as preregistered ablations.
 Each actor emits only `skip` or `enter`. Trend Magic direction, the deterministic
 2R/0.75R exit, the fixed mini/micro profile, and the Topstep risk shield remain
-outside actor authority. A run checkpoints only after a complete balanced
-schedule cycle and resumes optimizer, ticker-owned return statistics, RNG state,
-metrics, and exact config/schedule/artifact identities. `--resume` refuses a
-completed or mismatched run. The sealed holdout is never a training input.
+outside actor authority. A run freezes rollout log probabilities and values
+before four configured PPO epochs. Shared-actor transitions receive inverse
+ticker-count weights, so every ticker contributes equally even when legal
+decision counts differ. The independent-actor ablation owns separate profile
+embeddings, trunks, and heads per ticker. A run checkpoints only after a
+complete schedule cycle and resumes optimizer, ticker-owned return statistics,
+RNG state, last rollout and ablation evidence, and exact source/lock/config/
+schedule/collection/artifact identities. Immutable bundles are recovered if a
+crash occurs before the atomic state pointer or final metrics publication.
+`--resume` refuses a published or mismatched run. The sealed holdout is never a
+training input.

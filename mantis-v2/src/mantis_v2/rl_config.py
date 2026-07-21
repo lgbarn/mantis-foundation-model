@@ -129,6 +129,8 @@ class RlTrainingConfig:
     confirmation_seeds: tuple[int, ...]
     serving_seed: int
     vector_environments: int
+    ppo_epochs: int
+    minibatch_size: int
     smoke_timesteps: int
     search_timesteps_per_seed: int
     search_seeds: int
@@ -274,6 +276,8 @@ _EXPECTED: dict[str, set[str]] = {
         "confirmation_seeds",
         "serving_seed",
         "vector_environments",
+        "ppo_epochs",
+        "minibatch_size",
         "smoke_timesteps",
         "search_timesteps_per_seed",
         "search_seeds",
@@ -622,6 +626,8 @@ def load_rl_config(path: str | Path) -> RlConfig:
             vector_environments=_int(
                 training["vector_environments"], "rl.training.vector_environments", 1
             ),
+            ppo_epochs=_int(training["ppo_epochs"], "rl.training.ppo_epochs", 2),
+            minibatch_size=_int(training["minibatch_size"], "rl.training.minibatch_size", 1),
             smoke_timesteps=_int(training["smoke_timesteps"], "rl.training.smoke_timesteps", 1),
             search_timesteps_per_seed=_int(
                 training["search_timesteps_per_seed"],
@@ -818,11 +824,13 @@ def _validate(config: RlConfig) -> None:
     }
     if asdict(config.evaluation) != accepted_gates:
         raise ConfigError("rl.evaluation promotion gates must match the accepted contract")
-    accepted_production_training = {
+    accepted_production_training: dict[str, object] = {
         "development_seeds": (42, 43, 44, 45, 46),
         "confirmation_seeds": (42, 43, 44, 45, 46, 47, 48, 49, 50, 51),
         "serving_seed": 42,
         "vector_environments": 7,
+        "ppo_epochs": 4,
+        "minibatch_size": 512,
         "smoke_timesteps": 50_000,
         "search_timesteps_per_seed": 500_000,
         "search_seeds": 3,

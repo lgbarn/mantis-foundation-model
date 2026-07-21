@@ -76,7 +76,6 @@ from mantis_v2.rl_smoke import RlSmokeError, run_maskable_ppo_smoke
 from mantis_v2.rl_training import (
     PolicyVariant,
     ProductionTrainingError,
-    load_training_episodes,
     train_policy_seeds,
 )
 from mantis_v2.rl_validation import (
@@ -188,6 +187,8 @@ def _parser() -> argparse.ArgumentParser:
                 default=PolicyVariant.SHARED_TICKER_VALUE.value,
             )
             child.add_argument("--resume", action="store_true")
+            child.add_argument("--target-updates", type=int)
+            child.add_argument("--maximum-updates-this-run", type=int)
         if command in _DOWNSTREAM_COMMANDS:
             child.add_argument(
                 "--set",
@@ -497,12 +498,13 @@ def main() -> None:
             )
         elif args.command == "rl-train":
             rl_config = load_rl_config(args.config)
-            training_episodes = load_training_episodes(rl_config, args.training_manifest)
             result = train_policy_seeds(
                 rl_config,
-                training_episodes,
+                args.training_manifest,
                 args.output,
                 variant=PolicyVariant(args.variant),
+                target_updates=args.target_updates,
+                maximum_updates_this_run=args.maximum_updates_this_run,
                 resume=args.resume,
             )
         elif args.command == "rl-smoke":

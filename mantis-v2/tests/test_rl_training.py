@@ -4,6 +4,7 @@ import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -17,9 +18,15 @@ from mantis_v2.rl_training import (
     PolicyVariant,
     ProductionTrainingError,
     TrainingEpisodes,
+    _actor_weights,
     _completed_timesteps,
-    train_entry_policy,
-    train_policy_seeds,
+    _ppo_update,
+    _returns,
+    _terminal_signal,
+    _train_loaded_policy,
+    _train_policy_seeds_loaded,
+    _Transition,
+    load_training_episodes,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,7 +35,11 @@ TICKERS = ("ES", "NQ", "RTY", "YM", "GC", "CL", "ZB")
 
 def _config():
     config = load_rl_config(ROOT / "configs" / "rl-entry-smoke.toml")
-    return replace(config, run=replace(config.run, profile="production"))
+    return replace(
+        config,
+        run=replace(config.run, profile="production"),
+        training=replace(config.training, ppo_epochs=2, minibatch_size=4096),
+    )
 
 
 def _candidate(signal: float, direction: int = 1) -> CandidateData:
@@ -79,6 +90,7 @@ def _training_episodes() -> TrainingEpisodes:
 
 @pytest.mark.parametrize("variant", tuple(PolicyVariant))
 def test_public_policy_seam_emits_binary_actions_for_every_variant(variant: PolicyVariant) -> None:
+    torch.manual_seed(5)
     model = EntryActorCritic(observation_width=42, variant=variant)
     observations = torch.zeros((3, 42), dtype=torch.float32)
     tickers = torch.tensor([0, 1, 6])
@@ -92,6 +104,19 @@ def test_public_policy_seam_emits_binary_actions_for_every_variant(variant: Poli
     assert "direction" not in model.action_names
     assert "exit" not in model.action_names
     assert "size" not in model.action_names
+    assert not torch.equal(logits[0], logits[1])
+
+    trained = _train_loaded_policy(
+        _config(),
+        _training_episodes(),
+        Path("unused"),
+        seed=42,
+        variant=variant,
+        target_updates=1,
+        publish=False,
+    )
+    assert trained["variant"] == variant.value
+    assert trained["finite_gradients"] is True
 
 
 def test_ticker_value_heads_and_normalizers_update_only_for_owners() -> None:
@@ -128,7 +153,26 @@ def test_ticker_value_heads_and_normalizers_update_only_for_owners() -> None:
 
 
 def test_terminal_reward_and_cost_are_unshaped() -> None:
-    result = train_entry_policy(
+    assert _terminal_signal("PASS") == (1.0, 0.0)
+    assert _terminal_signal("BLOW") == (0.0, 1.0)
+    assert _terminal_signal("TIMEOUT") == (0.0, 0.0)
+    terminal_fixture = [
+        _Transition(
+            np.zeros(4, dtype=np.float32),
+            0,
+            0,
+            0,
+            0.0,
+            0.0,
+            np.ones(2, dtype=np.bool_),
+            reward,
+            cost,
+            True,
+        )
+        for reward, cost in ((1.0, 0.0), (0.0, 1.0), (0.0, 0.0))
+    ]
+    assert _returns(terminal_fixture).tolist() == [1.0, -1.0, 0.0]
+    result = _train_loaded_policy(
         _config(),
         _training_episodes(),
         Path("unused"),
@@ -151,11 +195,11 @@ def test_terminal_reward_and_cost_are_unshaped() -> None:
 def test_training_rejects_nontraining_and_stale_identities(tmp_path: Path) -> None:
     episodes = _training_episodes()
     with pytest.raises(ProductionTrainingError, match="training partition"):
-        train_entry_policy(
+        _train_loaded_policy(
             _config(), replace(episodes, partition="validation"), tmp_path / "validation", seed=42
         )
     with pytest.raises(ProductionTrainingError, match="config identity mismatch"):
-        train_entry_policy(
+        _train_loaded_policy(
             _config(),
             replace(episodes, config_sha256="d" * 64),
             tmp_path / "stale",
@@ -163,8 +207,46 @@ def test_training_rejects_nontraining_and_stale_identities(tmp_path: Path) -> No
         )
 
 
+def test_public_loader_binds_runtime_schedule_bytes_and_complete_collection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import mantis_v2.rl_training as training
+
+    config = _config()
+    episodes = _training_episodes().episodes
+    manifest = tmp_path / "schedule.json"
+    manifest.write_text(json.dumps({"seed": 42, "episodes": [{} for _ in episodes]}))
+    expected_sha = training.sha256_file(manifest)
+    runtime = {
+        "source": {"revision": "abc", "dirty": False, "sha256": "c" * 64},
+        "lock": {"sha256": "d" * 64},
+    }
+    monkeypatch.setattr(training, "verify_rl_runtime", lambda *_args: runtime)
+    monkeypatch.setattr(
+        training,
+        "load_episode_manifest",
+        lambda *_args: SimpleNamespace(
+            episodes=episodes,
+            manifest_sha256=expected_sha,
+            partition="training",
+            fold=0,
+        ),
+    )
+
+    loaded = load_training_episodes(config, manifest, ROOT.parent)
+
+    assert loaded.manifest_sha256 == expected_sha
+    assert loaded.runtime_identities == runtime
+    assert len(loaded.episodes) == len(episodes)
+    assert loaded.collection_sha256
+
+    manifest.write_text(json.dumps({"seed": 42, "episodes": [{}]}))
+    with pytest.raises(ProductionTrainingError, match="episode collection mismatch"):
+        load_training_episodes(config, manifest, ROOT.parent)
+
+
 def test_balanced_rollouts_finite_gradients_and_collapse_ablations(tmp_path: Path) -> None:
-    result = train_entry_policy(
+    result = _train_loaded_policy(
         _config(), _training_episodes(), tmp_path / "run", seed=42, maximum_updates_this_run=1
     )
 
@@ -173,12 +255,21 @@ def test_balanced_rollouts_finite_gradients_and_collapse_ablations(tmp_path: Pat
     assert result["rollouts"]["ticker_max_minus_min"] <= 1
     assert result["rollouts"]["profile_counts"]["one_mini"] == 7
     assert result["rollouts"]["profile_counts"]["ten_micros"] == 6
-    assert result["ablations"] == {
-        "reject_all_detected": True,
-        "take_all_detected": True,
-        "invalid_action_detected": True,
-        "action_collapse_detected": True,
-    }
+    assert all(
+        result["ablations"][name]
+        for name in (
+            "reject_all_detected",
+            "take_all_detected",
+            "invalid_action_detected",
+            "action_collapse_detected",
+            "reward_perturbation_detected",
+        )
+    )
+    assert set(result["ablations"]["evidence"]["reject_all_actions"]) == {0}
+    assert set(result["ablations"]["evidence"]["take_all_actions"]) == {1}
+    actor_totals = result["metrics"][-1]["actor_weight_totals"]
+    assert set(actor_totals) == set(TICKERS)
+    assert max(actor_totals.values()) - min(actor_totals.values()) < 1e-7
 
 
 def test_checkpoint_reload_and_interruption_resume_are_exact(tmp_path: Path) -> None:
@@ -186,8 +277,8 @@ def test_checkpoint_reload_and_interruption_resume_are_exact(tmp_path: Path) -> 
     episodes = _training_episodes()
     uninterrupted = tmp_path / "uninterrupted"
     resumed = tmp_path / "resumed"
-    full = train_entry_policy(config, episodes, uninterrupted, seed=42, target_updates=2)
-    partial = train_entry_policy(
+    full = _train_loaded_policy(config, episodes, uninterrupted, seed=42, target_updates=2)
+    partial = _train_loaded_policy(
         config,
         episodes,
         resumed,
@@ -198,7 +289,7 @@ def test_checkpoint_reload_and_interruption_resume_are_exact(tmp_path: Path) -> 
     assert partial["status"] == "incomplete"
     partial_state = json.loads((resumed / "state.json").read_text())
     assert partial_state["completed_timesteps"] == partial["rollouts"]["bars_replayed"]
-    final = train_entry_policy(config, episodes, resumed, seed=42, target_updates=2, resume=True)
+    final = _train_loaded_policy(config, episodes, resumed, seed=42, target_updates=2, resume=True)
 
     assert final["status"] == "complete"
     assert final["deterministic_reload_actions"] is True
@@ -225,7 +316,7 @@ def test_resume_rejects_provenance_and_all_seed_reporting_has_worst_seed(
     config = _config()
     episodes = _training_episodes()
     output = tmp_path / "resume"
-    train_entry_policy(
+    _train_loaded_policy(
         config,
         episodes,
         output,
@@ -234,7 +325,7 @@ def test_resume_rejects_provenance_and_all_seed_reporting_has_worst_seed(
         maximum_updates_this_run=1,
     )
     with pytest.raises(ProductionTrainingError, match="resume provenance mismatch"):
-        train_entry_policy(
+        _train_loaded_policy(
             config,
             replace(episodes, manifest_sha256="e" * 64),
             output,
@@ -242,6 +333,20 @@ def test_resume_rejects_provenance_and_all_seed_reporting_has_worst_seed(
             target_updates=2,
             resume=True,
         )
+    for stale_runtime in (
+        {"source": {"revision": "changed", "dirty": False, "sha256": "a" * 64}},
+        {"lock": {"sha256": "b" * 64}},
+    ):
+        stale = replace(episodes, runtime_identities=stale_runtime)
+        with pytest.raises(ProductionTrainingError, match="resume provenance mismatch"):
+            _train_loaded_policy(
+                config,
+                stale,
+                output,
+                seed=42,
+                target_updates=2,
+                resume=True,
+            )
 
     two_seed_config = replace(
         config,
@@ -252,7 +357,7 @@ def test_resume_rejects_provenance_and_all_seed_reporting_has_worst_seed(
         ),
     )
     two_seed_episodes = replace(episodes, config_sha256=two_seed_config.digest)
-    aggregate = train_policy_seeds(
+    aggregate = _train_policy_seeds_loaded(
         two_seed_config,
         two_seed_episodes,
         tmp_path / "seeds",
@@ -263,7 +368,7 @@ def test_resume_rejects_provenance_and_all_seed_reporting_has_worst_seed(
     assert aggregate["reported_seeds"] == [42, 43]
     assert aggregate["worst_seed"] in {42, 43}
     assert "best_seed" not in aggregate
-    resumed = train_policy_seeds(
+    resumed = _train_policy_seeds_loaded(
         two_seed_config,
         two_seed_episodes,
         tmp_path / "seeds",
@@ -274,13 +379,155 @@ def test_resume_rejects_provenance_and_all_seed_reporting_has_worst_seed(
     assert resumed == aggregate
 
 
+def _policy_transitions(
+    model: EntryActorCritic,
+    ticker_indices: tuple[int, ...] = (0, 0, 0, 0, 0, 0, 0, 0),
+) -> list[_Transition]:
+    observations = torch.linspace(-1.0, 1.0, len(ticker_indices) * 4).reshape(-1, 4)
+    tickers = torch.tensor(ticker_indices, dtype=torch.long)
+    profiles = torch.tensor([index % 2 for index in range(len(ticker_indices))])
+    masks = torch.ones((len(ticker_indices), 2), dtype=torch.bool)
+    actions = torch.tensor([index % 2 for index in range(len(ticker_indices))])
+    with torch.no_grad():
+        logits, values = model(observations, tickers, profiles)
+        log_probabilities = torch.distributions.Categorical(logits=logits).log_prob(actions)
+    result = []
+    for index, ticker in enumerate(ticker_indices):
+        terminal = index == len(ticker_indices) - 1 or ticker_indices[index + 1] != ticker
+        result.append(
+            _Transition(
+                observations[index].numpy(),
+                ticker,
+                int(profiles[index]),
+                int(actions[index]),
+                float(log_probabilities[index]),
+                float(values[index]),
+                masks[index].numpy(),
+                float(terminal and index % 2 == 1),
+                float(terminal and index % 2 == 0),
+                terminal,
+            )
+        )
+    return result
+
+
+def test_masked_ppo_reuses_frozen_rollout_and_clips_changed_ratios() -> None:
+    torch.manual_seed(8)
+    model = EntryActorCritic(4, PolicyVariant.SHARED_TICKER_VALUE, hidden_width=8)
+    transitions = _policy_transitions(model)
+    frozen = [item.old_log_probability for item in transitions]
+    metrics = _ppo_update(
+        model,
+        torch.optim.Adam(model.parameters(), lr=0.2),
+        ReturnNormalizers(TICKERS),
+        transitions,
+        epochs=6,
+        minibatch_size=4,
+    )
+
+    assert [item.old_log_probability for item in transitions] == frozen
+    assert metrics["ratio_non_unit_fraction"] > 0.0
+    assert metrics["ratio_max_deviation"] > 0.2
+    assert metrics["clip_fraction"] > 0.0
+    assert metrics["ppo_epochs"] == 6
+
+
+def test_shared_actor_transition_weights_equalize_rty_and_zb() -> None:
+    tickers = torch.tensor([TICKERS.index("RTY")] * 697 + [TICKERS.index("ZB")] * 93)
+    weights, totals = _actor_weights(tickers)
+
+    assert len(weights) == 790
+    assert totals["RTY"] == pytest.approx(0.5)
+    assert totals["ZB"] == pytest.approx(0.5)
+    assert float(weights[:697].sum()) == pytest.approx(float(weights[697:].sum()))
+
+
+def test_independent_actor_update_cannot_change_foreign_actor_bytes() -> None:
+    torch.manual_seed(9)
+    model = EntryActorCritic(4, PolicyVariant.INDEPENDENT_ACTOR, hidden_width=8)
+    foreign_before = [
+        parameter.detach().clone() for parameter in model.owned_actor_parameters("NQ")
+    ]
+    _ppo_update(
+        model,
+        torch.optim.Adam(model.parameters(), lr=0.05),
+        ReturnNormalizers(TICKERS),
+        _policy_transitions(model),
+        epochs=3,
+        minibatch_size=8,
+    )
+
+    assert all(
+        torch.equal(before, after)
+        for before, after in zip(foreign_before, model.owned_actor_parameters("NQ"), strict=True)
+    )
+
+
+def test_orphan_bundle_and_final_publication_resume_without_retraining(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import mantis_v2.rl_training as training
+
+    config = _config()
+    episodes = _training_episodes()
+    reference = _train_loaded_policy(
+        config, episodes, tmp_path / "reference", seed=42, target_updates=1
+    )
+    original_atomic = training._atomic_json
+    state_failed = False
+
+    def fail_state_once(path: Path, payload: dict[str, object]) -> None:
+        nonlocal state_failed
+        if path.name == "state.json" and not state_failed:
+            state_failed = True
+            raise OSError("injected crash after bundle rename")
+        original_atomic(path, payload)
+
+    monkeypatch.setattr(training, "_atomic_json", fail_state_once)
+    orphan = tmp_path / "orphan"
+    with pytest.raises(OSError, match="after bundle rename"):
+        _train_loaded_policy(config, episodes, orphan, seed=42, target_updates=1)
+    monkeypatch.setattr(training, "_atomic_json", original_atomic)
+    recovered = _train_loaded_policy(
+        config, episodes, orphan, seed=42, target_updates=1, resume=True
+    )
+    assert recovered["policy_sha256"] == reference["policy_sha256"]
+    assert recovered["optimizer_sha256"] == reference["optimizer_sha256"]
+    assert recovered["metrics"] == reference["metrics"]
+
+    metrics_failed = False
+
+    def fail_metrics_once(path: Path, payload: dict[str, object]) -> None:
+        nonlocal metrics_failed
+        if path.name == "metrics.json" and not metrics_failed:
+            metrics_failed = True
+            raise OSError("injected crash before final publication")
+        original_atomic(path, payload)
+
+    monkeypatch.setattr(training, "_atomic_json", fail_metrics_once)
+    finalizing = tmp_path / "finalizing"
+    with pytest.raises(OSError, match="before final publication"):
+        _train_loaded_policy(config, episodes, finalizing, seed=42, target_updates=1)
+    monkeypatch.setattr(training, "_atomic_json", original_atomic)
+    finalized = _train_loaded_policy(
+        config, episodes, finalizing, seed=42, target_updates=1, resume=True
+    )
+    assert finalized == reference
+    assert (finalizing / "manifest.json").is_file()
+
+
 def test_cli_exposes_production_training_seam(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     sentinel: Any = object()
     monkeypatch.setattr(cli, "load_rl_config", lambda _path: sentinel)
-    monkeypatch.setattr(cli, "load_training_episodes", lambda *_args: sentinel)
-    monkeypatch.setattr(cli, "train_policy_seeds", lambda *_args, **_kwargs: {"stage": "rl-train"})
+    called: dict[str, object] = {}
+
+    def train(config: object, manifest: Path, output: Path, **_kwargs: object) -> dict[str, str]:
+        called.update(config=config, manifest=manifest, output=output)
+        return {"stage": "rl-train"}
+
+    monkeypatch.setattr(cli, "train_policy_seeds", train)
     monkeypatch.setattr(
         "sys.argv",
         [
@@ -300,3 +547,8 @@ def test_cli_exposes_production_training_seam(
     cli.main()
 
     assert json.loads(capsys.readouterr().out) == {"stage": "rl-train"}
+    assert called == {
+        "config": sentinel,
+        "manifest": Path("training.json"),
+        "output": Path("result"),
+    }

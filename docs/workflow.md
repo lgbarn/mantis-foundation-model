@@ -511,18 +511,28 @@ schedule. The default candidate and both preregistered ablations share one seam:
 
 ```bash
 just rl-train \
-  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v9/episodes/fold-00-training-seed-42.json \
-  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v9/training/shared-ticker-value \
+  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v10/episodes/fold-00-training-seed-42.json \
+  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v10/training/shared-ticker-value \
   mantis-v2/configs/rl-entry-topstep-100k.toml \
   shared_ticker_value
 ```
 
 Use `independent_actor` or `shared_critic` only for the named architecture
-ablation. Training replays complete episodes, balances ticker/profile evidence,
-uses `gamma=1.0` with PASS=1 and BLOW cost=1 only at termination, and writes a
-checkpoint after each complete schedule cycle. Resume with a final `--resume`;
-any source, config, schedule, embedding, foundation, rule, fee, seed, fold, or
-variant mismatch fails before state is loaded.
+ablation. Training replays complete episodes, uses `gamma=1.0` with PASS=1 and
+BLOW cost=1 only at termination, freezes old policy log probabilities and
+values, and runs the configured PPO epochs and minibatches. Inverse
+transition-count weights give every ticker equal total shared-actor weight. A
+checkpoint is an immutable complete-cycle bundle; an atomic pointer selects the
+latest bundle, and resume recovers a semantically valid orphan bundle after a
+pointer crash. Resume with a final `--resume`; any source revision/dirty state,
+lock, config, schedule bytes, loaded episode collection, embedding, corpus,
+foundation, rule, fee, seed, fold, cursor, or variant mismatch fails before
+state is loaded.
+
+For a bounded mechanics qualification, append the final just argument
+`'--target-updates 1'`. This still loads every episode in the declared schedule
+and reports every configured development seed plus the worst seed, but it does
+not satisfy the 2M-step quality budget and retains `quality_claim=false`.
 
 The smoke uses the MIT-licensed, hash-locked local stack: Gymnasium 1.3.0,
 Stable-Baselines3 2.9.0, SB3-Contrib 2.9.0, and Optuna 4.9.0. No paid or hosted
