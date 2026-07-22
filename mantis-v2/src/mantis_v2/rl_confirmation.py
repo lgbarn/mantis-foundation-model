@@ -11,6 +11,7 @@ import re
 import tempfile
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -122,16 +123,32 @@ def _load_object(path: Path, description: str) -> dict[str, object]:
 def _atomic_no_overwrite(path: Path, payload: object) -> None:
     data = _canonical_bytes(payload)
     path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-    except FileExistsError as exc:
-        if path.read_bytes() == data:
-            return
-        raise ConfirmationError(f"refusing to overwrite immutable artifact: {path}") from exc
-    with os.fdopen(descriptor, "wb") as handle:
-        handle.write(data)
-        handle.flush()
-        os.fsync(handle.fileno())
+        os.fchmod(descriptor, 0o644)
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError as exc:
+            if path.read_bytes() != data:
+                raise ConfirmationError(
+                    f"refusing to overwrite immutable artifact: {path}"
+                ) from exc
+        else:
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        with suppress(FileNotFoundError):
+            os.unlink(temporary)
 
 
 def _validated_winner(path: Path) -> tuple[dict[str, object], str]:
@@ -304,27 +321,6 @@ def _validated_plan_pairs(config: RlConfig, plan: Mapping[str, object]) -> list[
     return pairs
 
 
-def _load_trained_model(
-    run_output: Path, variant: PolicyVariant, hidden_width: int, observation_width: int
-) -> tuple[EntryActorCritic, Path, str]:
-    state = _load_object(run_output / "state.json", "training state")
-    pointer = state.get("checkpoint")
-    if not isinstance(pointer, str):
-        raise ConfirmationError("training checkpoint pointer is invalid")
-    checkpoint = run_output / pointer / "checkpoint.pt"
-    bundle_path = run_output / pointer / "bundle.json"
-    bundle = _load_object(bundle_path, "training checkpoint bundle")
-    if bundle.get("checkpoint_sha256") != _sha256(checkpoint):
-        raise ConfirmationError("training checkpoint bundle mismatch")
-    payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
-    if not isinstance(payload, dict) or not isinstance(payload.get("model"), dict):
-        raise ConfirmationError("training checkpoint payload is invalid")
-    model = EntryActorCritic(observation_width, variant, hidden_width=hidden_width)
-    model.load_state_dict(cast(dict[str, object], payload["model"]))
-    model.eval()
-    return model, bundle_path, _sha256(bundle_path)
-
-
 def _validated_training_artifact(
     config: RlConfig,
     manifest_path: Path,
@@ -336,6 +332,8 @@ def _validated_training_artifact(
     schedule_sha256: str,
     target_timesteps: int,
     hyperparameters: Mapping[str, object],
+    campaign_phase: str | None = None,
+    parent_checkpoint_sha256: str | None = None,
 ) -> dict[str, object]:
     """Recursively validate a published trainer manifest, bundle, and checkpoint."""
     manifest = _load_object(manifest_path, "training manifest")
@@ -377,6 +375,8 @@ def _validated_training_artifact(
         or identities.get("seed") != seed
         or identities.get("variant") != variant
         or identities.get("ppo_hyperparameters") != dict(hyperparameters)
+        or identities.get("campaign_phase") != campaign_phase
+        or identities.get("parent_checkpoint_sha256") != parent_checkpoint_sha256
         or identities.get("partition") != "training"
         or identities.get("source_sha256") != config.upstream.source_digest
         or identities.get("dependency_lock_sha256") != config.upstream.lock_digest
@@ -391,6 +391,19 @@ def _validated_training_artifact(
         or not required_payload_fields.issubset(payload)
     ):
         raise ConfirmationError("training artifact provenance mismatch")
+    metrics = payload.get("metrics")
+    if not isinstance(metrics, list):
+        raise ConfirmationError("training checkpoint timestep metrics are invalid")
+    try:
+        actual_timesteps = _completed_timesteps(cast(list[dict[str, object]], metrics))
+    except (RuntimeError, TypeError, ValueError) as exc:
+        raise ConfirmationError("training checkpoint timestep metrics are invalid") from exc
+    if (
+        manifest.get("metrics") != metrics
+        or manifest.get("completed_timesteps") != actual_timesteps
+        or manifest.get("timestep_overshoot") != actual_timesteps - target_timesteps
+    ):
+        raise ConfirmationError("training artifact timestep provenance mismatch")
     model_state = payload.get("model")
     critic_input = (
         model_state.get("critic_trunk.0.weight") if isinstance(model_state, dict) else None
@@ -423,22 +436,68 @@ def _validated_training_artifact(
     return cast(dict[str, object], payload)
 
 
+def _completed_training_artifact(
+    config: RlConfig,
+    run_output: Path,
+    *,
+    fold: int,
+    seed: int,
+    variant: str,
+    schedule_sha256: str,
+    target_timesteps: int,
+    hyperparameters: Mapping[str, object],
+    campaign_phase: str | None = None,
+    parent_checkpoint_sha256: str | None = None,
+) -> tuple[dict[str, object], dict[str, object], Path]:
+    manifest_path = run_output / "manifest.json"
+    manifest = _load_object(manifest_path, "training manifest")
+    state = _load_object(run_output / "state.json", "training state")
+    pointer = state.get("checkpoint")
+    if not isinstance(pointer, str) or not re.fullmatch(r"checkpoints/update-[0-9]{6}", pointer):
+        raise ConfirmationError("training checkpoint pointer is invalid")
+    bundle_path = run_output / pointer / "bundle.json"
+    payload = _validated_training_artifact(
+        config,
+        manifest_path,
+        bundle_path,
+        fold=fold,
+        seed=seed,
+        variant=variant,
+        schedule_sha256=schedule_sha256,
+        target_timesteps=target_timesteps,
+        hyperparameters=hyperparameters,
+        campaign_phase=campaign_phase,
+        parent_checkpoint_sha256=parent_checkpoint_sha256,
+    )
+    if (
+        state.get("schema_version") != 2
+        or state.get("status") != "complete"
+        or state.get("identities") != manifest.get("identities")
+        or state.get("completed_timesteps") != manifest.get("completed_timesteps")
+        or state.get("minimum_target_timesteps") != target_timesteps
+        or state.get("completed_updates") != payload.get("update")
+        or state.get("episode_cursor") != payload.get("episode_cursor")
+    ):
+        raise ConfirmationError("completed training state provenance mismatch")
+    return manifest, payload, bundle_path
+
+
 def _inference_is_finite(*values: object) -> bool:
     return all(bool(np.isfinite(np.asarray(value)).all()) for value in values)
 
 
-def _architecture_action_diagnostics(
+def _policy_replay_diagnostics(
     model: EntryActorCritic,
     probes: Sequence[tuple[np.ndarray, np.ndarray, int, int]],
 ) -> dict[str, object]:
     if not probes:
-        raise ConfirmationError("architecture replay has no policy probes")
+        raise ConfirmationError("policy replay has no policy probes")
     observations = torch.from_numpy(np.stack([probe[0] for probe in probes]))
     masks = torch.from_numpy(np.stack([probe[1] for probe in probes]))
     tickers = torch.tensor([probe[2] for probe in probes], dtype=torch.long)
     profiles = torch.tensor([probe[3] for probe in probes], dtype=torch.long)
     if masks.dtype is not torch.bool or not bool(masks.any(dim=1).all()):
-        raise ConfirmationError("architecture replay action mask is invalid")
+        raise ConfirmationError("policy replay action mask is invalid")
     with torch.no_grad():
         logits, values = model(observations, tickers, profiles)
         masked_logits = logits.masked_fill(~masks, torch.finfo(logits.dtype).min)
@@ -448,7 +507,7 @@ def _architecture_action_diagnostics(
             probabilities * probabilities.clamp_min(torch.finfo(logits.dtype).tiny).log()
         ).sum(dim=1)
     if not _inference_is_finite(logits.numpy(), values.numpy(), probabilities.numpy()):
-        raise ConfirmationError("architecture replay diagnostics are non-finite")
+        raise ConfirmationError("policy replay diagnostics are non-finite")
     enter_rate = float((actions == 1).float().mean())
     mean_entropy = float(entropies.mean())
     action_count = len(set(actions.tolist()))
@@ -461,6 +520,82 @@ def _architecture_action_diagnostics(
         "take_all_detected": enter_rate == 1.0,
         "action_collapse_detected": action_count == 1 or mean_entropy < 0.05,
     }
+
+
+def _deterministic_policy_replay(
+    config: RlConfig,
+    loaded: LoadedEpisodes,
+    raw_episodes: Sequence[object],
+    model: EntryActorCritic,
+    seed: int,
+) -> tuple[list[dict[str, object]], dict[str, object], dict[str, int]]:
+    if len(raw_episodes) != len(loaded.episodes):
+        raise ConfirmationError("policy replay episode identities are invalid")
+    rows: list[dict[str, object]] = []
+    probes: list[tuple[np.ndarray, np.ndarray, int, int]] = []
+    outcomes = {"PASS": 0, "BLOW": 0, "TIMEOUT": 0}
+    for index, (episode, identity) in enumerate(zip(loaded.episodes, raw_episodes, strict=True)):
+        environment = TopstepEntryEnvironment(config, episode)
+        observation, _ = environment.reset(seed=seed)
+        probes.append(
+            (
+                observation.vector.copy(),
+                environment.action_mask().copy(),
+                TICKERS.index(episode.ticker),
+                PROFILES.index(episode.profile),
+            )
+        )
+        while True:
+            if not _inference_is_finite(observation.vector):
+                raise ConfirmationError("policy replay observation is non-finite")
+            mask = environment.action_mask()
+            action = 0
+            if bool(mask[1]):
+                with torch.no_grad():
+                    logits, values = model(
+                        torch.from_numpy(observation.vector.copy()).unsqueeze(0),
+                        torch.tensor([TICKERS.index(episode.ticker)]),
+                        torch.tensor([PROFILES.index(episode.profile)]),
+                    )
+                    if not _inference_is_finite(logits.numpy(), values.numpy()):
+                        raise ConfirmationError("policy replay inference is non-finite")
+                    action = int(
+                        logits.masked_fill(
+                            ~torch.from_numpy(mask).unsqueeze(0),
+                            torch.finfo(logits.dtype).min,
+                        )
+                        .argmax(dim=1)
+                        .item()
+                    )
+            observation, reward, terminated, truncated, info = environment.step(action)
+            if not _inference_is_finite(reward, observation.vector):
+                raise ConfirmationError("policy replay transition is non-finite")
+            if terminated or truncated:
+                outcome = str(info["status"])
+                if outcome not in outcomes:
+                    raise ConfirmationError("policy replay outcome is invalid")
+                outcomes[outcome] += 1
+                break
+        iso = episode.bars[0].timestamp.isocalendar()
+        number = identity.get("number") if isinstance(identity, dict) else index
+        rows.append(
+            {
+                "fold": loaded.fold,
+                "seed": seed,
+                "ticker": episode.ticker,
+                "profile": episode.profile,
+                "regime": _calendar_regime(f"{iso.year}-W{iso.week:02d}"),
+                "calendar_block": f"{iso.year}-W{iso.week:02d}",
+                "episode_id": str(number),
+                "outcome": outcome,
+                "finite": True,
+                "action_collapsed": False,
+            }
+        )
+    diagnostics = _policy_replay_diagnostics(model, probes)
+    for row in rows:
+        row["action_collapsed"] = diagnostics["action_collapse_detected"]
+    return rows, diagnostics, outcomes
 
 
 def _replay_architecture_rows(
@@ -496,66 +631,10 @@ def _replay_architecture_rows(
     )
     model.load_state_dict(cast(dict[str, object], model_state), strict=True)
     model.eval()
-    rows: list[dict[str, object]] = []
-    probes: list[tuple[np.ndarray, np.ndarray, int, int]] = []
-    for index, (episode, identity) in enumerate(zip(loaded.episodes, raw_episodes, strict=True)):
-        environment = TopstepEntryEnvironment(config, episode)
-        observation, _ = environment.reset(seed=cast(int, report["seed"]))
-        probes.append(
-            (
-                observation.vector.copy(),
-                environment.action_mask().copy(),
-                TICKERS.index(episode.ticker),
-                PROFILES.index(episode.profile),
-            )
-        )
-        while True:
-            if not _inference_is_finite(observation.vector):
-                raise ConfirmationError("architecture replay observation is non-finite")
-            mask = environment.action_mask()
-            action = 0
-            if bool(mask[1]):
-                with torch.no_grad():
-                    logits, values = model(
-                        torch.from_numpy(observation.vector.copy()).unsqueeze(0),
-                        torch.tensor([TICKERS.index(episode.ticker)]),
-                        torch.tensor([PROFILES.index(episode.profile)]),
-                    )
-                    if not _inference_is_finite(logits.numpy(), values.numpy()):
-                        raise ConfirmationError("architecture replay inference is non-finite")
-                    action = int(
-                        logits.masked_fill(
-                            ~torch.from_numpy(mask).unsqueeze(0), torch.finfo(logits.dtype).min
-                        )
-                        .argmax(dim=1)
-                        .item()
-                    )
-            observation, reward, terminated, truncated, info = environment.step(action)
-            if not _inference_is_finite(reward, observation.vector):
-                raise ConfirmationError("architecture replay transition is non-finite")
-            if terminated or truncated:
-                break
-        iso = episode.bars[0].timestamp.isocalendar()
-        number = identity.get("number") if isinstance(identity, dict) else index
-        rows.append(
-            {
-                "variant": report["variant"],
-                "fold": loaded.fold,
-                "seed": report["seed"],
-                "ticker": episode.ticker,
-                "profile": episode.profile,
-                "regime": _calendar_regime(f"{iso.year}-W{iso.week:02d}"),
-                "calendar_block": f"{iso.year}-W{iso.week:02d}",
-                "episode_id": str(number),
-                "outcome": str(info["status"]),
-                "finite": True,
-                "action_collapsed": False,
-            }
-        )
-    diagnostics = _architecture_action_diagnostics(model, probes)
-    for row in rows:
-        row["action_collapsed"] = diagnostics["action_collapse_detected"]
-    return rows, diagnostics
+    base_rows, diagnostics, _outcomes = _deterministic_policy_replay(
+        config, loaded, raw_episodes, model, cast(int, report["seed"])
+    )
+    return [{"variant": report["variant"], **row} for row in base_rows], diagnostics
 
 
 def _validated_architecture_replay(
@@ -610,68 +689,10 @@ def _evaluate_architecture_attempt(
     variant: PolicyVariant,
     seed: int,
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    probes: list[tuple[np.ndarray, np.ndarray, int, int]] = []
-    for index, (episode, identity) in enumerate(zip(loaded.episodes, raw_episodes, strict=True)):
-        environment = TopstepEntryEnvironment(config, episode)
-        observation, _ = environment.reset(seed=seed)
-        probes.append(
-            (
-                observation.vector.copy(),
-                environment.action_mask().copy(),
-                TICKERS.index(episode.ticker),
-                PROFILES.index(episode.profile),
-            )
-        )
-        while True:
-            if not _inference_is_finite(observation.vector):
-                raise ConfirmationError("architecture validation observation is non-finite")
-            mask = environment.action_mask()
-            action = 0
-            if bool(mask[1]):
-                with torch.no_grad():
-                    logits, values = model(
-                        torch.from_numpy(observation.vector.copy()).unsqueeze(0),
-                        torch.tensor([TICKERS.index(episode.ticker)]),
-                        torch.tensor([PROFILES.index(episode.profile)]),
-                    )
-                    if not _inference_is_finite(logits.numpy(), values.numpy()):
-                        raise ConfirmationError("architecture validation inference is non-finite")
-                    action = int(
-                        logits.masked_fill(
-                            ~torch.from_numpy(mask).unsqueeze(0),
-                            torch.finfo(logits.dtype).min,
-                        )
-                        .argmax(dim=1)
-                        .item()
-                    )
-            observation, reward, terminated, truncated, info = environment.step(action)
-            if not _inference_is_finite(reward, observation.vector):
-                raise ConfirmationError("architecture validation transition is non-finite")
-            if terminated or truncated:
-                break
-        timestamp = episode.bars[0].timestamp
-        iso = timestamp.isocalendar()
-        episode_number = identity.get("number") if isinstance(identity, dict) else index
-        rows.append(
-            {
-                "variant": variant.value,
-                "fold": loaded.fold,
-                "seed": seed,
-                "ticker": episode.ticker,
-                "profile": episode.profile,
-                "regime": _calendar_regime(f"{iso.year}-W{iso.week:02d}"),
-                "calendar_block": f"{iso.year}-W{iso.week:02d}",
-                "episode_id": str(episode_number),
-                "outcome": str(info["status"]),
-                "finite": True,
-                "action_collapsed": False,
-            }
-        )
-    diagnostics = _architecture_action_diagnostics(model, probes)
-    for row in rows:
-        row["action_collapsed"] = diagnostics["action_collapse_detected"]
-    return rows, diagnostics
+    base_rows, diagnostics, _outcomes = _deterministic_policy_replay(
+        config, loaded, raw_episodes, model, seed
+    )
+    return [{"variant": variant.value, **row} for row in base_rows], diagnostics
 
 
 def run_architecture_ablation(
@@ -775,11 +796,28 @@ def run_architecture_ablation(
                     )
                     raise failure
                 try:
-                    first = TopstepEntryEnvironment(config, loaded.episodes[0])
-                    observation, _ = first.reset(seed=seed)
-                    model, checkpoint_bundle_path, checkpoint_bundle_sha256 = _load_trained_model(
-                        run_output, variant, hyperparameters.hidden_width, len(observation.vector)
+                    trained, checkpoint_payload, checkpoint_bundle_path = (
+                        _completed_training_artifact(
+                            config,
+                            run_output,
+                            fold=fold,
+                            seed=seed,
+                            variant=variant.value,
+                            schedule_sha256=cast(str, pair["training_manifest_sha256"]),
+                            target_timesteps=config.training.development_timesteps_per_seed,
+                            hyperparameters=asdict(hyperparameters),
+                        )
                     )
+                    model_state = cast(dict[str, object], checkpoint_payload["model"])
+                    critic_input = cast(torch.Tensor, model_state["critic_trunk.0.weight"])
+                    model = EntryActorCritic(
+                        int(critic_input.shape[1]) - 10,
+                        variant,
+                        hidden_width=hyperparameters.hidden_width,
+                    )
+                    model.load_state_dict(model_state, strict=True)
+                    model.eval()
+                    checkpoint_bundle_sha256 = _sha256(checkpoint_bundle_path)
                 except Exception as error:
                     _record_architecture_failure(
                         ledger_path, attempt_number, fold, variant, seed, "checkpoint", error
@@ -1504,6 +1542,13 @@ def _result_passed(result: Mapping[str, object]) -> bool:
         return False
     if not isinstance(checkpoint, dict):
         return False
+    checkpoint_metrics = checkpoint.get("metrics")
+    if not isinstance(checkpoint_metrics, list):
+        return False
+    try:
+        actual_timesteps = _completed_timesteps(cast(list[dict[str, object]], checkpoint_metrics))
+    except (RuntimeError, TypeError, ValueError):
+        return False
     endpoint = {
         "model_sha256": _canonical_digest(checkpoint.get("model")),
         "optimizer_sha256": _canonical_digest(checkpoint.get("optimizer")),
@@ -1518,6 +1563,14 @@ def _result_passed(result: Mapping[str, object]) -> bool:
         and manifest.get("stage") == "rl-train"
         and manifest.get("status") == "complete"
         and manifest.get("sealed_holdout_accessed") is False
+        and type(result.get("completed_timesteps")) is int
+        and manifest.get("completed_timesteps") == result.get("completed_timesteps")
+        and actual_timesteps == result.get("completed_timesteps")
+        and type(manifest.get("minimum_target_timesteps")) is int
+        and manifest.get("timestep_overshoot")
+        == cast(int, manifest["completed_timesteps"])
+        - cast(int, manifest["minimum_target_timesteps"])
+        and manifest.get("metrics") == checkpoint.get("metrics")
         and bundle.get("schema_version") == 3
         and bundle.get("checkpoint_sha256") == _sha256(checkpoint_path)
         and bundle.get("checkpoint_sha256") == result.get("artifact_sha256")
@@ -1543,8 +1596,29 @@ def _result_passed(result: Mapping[str, object]) -> bool:
 
 
 def _lineage_passed(request: ConfirmationRequest, result: Mapping[str, object]) -> bool:
+    manifest_path = result.get("training_manifest_path")
+    if not isinstance(manifest_path, str):
+        return False
+    try:
+        manifest = _load_object(Path(manifest_path), "training manifest")
+    except ConfirmationError:
+        return False
+    identities = manifest.get("identities")
+    completed_timesteps = result.get("completed_timesteps")
+    if (
+        not isinstance(identities, dict)
+        or type(completed_timesteps) is not int
+        or completed_timesteps < request.timesteps
+        or manifest.get("completed_timesteps") != completed_timesteps
+        or manifest.get("minimum_target_timesteps") != request.timesteps
+        or manifest.get("timestep_overshoot") != completed_timesteps - request.timesteps
+        or identities.get("target_timesteps") != request.timesteps
+        or identities.get("campaign_phase") != request.phase
+        or identities.get("parent_checkpoint_sha256") != request.parent_artifact_sha256
+    ):
+        return False
     if request.phase == "development":
-        return result.get("completed_timesteps") == request.timesteps
+        return request.parent_artifact_sha256 is None
     if request.phase == "confirmation":
         milestone = result.get("milestone_2m_sha256")
         if not isinstance(milestone, str) or len(milestone) != 64:
@@ -1553,18 +1627,11 @@ def _lineage_passed(request: ConfirmationRequest, result: Mapping[str, object]) 
             return (
                 milestone == request.parent_artifact_sha256
                 and result.get("lineage_parent_sha256") == request.parent_artifact_sha256
-                and result.get("completed_timesteps") == request.timesteps
             )
-        return result.get("completed_timesteps") == request.timesteps
+        return result.get("lineage_parent_sha256") is None
     if request.phase == "fresh_5m_reference":
-        return (
-            request.parent_artifact_sha256 is None
-            and result.get("completed_timesteps") == request.timesteps
-        )
-    return (
-        result.get("lineage_parent_sha256") == request.parent_artifact_sha256
-        and result.get("completed_timesteps") == request.timesteps
-    )
+        return request.parent_artifact_sha256 is None
+    return result.get("lineage_parent_sha256") == request.parent_artifact_sha256
 
 
 def _seed_aggregate(
@@ -2203,11 +2270,7 @@ def run_seed_confirmation(
                 raise ConfirmationError("confirmation attempt provenance mismatch")
             request = recorded.get("request")
             result = recorded.get("result")
-            if (
-                not isinstance(request, dict)
-                or not isinstance(result, dict)
-                or not _result_passed(result)
-            ):
+            if not isinstance(request, dict) or not isinstance(result, dict):
                 raise ConfirmationError("a recorded seed attempt failed; candidate is ended")
             expected_phase, expected_fold, expected_seed, expected_timesteps = expected_attempts[
                 index
@@ -2267,6 +2330,8 @@ def run_seed_confirmation(
                 recorded_request, result
             ):
                 raise ConfirmationError("confirmation resume lineage mismatch")
+            if not _result_passed(result):
+                raise ConfirmationError("a recorded seed attempt failed; candidate is ended")
             completed_keys.add(
                 (
                     cast(str, request["phase"]),
@@ -2485,68 +2550,28 @@ def _production_campaign_runner(
         hyperparameters: PpoHyperparameters,
         phase: str,
         report_path: Path,
-        *,
-        action_collapsed: bool,
-    ) -> tuple[dict[str, int], Path]:
+    ) -> tuple[dict[str, int], Path, dict[str, object]]:
         _training_manifest, validation_manifest, loaded, raw_episodes = contexts[request.fold]
         payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
         if not isinstance(payload, dict):
             raise ConfirmationError("campaign checkpoint payload is invalid")
-        first = TopstepEntryEnvironment(config, loaded.episodes[0])
-        observation, _ = first.reset(seed=request.seed)
-        model = EntryActorCritic(
-            len(observation.vector), request.variant, hidden_width=hyperparameters.hidden_width
+        model_state = payload.get("model")
+        critic_input = (
+            model_state.get("critic_trunk.0.weight") if isinstance(model_state, dict) else None
         )
-        model.load_state_dict(cast(dict[str, object], payload["model"]))
+        if not isinstance(critic_input, torch.Tensor):
+            raise ConfirmationError("campaign checkpoint model schema is invalid")
+        model = EntryActorCritic(
+            int(critic_input.shape[1]) - 10,
+            request.variant,
+            hidden_width=hyperparameters.hidden_width,
+        )
+        model.load_state_dict(cast(dict[str, object], model_state), strict=True)
         model.eval()
-        outcomes = {"PASS": 0, "BLOW": 0, "TIMEOUT": 0}
-        rows = []
-        for index, (episode, identity) in enumerate(
-            zip(loaded.episodes, raw_episodes, strict=True)
-        ):
-            environment = TopstepEntryEnvironment(config, episode)
-            observation, _ = environment.reset(seed=request.seed)
-            while True:
-                if not _inference_is_finite(observation.vector):
-                    raise ConfirmationError("campaign validation observation is non-finite")
-                mask = environment.action_mask()
-                action = 0
-                if bool(mask[1]):
-                    with torch.no_grad():
-                        logits, values = model(
-                            torch.from_numpy(observation.vector.copy()).unsqueeze(0),
-                            torch.tensor([TICKERS.index(episode.ticker)]),
-                            torch.tensor([PROFILES.index(episode.profile)]),
-                        )
-                        if not _inference_is_finite(logits.numpy(), values.numpy()):
-                            raise ConfirmationError("campaign validation inference is non-finite")
-                        masked = logits.masked_fill(
-                            ~torch.from_numpy(mask).unsqueeze(0), torch.finfo(logits.dtype).min
-                        )
-                        action = int(masked.argmax(dim=1).item())
-                observation, reward, terminated, truncated, info = environment.step(action)
-                if not _inference_is_finite(reward, observation.vector):
-                    raise ConfirmationError("campaign validation transition is non-finite")
-                if terminated or truncated:
-                    outcome = str(info["status"])
-                    outcomes[outcome] += 1
-                    break
-            iso = episode.bars[0].timestamp.isocalendar()
-            number = identity.get("number") if isinstance(identity, dict) else index
-            rows.append(
-                {
-                    "fold": loaded.fold,
-                    "seed": request.seed,
-                    "ticker": episode.ticker,
-                    "profile": episode.profile,
-                    "regime": _calendar_regime(f"{iso.year}-W{iso.week:02d}"),
-                    "calendar_block": f"{iso.year}-W{iso.week:02d}",
-                    "episode_id": str(number),
-                    "outcome": outcome,
-                    "finite": True,
-                    "action_collapsed": action_collapsed,
-                }
-            )
+        rows, diagnostics, outcomes = _deterministic_policy_replay(
+            config, loaded, raw_episodes, model, request.seed
+        )
+        action_collapsed = diagnostics["action_collapse_detected"] is True
         validation_payload = {
             "schema_version": 1,
             "stage": "rl-campaign-validation",
@@ -2558,13 +2583,14 @@ def _production_campaign_runner(
             "validation_manifest_sha256": _sha256(validation_manifest),
             "outcomes": outcomes,
             "rows": rows,
+            "policy_diagnostics": diagnostics,
             "finite": True,
             "action_collapsed": action_collapsed,
             "test_accessed": False,
             "sealed_holdout_accessed": False,
         }
         _atomic_no_overwrite(report_path, validation_payload)
-        return outcomes, report_path
+        return outcomes, report_path, diagnostics
 
     def runner(request: ConfirmationRequest) -> Mapping[str, object]:
         training_manifest, _validation_manifest, _loaded, _raw_episodes = contexts[request.fold]
@@ -2592,37 +2618,45 @@ def _production_campaign_runner(
             if _sha256(parent_checkpoint) != request.parent_artifact_sha256:
                 raise ConfirmationError("campaign parent checkpoint digest mismatch")
         hyperparameters = PpoHyperparameters.from_search(request.parameters)
-        trained = train_entry_policy(
+        training_output_manifest = request.output / "manifest.json"
+        if not training_output_manifest.is_file():
+            train_entry_policy(
+                config,
+                training_manifest,
+                request.output,
+                seed=request.seed,
+                variant=request.variant,
+                target_timesteps=request.timesteps,
+                hyperparameters=hyperparameters,
+                campaign_phase=request.phase,
+                parent_checkpoint=parent_checkpoint,
+                resume=request.resume and request.output.exists(),
+            )
+        trained, payload, bundle = _completed_training_artifact(
             config,
-            training_manifest,
             request.output,
+            fold=request.fold,
             seed=request.seed,
             variant=request.variant,
+            schedule_sha256=request.training_manifest_sha256,
             target_timesteps=request.timesteps,
-            hyperparameters=hyperparameters,
+            hyperparameters=asdict(hyperparameters),
             campaign_phase=request.phase,
-            parent_checkpoint=parent_checkpoint,
-            resume=request.resume and request.output.exists(),
+            parent_checkpoint_sha256=request.parent_artifact_sha256,
         )
         if trained.get("status") != "complete":
             raise ConfirmationError("campaign training is incomplete")
         state = _load_object(request.output / "state.json", "campaign training state")
         checkpoint = request.output / cast(str, state["checkpoint"]) / "checkpoint.pt"
-        bundle = checkpoint.parent / "bundle.json"
-        diagnostics = trained.get("policy_diagnostics")
-        collapsed = (
-            diagnostics.get("action_collapse_detected") if isinstance(diagnostics, dict) else True
-        )
         validation_report = request.output / "validation.json"
-        outcomes, validation_report = evaluate(
+        outcomes, validation_report, diagnostics = evaluate(
             checkpoint,
             request,
             hyperparameters,
             request.phase,
             validation_report,
-            action_collapsed=collapsed is True,
         )
-        payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+        collapsed = diagnostics["action_collapse_detected"] is True
         endpoint_bundle = {
             "model_sha256": _canonical_digest(payload["model"]),
             "optimizer_sha256": _canonical_digest(payload["optimizer"]),
@@ -2631,7 +2665,6 @@ def _production_campaign_runner(
             "controller_sha256": _canonical_digest(payload["constraint_controller"]),
             "metrics_sha256": _canonical_digest(payload["metrics"]),
         }
-        training_output_manifest = request.output / "manifest.json"
         milestone_sha256 = request.parent_artifact_sha256
         milestone_checkpoint_path = parent_checkpoint
         milestone_validation_report: Path | None = None
@@ -2670,7 +2703,6 @@ def _production_campaign_runner(
                         hyperparameters,
                         "milestone_2m",
                         milestone_validation_report,
-                        action_collapsed=collapsed is True,
                     )
                     break
             if milestone_sha256 is None:
@@ -2684,7 +2716,7 @@ def _production_campaign_runner(
             "pass_rate": outcomes["PASS"] / sum(outcomes.values()),
             "learning_curve_improving": None,
             "artifact_sha256": _sha256(checkpoint),
-            "completed_timesteps": request.timesteps,
+            "completed_timesteps": trained["completed_timesteps"],
             "milestone_2m_sha256": milestone_sha256 or _sha256(checkpoint),
             "lineage_parent_sha256": request.parent_artifact_sha256,
             "endpoint_bundle": endpoint_bundle,

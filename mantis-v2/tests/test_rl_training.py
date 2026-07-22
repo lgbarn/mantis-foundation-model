@@ -206,38 +206,52 @@ def test_real_production_campaign_adapter_trains_and_replays_validation(
         campaign,
     )
     output = campaign / "runs" / "fold-0" / "development" / "seed-42"
-    result = runner(
-        ConfirmationRequest(
-            phase="development",
-            fold=0,
-            training_manifest_sha256=training_sha256,
-            validation_manifest_sha256=validation_sha256,
-            seed=42,
-            timesteps=26,
-            variant=PolicyVariant.SHARED_TICKER_VALUE.value,
-            parameters={
-                "learning_rate": 0.0003,
-                "rollout_length": 14,
-                "batch_size": 256,
-                "gae_lambda": 0.95,
-                "clip_range": 0.2,
-                "entropy_coefficient": 0.01,
-                "value_loss_coefficient": 0.5,
-                "max_grad_norm": 0.5,
-                "hidden_width": 64,
-            },
-            candidate_sha256="c" * 64,
-            output=output,
-            resume=False,
-            parent_artifact_sha256=None,
-            required_milestone_timesteps=26,
-        )
+    request = ConfirmationRequest(
+        phase="development",
+        fold=0,
+        training_manifest_sha256=training_sha256,
+        validation_manifest_sha256=validation_sha256,
+        seed=42,
+        timesteps=26,
+        variant=PolicyVariant.SHARED_TICKER_VALUE.value,
+        parameters={
+            "learning_rate": 0.0003,
+            "rollout_length": 14,
+            "batch_size": 256,
+            "gae_lambda": 0.95,
+            "clip_range": 0.2,
+            "entropy_coefficient": 0.01,
+            "value_loss_coefficient": 0.5,
+            "max_grad_norm": 0.5,
+            "hidden_width": 64,
+        },
+        candidate_sha256="c" * 64,
+        output=output,
+        resume=False,
+        parent_artifact_sha256=None,
+        required_milestone_timesteps=26,
     )
+    result = runner(request)
+    Path(result["validation_report_path"]).unlink()
+    monkeypatch.setattr(
+        rl_confirmation,
+        "train_entry_policy",
+        lambda *_args, **_kwargs: pytest.fail("completed campaign training was repeated"),
+    )
+    recovered = runner(replace(request, resume=True))
+    assert recovered == result
+    assert not (campaign / "ledger").exists()
 
-    report = json.loads(Path(result["validation_report_path"]).read_text())
+    report = json.loads(Path(recovered["validation_report_path"]).read_text())
+    manifest = json.loads(Path(recovered["training_manifest_path"]).read_text())
     assert result["status"] == "complete"
     assert result["finite"] is True
-    assert result["completed_timesteps"] == 26
+    assert result["completed_timesteps"] == manifest["completed_timesteps"] == 48
+    assert manifest["timestep_overshoot"] == 22
+    assert rl_confirmation._lineage_passed(request, result)
+    assert not rl_confirmation._lineage_passed(
+        request, {**result, "completed_timesteps": request.timesteps}
+    )
     assert len(report["rows"]) == len(episodes.episodes)
     assert report["test_accessed"] is False
     assert Path(result["checkpoint_bundle_path"]).is_file()

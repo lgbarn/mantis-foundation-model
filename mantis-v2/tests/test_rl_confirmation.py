@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -46,6 +47,29 @@ def _stub_large_architecture_replay(monkeypatch: pytest.MonkeyPatch) -> None:
 def _write(path: Path, value: object) -> Path:
     path.write_text(json.dumps(value, sort_keys=True))
     return path
+
+
+def test_atomic_no_overwrite_never_exposes_partial_final_path_and_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "artifact.json"
+    real_link = os.link
+
+    def interrupt_before_publish(_source: str, _target: Path) -> None:
+        assert not target.exists()
+        raise KeyboardInterrupt("injected publish interruption")
+
+    monkeypatch.setattr(os, "link", interrupt_before_publish)
+    with pytest.raises(KeyboardInterrupt, match="injected publish interruption"):
+        rl_confirmation._atomic_no_overwrite(target, {"status": "complete"})
+    assert not target.exists()
+
+    monkeypatch.setattr(os, "link", real_link)
+    rl_confirmation._atomic_no_overwrite(target, {"status": "complete"})
+    rl_confirmation._atomic_no_overwrite(target, {"status": "complete"})
+    assert json.loads(target.read_text()) == {"status": "complete"}
+    with pytest.raises(ConfirmationError, match="refusing to overwrite"):
+        rl_confirmation._atomic_no_overwrite(target, {"status": "different"})
 
 
 def _calendar_quarter(year: int, week: int) -> str:
@@ -182,6 +206,14 @@ def _evidence(path: Path, winner: Path, *, candidate_passes: int = 9) -> Path:
                 "source_sha256": config.upstream.source_digest,
                 "dependency_lock_sha256": config.upstream.lock_digest,
             }
+            learning_curve = [
+                {
+                    "update": 1,
+                    "rollouts": {
+                        "policy_decisions": config.training.development_timesteps_per_seed
+                    },
+                }
+            ]
             checkpoint_payload = {
                 "schema_version": 3,
                 "identities": identities,
@@ -194,7 +226,7 @@ def _evidence(path: Path, winner: Path, *, candidate_passes: int = 9) -> Path:
                 "normalizers": {},
                 "constraint_controller": {},
                 "rng": {"torch": torch.zeros(1, dtype=torch.uint8)},
-                "metrics": [{"timesteps": 2_000_000, "pass_rate": 0.8}],
+                "metrics": learning_curve,
             }
             torch.save(checkpoint_payload, checkpoint)
             bundle = checkpoint.parent / "bundle.json"
@@ -222,6 +254,8 @@ def _evidence(path: Path, winner: Path, *, candidate_passes: int = 9) -> Path:
                     "deterministic_reload_actions": True,
                     "minimum_target_timesteps": config.training.development_timesteps_per_seed,
                     "completed_timesteps": config.training.development_timesteps_per_seed,
+                    "timestep_overshoot": 0,
+                    "metrics": learning_curve,
                     "ppo_hyperparameters": hyperparameters,
                     "identities": identities,
                     "sealed_holdout_accessed": False,
@@ -249,7 +283,7 @@ def _evidence(path: Path, winner: Path, *, candidate_passes: int = 9) -> Path:
                 ).hexdigest(),
                 "partition": "validation",
                 "rows": report_rows,
-                "learning_curve": [{"timesteps": 2_000_000, "pass_rate": 0.8}],
+                "learning_curve": learning_curve,
                 "policy_diagnostics": {"action_collapse_detected": False},
                 "test_accessed": False,
                 "sealed_holdout_accessed": False,
@@ -284,10 +318,14 @@ def _evidence(path: Path, winner: Path, *, candidate_passes: int = 9) -> Path:
 def _campaign_result(request) -> dict[str, object]:
     request.output.mkdir(parents=True, exist_ok=True)
     identities = {
+        "completion_mode": "production_timesteps",
+        "target_timesteps": request.timesteps,
+        "target_updates": None,
         "fold": request.fold,
         "seed": request.seed,
         "variant": request.variant,
         "campaign_phase": request.phase,
+        "parent_checkpoint_sha256": request.parent_artifact_sha256,
     }
     components = {
         "model": {"weight": torch.zeros(1)},
@@ -295,7 +333,7 @@ def _campaign_result(request) -> dict[str, object]:
         "rng": {"torch": torch.zeros(1, dtype=torch.uint8)},
         "normalizers": {},
         "constraint_controller": {},
-        "metrics": [{"completed_timesteps": request.timesteps}],
+        "metrics": [{"rollouts": {"policy_decisions": request.timesteps}}],
     }
     checkpoint_payload = {
         "schema_version": 3,
@@ -324,6 +362,10 @@ def _campaign_result(request) -> dict[str, object]:
             "stage": "rl-train",
             "status": "complete",
             "identities": identities,
+            "completed_timesteps": request.timesteps,
+            "minimum_target_timesteps": request.timesteps,
+            "timestep_overshoot": 0,
+            "metrics": components["metrics"],
             "sealed_holdout_accessed": False,
         },
     )
@@ -669,6 +711,13 @@ def test_architecture_ablation_resumes_completed_attempt_ledgers(
         _write(output / "manifest.json", result)
         return result
 
+    def fake_completed(_config, run_output, **_kwargs):
+        manifest = json.loads((run_output / "manifest.json").read_text())
+        state = json.loads((run_output / "state.json").read_text())
+        bundle = run_output / state["checkpoint"] / "bundle.json"
+        payload = torch.load(bundle.parent / "checkpoint.pt", weights_only=True)
+        return manifest, payload, bundle
+
     monkeypatch.setattr(
         rl_confirmation,
         "load_episode_manifest",
@@ -676,6 +725,7 @@ def test_architecture_ablation_resumes_completed_attempt_ledgers(
     )
     monkeypatch.setattr(rl_confirmation, "TopstepEntryEnvironment", FakeEnvironment)
     monkeypatch.setattr(rl_confirmation, "train_entry_policy", fake_train)
+    monkeypatch.setattr(rl_confirmation, "_completed_training_artifact", fake_completed)
     monkeypatch.setattr(rl_confirmation, "_validated_rows", lambda *_args: ([], "0" * 64))
     validation_path = Path(
         json.loads(plan_path.read_text())["manifest_pairs"][0]["validation_manifest_path"]
@@ -704,6 +754,34 @@ def test_architecture_ablation_resumes_completed_attempt_ledgers(
 
     assert len(calls) == 15
     assert len(resumed["reports"]) == 15
+
+    crash_output = tmp_path / "crash-ablation"
+    real_evaluate = rl_confirmation._evaluate_architecture_attempt
+    monkeypatch.setattr(
+        rl_confirmation,
+        "_evaluate_architecture_attempt",
+        lambda *_args: (_ for _ in ()).throw(KeyboardInterrupt("validation crash")),
+    )
+    monkeypatch.setattr(rl_confirmation, "train_entry_policy", fake_train)
+    with pytest.raises(KeyboardInterrupt, match="validation crash"):
+        run_architecture_ablation(config, replacement, crash_output)
+    first_run = crash_output / "runs" / "fold-0" / PolicyVariant.INDEPENDENT_ACTOR.value / "seed-42"
+    assert (first_run / "manifest.json").is_file()
+    assert not (crash_output / "ledger" / "attempt-0001.json").exists()
+
+    monkeypatch.setattr(rl_confirmation, "_evaluate_architecture_attempt", real_evaluate)
+
+    def stop_after_recovery(_config, _training_path, run_output, **_kwargs):
+        if run_output == first_run:
+            pytest.fail("completed architecture training was repeated")
+        raise KeyboardInterrupt("stop after recovered attempt")
+
+    monkeypatch.setattr(rl_confirmation, "train_entry_policy", stop_after_recovery)
+    with pytest.raises(KeyboardInterrupt, match="stop after recovered attempt"):
+        run_architecture_ablation(config, replacement, crash_output, resume=True)
+    recovered_ledger = json.loads((crash_output / "ledger" / "attempt-0001.json").read_text())
+    assert recovered_ledger["status"] == "complete"
+    assert not (crash_output / "ledger" / "attempt-0002.json").exists()
 
     failed_output = tmp_path / "failed-ablation"
     monkeypatch.setattr(
