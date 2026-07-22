@@ -124,11 +124,24 @@ class RlRewardConfig:
 
 
 @dataclass(frozen=True)
+class RlConstraintConfig:
+    kind: Literal["episodic_blow_lagrangian"]
+    cost_limit: float
+    cost_gamma: float
+    lambda_init: float
+    lambda_lr: float
+    lambda_max: float
+    minimum_cushion_role: Literal["observation_metric_only"]
+
+
+@dataclass(frozen=True)
 class RlTrainingConfig:
     development_seeds: tuple[int, ...]
     confirmation_seeds: tuple[int, ...]
     serving_seed: int
     vector_environments: int
+    ppo_epochs: int
+    minibatch_size: int
     smoke_timesteps: int
     search_timesteps_per_seed: int
     search_seeds: int
@@ -163,6 +176,7 @@ class RlConfig:
     sizing: RlSizingConfig
     topstep: RlTopstepConfig
     reward: RlRewardConfig
+    constraint: RlConstraintConfig
     training: RlTrainingConfig
     evaluation: RlEvaluationConfig
 
@@ -269,11 +283,22 @@ _EXPECTED: dict[str, set[str]] = {
         "daily_loss_limit_terminal",
     },
     "reward": {"kind", "gamma", "potential_shaping"},
+    "constraint": {
+        "kind",
+        "cost_limit",
+        "cost_gamma",
+        "lambda_init",
+        "lambda_lr",
+        "lambda_max",
+        "minimum_cushion_role",
+    },
     "training": {
         "development_seeds",
         "confirmation_seeds",
         "serving_seed",
         "vector_environments",
+        "ppo_epochs",
+        "minibatch_size",
         "smoke_timesteps",
         "search_timesteps_per_seed",
         "search_seeds",
@@ -437,6 +462,7 @@ def load_rl_config(path: str | Path) -> RlConfig:
     sizing = sections["sizing"]
     topstep = sections["topstep"]
     reward = sections["reward"]
+    constraint = sections["constraint"]
     training = sections["training"]
     evaluation = sections["evaluation"]
     config = RlConfig(
@@ -613,6 +639,23 @@ def load_rl_config(path: str | Path) -> RlConfig:
             gamma=_float(reward["gamma"], "rl.reward.gamma"),
             potential_shaping=_bool(reward["potential_shaping"], "rl.reward.potential_shaping"),
         ),
+        constraint=RlConstraintConfig(
+            kind=_choice(
+                constraint["kind"],
+                "rl.constraint.kind",
+                {"episodic_blow_lagrangian"},
+            ),
+            cost_limit=_float(constraint["cost_limit"], "rl.constraint.cost_limit"),
+            cost_gamma=_float(constraint["cost_gamma"], "rl.constraint.cost_gamma"),
+            lambda_init=_float(constraint["lambda_init"], "rl.constraint.lambda_init"),
+            lambda_lr=_float(constraint["lambda_lr"], "rl.constraint.lambda_lr"),
+            lambda_max=_float(constraint["lambda_max"], "rl.constraint.lambda_max"),
+            minimum_cushion_role=_choice(
+                constraint["minimum_cushion_role"],
+                "rl.constraint.minimum_cushion_role",
+                {"observation_metric_only"},
+            ),
+        ),
         training=RlTrainingConfig(
             development_seeds=_ints(training["development_seeds"], "rl.training.development_seeds"),
             confirmation_seeds=_ints(
@@ -622,6 +665,8 @@ def load_rl_config(path: str | Path) -> RlConfig:
             vector_environments=_int(
                 training["vector_environments"], "rl.training.vector_environments", 1
             ),
+            ppo_epochs=_int(training["ppo_epochs"], "rl.training.ppo_epochs", 2),
+            minibatch_size=_int(training["minibatch_size"], "rl.training.minibatch_size", 1),
             smoke_timesteps=_int(training["smoke_timesteps"], "rl.training.smoke_timesteps", 1),
             search_timesteps_per_seed=_int(
                 training["search_timesteps_per_seed"],
@@ -771,6 +816,11 @@ def _validate(config: RlConfig) -> None:
             not config.reward.potential_shaping,
             "rl.reward.potential_shaping must be false",
         ),
+        (config.constraint.cost_limit == 0.01, "rl.constraint.cost_limit must be 0.01"),
+        (config.constraint.cost_gamma == 1.0, "rl.constraint.cost_gamma must be 1"),
+        (config.constraint.lambda_init == 1.0, "rl.constraint.lambda_init must be 1"),
+        (config.constraint.lambda_lr == 0.01, "rl.constraint.lambda_lr must be 0.01"),
+        (config.constraint.lambda_max == 100.0, "rl.constraint.lambda_max must be 100"),
         (
             config.evaluation.maximum_observed_blows == 0,
             "rl.evaluation.maximum_observed_blows must be 0",
@@ -818,11 +868,13 @@ def _validate(config: RlConfig) -> None:
     }
     if asdict(config.evaluation) != accepted_gates:
         raise ConfigError("rl.evaluation promotion gates must match the accepted contract")
-    accepted_production_training = {
+    accepted_production_training: dict[str, object] = {
         "development_seeds": (42, 43, 44, 45, 46),
         "confirmation_seeds": (42, 43, 44, 45, 46, 47, 48, 49, 50, 51),
         "serving_seed": 42,
         "vector_environments": 7,
+        "ppo_epochs": 4,
+        "minibatch_size": 512,
         "smoke_timesteps": 50_000,
         "search_timesteps_per_seed": 500_000,
         "search_seeds": 3,

@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from mantis_v2.rl_config import RlConfig
 
@@ -442,3 +442,23 @@ def write_rl_dry_run_manifest(
     manifest = _build_manifest(config, root, output)
     _atomic_no_overwrite(output, manifest)
     return manifest
+
+
+def verify_rl_runtime(
+    config: RlConfig,
+    repository_root: Path | None = None,
+) -> dict[str, Any]:
+    """Verify every immutable RL input without publishing a dry-run artifact."""
+    root = (
+        repository_root.resolve()
+        if repository_root is not None
+        else Path(__file__).resolve().parents[3]
+    )
+    manifest = _build_manifest(config, root, root / ".runtime-verification.json")
+    identities = manifest["identities"]
+    source = identities["source"]
+    if source["dirty"]:
+        raise RlProvenanceError("production RL training requires a clean source tree")
+    if source["revision"] == "uncommitted":
+        raise RlProvenanceError("production RL training requires a committed source revision")
+    return cast(dict[str, Any], identities)

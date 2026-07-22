@@ -73,6 +73,11 @@ from mantis_v2.rl_config import load_rl_config
 from mantis_v2.rl_episodes import EpisodeContractError, build_episode_manifest
 from mantis_v2.rl_provenance import RlProvenanceError, write_rl_dry_run_manifest
 from mantis_v2.rl_smoke import RlSmokeError, run_maskable_ppo_smoke
+from mantis_v2.rl_training import (
+    PolicyVariant,
+    ProductionTrainingError,
+    train_policy_seeds,
+)
 from mantis_v2.rl_validation import (
     EnvironmentValidationError,
     write_environment_validation,
@@ -144,6 +149,7 @@ def _parser() -> argparse.ArgumentParser:
         "rl-account-replay",
         "rl-validate-environment",
         "rl-smoke",
+        "rl-train",
         "runpod-image-self-check",
         *_CORPUS_COMMANDS,
         *_DOWNSTREAM_COMMANDS,
@@ -172,6 +178,17 @@ def _parser() -> argparse.ArgumentParser:
         if command == "rl-smoke":
             child.add_argument("--output", required=True, type=Path)
             child.add_argument("--resume", action="store_true")
+        if command == "rl-train":
+            child.add_argument("--training-manifest", required=True, type=Path)
+            child.add_argument("--output", required=True, type=Path)
+            child.add_argument(
+                "--variant",
+                choices=tuple(variant.value for variant in PolicyVariant),
+                default=PolicyVariant.SHARED_TICKER_VALUE.value,
+            )
+            child.add_argument("--resume", action="store_true")
+            child.add_argument("--target-updates", type=int)
+            child.add_argument("--maximum-updates-this-run", type=int)
         if command in _DOWNSTREAM_COMMANDS:
             child.add_argument(
                 "--set",
@@ -479,6 +496,17 @@ def main() -> None:
             result = write_account_replay_manifest(
                 load_rl_config(args.config), args.input, args.output
             )
+        elif args.command == "rl-train":
+            rl_config = load_rl_config(args.config)
+            result = train_policy_seeds(
+                rl_config,
+                args.training_manifest,
+                args.output,
+                variant=PolicyVariant(args.variant),
+                target_updates=args.target_updates,
+                maximum_updates_this_run=args.maximum_updates_this_run,
+                resume=args.resume,
+            )
         elif args.command == "rl-smoke":
             result = run_maskable_ppo_smoke(
                 load_rl_config(args.config), args.output, resume=args.resume
@@ -547,6 +575,7 @@ def main() -> None:
         RlAccountError,
         RlProvenanceError,
         RlSmokeError,
+        ProductionTrainingError,
         EpisodeContractError,
         EnvironmentValidationError,
         DownstreamPipelineError,

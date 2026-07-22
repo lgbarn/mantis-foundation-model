@@ -131,7 +131,8 @@ The learning objective and mechanically enforceable constraints are different:
 
 - objective: maximize probability of passing within the declared horizon;
 - terminal outcomes: `PASS`, `BLOW`, or `TIMEOUT`;
-- safety cost: MLL breach indicator and minimum cushion path;
+- safety cost: terminal MLL breach indicator;
+- safety observation and evaluation metric: minimum cushion path;
 - hard shield: actions, fills, session, position, size, discontinuity, and rule
   legality.
 
@@ -423,6 +424,26 @@ MLL breaches are recorded as costs and terminal outcomes. The deterministic
 shield prevents knowingly illegal entries but cannot guarantee survival through
 market gaps or misspecified slippage. `Zero observed blows` is evidence, not a
 claim of zero probability.
+
+The V1 training objective is the constrained problem
+`maximize P(PASS) subject to P(BLOW) <= 0.01`. PPO uses the actor advantage
+`A_reward - lambda * A_cost`. After each completed rollout batch, projected
+dual SGD applies
+`lambda = clip(lambda + 0.01 * (mean_episode_cost - 0.01), 0, 100)`, starting
+from `lambda = 1`. The nonzero initial multiplier prevents sparse PASS reward
+from establishing a take-all policy before the first safety update. The episode
+cost is exactly the raw binary terminal BLOW
+indicator; minimum cushion remains an observation and evaluation metric and is
+not a shaped training cost. Binary cost targets and raw dual updates remain
+unscaled, while reward and cost advantages are standardized independently per
+ticker so critic calibration cannot silently change their relative policy-gradient
+weight. Exact resume persists the reward and cost critics, reward-return normalizers,
+multiplier, projected-SGD counters and raw cost statistics, optimizer state,
+and RNG state. Aggregate and worst-seed
+results are mandatory; best-seed-only selection is prohibited. Promotion keeps
+the stricter zero-observed-blows and one-sided 95% blow-rate upper-bound gates.
+PID-Lagrangian is reserved for a separately identified ablation if projected
+SGD proves unstable.
 
 Friction is booked once, in dollars, by the account simulator. The primary
 training and evaluation assumption is one adverse tick per side plus the pinned
@@ -727,6 +748,15 @@ daily_loss_limit_terminal = false
 kind = "terminal_pass_with_blow_cost"
 gamma = 1.0
 potential_shaping = false
+
+[rl.constraint]
+kind = "episodic_blow_lagrangian"
+cost_limit = 0.01
+cost_gamma = 1.0
+lambda_init = 1.0
+lambda_lr = 0.01
+lambda_max = 100.0
+minimum_cushion_role = "observation_metric_only"
 
 [rl.training]
 development_seeds = [42, 43, 44, 45, 46]

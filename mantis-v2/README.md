@@ -69,6 +69,8 @@ just rl-account-replay fixture.json replay.json mantis-v2/configs/rl-entry-smoke
 just rl-validate-environment training.json validation.json environment-validation.json \
   mantis-v2/configs/rl-entry-smoke.toml
 just rl-smoke artifacts/rl-entry-smoke-v1 mantis-v2/configs/rl-entry-smoke.toml
+just rl-train training.json artifacts/rl-entry-training \
+  mantis-v2/configs/rl-entry-topstep-100k.toml shared_ticker_value
 just runpod-image-build ghcr.io/lgbarn/mantis-v2-cuda:SOURCE_SHA
 just runpod-image-scan ghcr.io/lgbarn/mantis-v2-cuda:SOURCE_SHA reports/image-scan.json
 just runpod-image-self-check \
@@ -358,3 +360,29 @@ Normal preparation does not materialize 2026 labels or embeddings. The sealed
 with `evaluation.allow_holdout=true` and the matching explicit `--unlock`
 value. Only then does it generate 2026 candidates and embeddings and apply the
 final validation-owned head and threshold once.
+`rl-train` is the Stage 2 CPU production seam. It accepts only a provenance-
+matching `training` episode manifest and trains every declared development seed.
+The candidate is `shared_ticker_value`; `independent_actor` and `shared_critic`
+use the identical command and checkpoint contract as preregistered ablations.
+Each actor emits only `skip` or `enter`. Trend Magic direction, the deterministic
+2R/0.75R exit, the fixed mini/micro profile, and the Topstep risk shield remain
+outside actor authority. Training uses episodic PPO-Lagrangian with separate
+ticker-owned reward and BLOW-cost critics. PASS reward and BLOW cost are binary
+terminal signals with gamma 1.0; minimum MLL cushion remains an observation and
+logged path metric, never a dense cost. Reward and cost advantages are
+standardized independently per ticker, and the actor uses
+`A_reward - lambda*A_cost`. The projected multiplier starts at 1.0, uses a 0.01
+cost limit and 0.01 learning rate, and is capped at 100. A run
+freezes rollout log probabilities and both values before four configured PPO
+epochs. Every minibatch contains exactly equal samples per present ticker,
+oversampling shorter streams when legal decision counts differ. The
+independent-actor ablation owns separate profile embeddings, trunks, and heads
+per ticker. A run checkpoints only after a complete schedule cycle and resumes
+optimizer, both critic families, ticker-owned return statistics, multiplier and
+raw cost statistics, RNG state, last rollout evidence, and exact source/lock/
+config/schedule/collection/artifact identities. Training mode and requested
+update/timestep budgets are also run identities, so bounded and production runs
+cannot share checkpoints. Immutable bundles are recovered if a crash occurs
+before the atomic state pointer or final metrics publication. Old unconstrained
+checkpoints and published or mismatched runs are rejected. The sealed holdout
+is never a training input.

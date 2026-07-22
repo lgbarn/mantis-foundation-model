@@ -78,6 +78,13 @@ def test_production_rl_config_loads_locked_entry_contract() -> None:
     assert config.fees.cl == 4.02
     assert config.fees.mcl == 1.52
     assert config.run.device == "cpu"
+    assert config.constraint.kind == "episodic_blow_lagrangian"
+    assert config.constraint.cost_limit == 0.01
+    assert config.constraint.cost_gamma == 1.0
+    assert config.constraint.lambda_init == 1.0
+    assert config.constraint.lambda_lr == 0.01
+    assert config.constraint.lambda_max == 100.0
+    assert config.constraint.minimum_cushion_role == "observation_metric_only"
     assert len(config.digest) == 64
 
 
@@ -128,6 +135,11 @@ def test_rl_config_rejects_unknown_missing_invalid_and_incompatible_values(
             "minimum_chronological_attempts = 300",
             "minimum_chronological_attempts = 299",
             r"promotion gates must match the accepted contract",
+        ),
+        (
+            "cost_limit = 0.01",
+            "cost_limit = 0.02",
+            r"rl.constraint.cost_limit must be 0.01",
         ),
     )
     for index, (old, new, message) in enumerate(cases):
@@ -229,6 +241,7 @@ def test_every_locked_rl_identity_contributes_to_the_canonical_digest() -> None:
         replace(config, episode=replace(config.episode, timeout_trading_days=21)),
         replace(config, training=replace(config.training, smoke_timesteps=129)),
         replace(config, training=replace(config.training, development_seeds=(41,))),
+        replace(config, constraint=replace(config.constraint, lambda_lr=0.02)),
         replace(
             config,
             evaluation=replace(config.evaluation, minimum_raw_pass_rate=0.61),

@@ -60,6 +60,7 @@ them can make a checkpoint intentionally non-resumable.
 | `just rl-dry-run <config>` | Validates the locked RL identity | Atomic dry-run manifest | CPU; no holdout access |
 | `just rl-account-replay <input> <output> <config>` | Replays marked-equity account fixtures | Atomic replay manifest | CPU; refuses overwrite |
 | `just rl-smoke <output> <config> [--resume]` | Trains the bounded synthetic MaskablePPO qualification | Atomic checkpoint, state, metrics, manifest | 50K CPU steps; no production or holdout data |
+| `just rl-train <training_manifest> <output> <config> [variant] [--resume]` | Trains all declared development seeds on one production training partition | Atomic fold/seed checkpoints, metrics, seed summary | CPU only; no validation, test, or holdout input |
 | `just runpod-image-build <image>` | Builds the pinned Linux amd64 CUDA image from a clean commit | Local Docker image | Docker CPU/disk/network use; no Pod or registry push |
 | `just runpod-image-scan <image> <output>` | Scans saved image layers and history | Canonical scan JSON | Requires a local Docker daemon |
 | `just runpod-image-self-check <image> <output>` | Verifies CUDA, driver, tools, lock, and runtime inventory | Canonical runtime JSON | Requires Docker plus a compatible NVIDIA GPU |
@@ -456,9 +457,9 @@ Build training and validation schedules for the same fold, then validate them:
 just rl-build-episodes mantis-v2/configs/rl-entry-topstep-100k.toml 0 training 21
 just rl-build-episodes mantis-v2/configs/rl-entry-topstep-100k.toml 0 validation 21
 just rl-validate-environment \
-  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v4/episodes/fold-00-training-seed-42.json \
-  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v4/episodes/fold-00-validation-seed-42.json \
-  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v4/environment-validation.json \
+  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v13/episodes/fold-00-training-seed-42.json \
+  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v13/episodes/fold-00-validation-seed-42.json \
+  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v13/environment-validation.json \
   mantis-v2/configs/rl-entry-topstep-100k.toml
 ```
 
@@ -504,6 +505,43 @@ just rl-smoke \
   mantis-v2/configs/rl-entry-smoke.toml \
   --resume
 ```
+
+Production entry-policy training starts only from the qualified training
+schedule. The default candidate and both preregistered ablations share one seam:
+
+```bash
+just rl-train \
+  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v13/episodes/fold-00-training-seed-42.json \
+  /Volumes/Storage/trading-research/artifacts/mantis-foundation-model/rl-entry-topstep-100k-v13/training/shared-ticker-value \
+  mantis-v2/configs/rl-entry-topstep-100k.toml \
+  shared_ticker_value
+```
+
+Use `independent_actor` or `shared_critic` only for the named architecture
+ablation. Training replays complete episodes with separate reward and cost
+objectives. PASS reward=1 and BLOW cost=1 only at termination; both use gamma
+1.0. Ticker-specific reward and cost advantages are standardized independently;
+cost-value targets and dual updates retain raw binary outcomes. The actor surrogate uses
+`A_reward - lambda*A_cost`. The projected multiplier starts at
+1.0, updates once per complete episode batch from raw BLOW indicators toward a
+0.01 cost limit at learning rate 0.01, and is capped at 100. Minimum MLL cushion
+is an observation and logged path metric only, never reward shaping or dense
+cost. Old policy log probabilities plus reward and cost values are frozen
+before the configured PPO epochs. Each minibatch has exactly equal samples per
+present ticker, with deterministic oversampling of shorter ticker streams. A
+checkpoint is an immutable complete-cycle bundle containing both critics,
+optimizer, multiplier/controller state, raw cost statistics, and RNG state; an
+atomic pointer selects the latest bundle, and resume recovers a semantically
+valid orphan bundle after a pointer crash. Resume with a final `--resume`; any
+source revision/dirty state, lock, config, constraint definition, schedule
+bytes, loaded episode collection, embedding, corpus, foundation, rule, fee,
+seed, fold, cursor, variant, training mode, or requested budget mismatch fails
+before state is loaded. Pre-constraint checkpoint schemas are rejected.
+
+For a bounded mechanics qualification, append the final just argument
+`'--target-updates 1'`. This still loads every episode in the declared schedule
+and reports every configured development seed plus the worst seed, but it does
+not satisfy the 2M-step quality budget and retains `quality_claim=false`.
 
 The smoke uses the MIT-licensed, hash-locked local stack: Gymnasium 1.3.0,
 Stable-Baselines3 2.9.0, SB3-Contrib 2.9.0, and Optuna 4.9.0. No paid or hosted
