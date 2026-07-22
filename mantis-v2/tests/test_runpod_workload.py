@@ -628,6 +628,11 @@ def test_supervisor_deletes_after_four_missing_heartbeats_and_preserves_diagnost
     assert len(diagnostic_deadlines) == len(checkpoint_deadlines) == 1
     assert diagnostic_deadlines[0] == checkpoint_deadlines[0]
     assert diagnostic_deadlines[0] - clock.value <= timedelta(seconds=120)
+    events = [
+        json.loads(path.read_text())["event"]
+        for path in sorted((tmp_path / "state" / "ledger").glob("*.json"))
+    ]
+    assert events.index("provider_absence_verified") < events.index("artifacts_verified")
 
 
 @pytest.mark.parametrize("failure_mode", ["missing_started_at", "heartbeat", "replicate"])

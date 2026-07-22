@@ -1207,6 +1207,33 @@ def supervise_workload(
             },
         )
 
+    def replicate_and_record() -> None:
+        nonlocal failure
+        try:
+            replicate(manifest)
+            _append_event(
+                state_root,
+                "artifacts_verified",
+                now(),
+                run_id,
+                pod_id,
+                _cost_context(manifest, now(), provider_started),
+            )
+        except Exception as exc:
+            if failure is None:
+                failure = exc
+            _append_event(
+                state_root,
+                "artifacts_failed",
+                now(),
+                run_id,
+                pod_id,
+                {
+                    "error_type": type(exc).__name__,
+                    **_cost_context(manifest, now(), provider_started),
+                },
+            )
+
     if reason != "workload_complete":
         grace_deadline = now().astimezone(UTC) + timedelta(seconds=120)
         try:
@@ -1290,30 +1317,8 @@ def supervise_workload(
                         **_cost_context(manifest, now(), provider_started),
                     },
                 )
-    try:
-        replicate(manifest)
-        _append_event(
-            state_root,
-            "artifacts_verified",
-            now(),
-            run_id,
-            pod_id,
-            _cost_context(manifest, now(), provider_started),
-        )
-    except Exception as exc:
-        if failure is None:
-            failure = exc
-        _append_event(
-            state_root,
-            "artifacts_failed",
-            now(),
-            run_id,
-            pod_id,
-            {
-                "error_type": type(exc).__name__,
-                **_cost_context(manifest, now(), provider_started),
-            },
-        )
+    if reason == "workload_complete":
+        replicate_and_record()
     try:
         termination = terminate_pod_for_reason(
             pod_id=pod_id,
@@ -1368,6 +1373,8 @@ def supervise_workload(
         now=now,
         sleep=sleep,
     )
+    if reason != "workload_complete":
+        replicate_and_record()
     billing = adapter.billing(pod_id)
     _append_event(
         state_root,
