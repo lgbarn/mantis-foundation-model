@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import Counter
 from dataclasses import replace
@@ -646,6 +647,31 @@ def test_unconstrained_checkpoint_schema_is_rejected(tmp_path: Path) -> None:
         _train_loaded_policy(config, episodes, output, seed=42, target_updates=2, resume=True)
 
 
+def test_resume_rejects_checkpoint_requiring_unsafe_deserialization(tmp_path: Path) -> None:
+    config = _config()
+    episodes = _training_episodes()
+    output = tmp_path / "unsafe-checkpoint"
+    _train_loaded_policy(
+        config,
+        episodes,
+        output,
+        seed=42,
+        target_updates=2,
+        maximum_updates_this_run=1,
+    )
+    checkpoint = output / "checkpoints" / "update-000001" / "checkpoint.pt"
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    payload["unsafe_object"] = SimpleNamespace(value="not-allowlisted")
+    torch.save(payload, checkpoint)
+    bundle_path = checkpoint.with_name("bundle.json")
+    bundle = json.loads(bundle_path.read_text())
+    bundle["checkpoint_sha256"] = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    bundle_path.write_text(json.dumps(bundle))
+
+    with pytest.raises(ProductionTrainingError, match="resume checkpoint bundle is invalid"):
+        _train_loaded_policy(config, episodes, output, seed=42, target_updates=2, resume=True)
+
+
 def test_actual_replayed_steps_not_nominal_episode_lengths_drive_completion() -> None:
     metrics = [
         {"rollouts": {"bars_replayed": 4906, "nominal_episode_bars": 64096}},
@@ -780,11 +806,13 @@ def test_seed_summary_reports_iqm_and_intervals() -> None:
     assert statistics["interquartile_mean_pass_rate"] == 0.5
     low, high = statistics["seed_mean_pass_rate_interval_95"]
     assert 0.0 <= low <= 0.5 <= high <= 1.0
-    for seed_metrics in statistics["seed_metrics"]:
-        pass_low, pass_high = seed_metrics["pass_rate_interval_95"]
-        blow_low, blow_high = seed_metrics["blow_rate_interval_95"]
-        assert 0.0 <= pass_low <= pass_high <= 1.0
-        assert 0.0 <= blow_low <= blow_high <= 1.0
+    middle = statistics["seed_metrics"][2]
+    assert middle["pass_rate_lcb_95"] == pytest.approx(0.41885, abs=1e-4)
+    assert middle["blow_rate_ucb_95"] == pytest.approx(0.58115, abs=1e-4)
+    assert statistics["seed_metrics"][0]["pass_rate_lcb_95"] == 0.0
+    assert statistics["seed_metrics"][-1]["blow_rate_ucb_95"] == pytest.approx(0.02634, abs=1e-4)
+    assert statistics["aggregate_pass_rate_lcb_95"] == pytest.approx(0.4633, abs=1e-4)
+    assert statistics["aggregate_blow_rate_ucb_95"] == pytest.approx(0.5367, abs=1e-4)
 
 
 def test_seed_orchestrator_does_not_rank_incomplete_runs(tmp_path: Path) -> None:
@@ -836,6 +864,15 @@ def test_seed_orchestrator_atomically_records_failure(
     assert evidence["failed_seed"] == 42
     assert evidence["exception_type"] == "ProductionTrainingError"
     assert evidence["exception_message"] == "injected seed failure"
+    identities = evidence["identities"]
+    assert identities["config_sha256"] == config.digest
+    assert identities["schedule_sha256"] == episodes.manifest_sha256
+    assert len(identities["episode_collection_sha256"]) == 64
+    assert identities["source_revision"] == "test-fixture"
+    assert identities["source_dirty"] is False
+    assert identities["source_sha256"] == config.upstream.source_digest
+    assert identities["dependency_lock_sha256"] == config.upstream.lock_digest
+    assert identities["artifact_sha256"] == episodes.artifact_sha256
     assert evidence["quality_claim"] is False
     assert not (output / "seed-summary.json").exists()
 

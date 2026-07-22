@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import pickle
 import random
 import shutil
 import tempfile
@@ -768,6 +769,7 @@ def _checkpoint_payload(
     metrics: Sequence[Mapping[str, object]],
     evidence: Mapping[str, object],
 ) -> dict[str, object]:
+    numpy_state = cast(tuple[str, np.ndarray[Any, Any], int, int, float], np.random.get_state())
     return {
         "schema_version": 3,
         "identities": dict(identities),
@@ -779,7 +781,13 @@ def _checkpoint_payload(
         "constraint_controller": controller.state_dict(),
         "rng": {
             "python": random.getstate(),
-            "numpy": np.random.get_state(),
+            "numpy": {
+                "bit_generator": numpy_state[0],
+                "keys": torch.from_numpy(numpy_state[1].copy()),
+                "position": numpy_state[2],
+                "has_gauss": numpy_state[3],
+                "cached_gaussian": numpy_state[4],
+            },
             "torch": torch.get_rng_state(),
         },
         "metrics": list(metrics),
@@ -823,8 +831,8 @@ def _load_bundle(path: Path, identities: Mapping[str, object]) -> dict[str, obje
         checkpoint = path / "checkpoint.pt"
         if bundle.get("checkpoint_sha256") != sha256_file(checkpoint):
             raise ProductionTrainingError("resume checkpoint identity mismatch")
-        payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    except (OSError, json.JSONDecodeError, RuntimeError, ValueError) as exc:
+        payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    except (OSError, json.JSONDecodeError, RuntimeError, ValueError, pickle.UnpicklingError) as exc:
         raise ProductionTrainingError("resume checkpoint bundle is invalid") from exc
     if (
         not isinstance(payload, dict)
@@ -873,7 +881,16 @@ def _restore_checkpoint(
         controller.load_state_dict(cast(dict[str, object], payload["constraint_controller"]))
         rng = cast(dict[str, Any], payload["rng"])
         random.setstate(rng["python"])
-        np.random.set_state(rng["numpy"])
+        numpy_state = rng["numpy"]
+        np.random.set_state(
+            (
+                numpy_state["bit_generator"],
+                numpy_state["keys"].numpy(),
+                numpy_state["position"],
+                numpy_state["has_gauss"],
+                numpy_state["cached_gaussian"],
+            )
+        )
         torch.set_rng_state(rng["torch"])
         metrics = cast(list[dict[str, object]], payload["metrics"])
         evidence = cast(dict[str, object], payload["last_evidence"])
@@ -1169,10 +1186,10 @@ def _completed_seed(
     return cast(dict[str, object], result)
 
 
-def _wilson_interval(successes: int, attempts: int) -> list[float]:
+def _wilson_bounds(successes: int, attempts: int) -> tuple[float, float]:
     if attempts < 1 or not 0 <= successes <= attempts:
         raise ProductionTrainingError("seed outcome counts are invalid")
-    z = 1.959963984540054
+    z = 1.6448536269514722
     rate = successes / attempts
     denominator = 1.0 + z * z / attempts
     center = (rate + z * z / (2.0 * attempts)) / denominator
@@ -1181,7 +1198,7 @@ def _wilson_interval(successes: int, attempts: int) -> list[float]:
         * float(np.sqrt(rate * (1.0 - rate) / attempts + z * z / (4.0 * attempts**2)))
         / denominator
     )
-    return [max(0.0, center - radius), min(1.0, center + radius)]
+    return max(0.0, center - radius), min(1.0, center + radius)
 
 
 def _interquartile_mean(values: Sequence[float]) -> float:
@@ -1252,6 +1269,8 @@ def _complete_seed_statistics(runs: Sequence[Mapping[str, object]]) -> dict[str,
             raise ProductionTrainingError("seed run outcome metrics are invalid")
         pass_count = outcomes["PASS"]
         blow_count = outcomes["BLOW"]
+        pass_lower, _ = _wilson_bounds(pass_count, episode_count)
+        _, blow_upper = _wilson_bounds(blow_count, episode_count)
         seed_metrics.append(
             {
                 "seed": seed,
@@ -1261,8 +1280,8 @@ def _complete_seed_statistics(runs: Sequence[Mapping[str, object]]) -> dict[str,
                 "episode_count": episode_count,
                 "pass_rate": pass_count / episode_count,
                 "blow_rate": blow_count / episode_count,
-                "pass_rate_interval_95": _wilson_interval(pass_count, episode_count),
-                "blow_rate_interval_95": _wilson_interval(blow_count, episode_count),
+                "pass_rate_lcb_95": pass_lower,
+                "blow_rate_ucb_95": blow_upper,
             }
         )
     pass_rates = [cast(float, item["pass_rate"]) for item in seed_metrics]
@@ -1270,6 +1289,8 @@ def _complete_seed_statistics(runs: Sequence[Mapping[str, object]]) -> dict[str,
     aggregate_pass_count = sum(cast(int, item["pass_count"]) for item in seed_metrics)
     aggregate_blow_count = sum(cast(int, item["blow_count"]) for item in seed_metrics)
     aggregate_episode_count = sum(cast(int, item["episode_count"]) for item in seed_metrics)
+    aggregate_pass_lower, _ = _wilson_bounds(aggregate_pass_count, aggregate_episode_count)
+    _, aggregate_blow_upper = _wilson_bounds(aggregate_blow_count, aggregate_episode_count)
     worst = min(seed_metrics, key=lambda item: (cast(float, item["pass_rate"]), item["seed"]))
     worst_constraint = max(
         seed_metrics, key=lambda item: (cast(float, item["blow_rate"]), -cast(int, item["seed"]))
@@ -1286,12 +1307,8 @@ def _complete_seed_statistics(runs: Sequence[Mapping[str, object]]) -> dict[str,
         "aggregate_episode_count": aggregate_episode_count,
         "aggregate_pass_rate": aggregate_pass_count / aggregate_episode_count,
         "aggregate_blow_rate": aggregate_blow_count / aggregate_episode_count,
-        "aggregate_pass_rate_interval_95": _wilson_interval(
-            aggregate_pass_count, aggregate_episode_count
-        ),
-        "aggregate_blow_rate_interval_95": _wilson_interval(
-            aggregate_blow_count, aggregate_episode_count
-        ),
+        "aggregate_pass_rate_lcb_95": aggregate_pass_lower,
+        "aggregate_blow_rate_ucb_95": aggregate_blow_upper,
         "maximum_seed_blow_rate": max(blow_rates),
     }
 
@@ -1300,6 +1317,24 @@ def _seed_failure_path(output: Path, fold: int, seed: int) -> Path:
     directory = output / f"fold-{fold:02d}" / "failures" / f"seed-{seed}"
     attempts = sorted(directory.glob("attempt-*.json")) if directory.is_dir() else []
     return directory / f"attempt-{len(attempts) + 1:04d}.json"
+
+
+def _failure_identities(config: RlConfig, episodes: TrainingEpisodes) -> dict[str, object]:
+    source_value = episodes.runtime_identities.get("source", {})
+    lock_value = episodes.runtime_identities.get("lock", {})
+    source = source_value if isinstance(source_value, Mapping) else {}
+    lock = lock_value if isinstance(lock_value, Mapping) else {}
+    return {
+        "config_sha256": config.digest,
+        "schedule_sha256": episodes.manifest_sha256,
+        "episode_collection_sha256": episodes.collection_sha256
+        or _episode_collection_digest(episodes.episodes),
+        "source_revision": source.get("revision", "test-fixture"),
+        "source_dirty": source.get("dirty", False),
+        "source_sha256": source.get("sha256", config.upstream.source_digest),
+        "dependency_lock_sha256": lock.get("sha256", config.upstream.lock_digest),
+        "artifact_sha256": episodes.artifact_sha256,
+    }
 
 
 def _train_policy_seeds_loaded(
@@ -1366,6 +1401,7 @@ def _train_policy_seeds_loaded(
                     "variant": selected_variant.value,
                     "config_sha256": config.digest,
                     "schedule_sha256": episodes.manifest_sha256,
+                    "identities": _failure_identities(config, episodes),
                     "exception_type": type(exc).__name__,
                     "exception_message": str(exc),
                     "completed_seed_manifests": completed,
