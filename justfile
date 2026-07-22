@@ -292,3 +292,24 @@ rl-run-architecture-ablation plan output *args:
 
 rl-run-seed-campaign candidate output +args:
     uv run mantis-v2 rl-run-seed-campaign --config mantis-v2/configs/rl-entry-topstep-100k.toml --candidate {{quote(candidate)}} --output {{quote(output)}} {{args}}
+
+rl-freeze-independent-baseline-plan candidate serving_freeze output +args:
+    uv run mantis-v2 rl-freeze-independent-baseline-plan --config mantis-v2/configs/rl-entry-topstep-100k.toml --candidate {{quote(candidate)}} --serving-freeze {{quote(serving_freeze)}} --output {{quote(output)}} {{args}}
+
+rl-run-independent-baseline-campaign plan output resume="":
+    uv run mantis-v2 rl-run-independent-baseline-campaign --config mantis-v2/configs/rl-entry-topstep-100k.toml --plan {{quote(plan)}} --output {{quote(output)}} {{resume}}
+
+rl-freeze-evaluation-baselines candidate output +args:
+    uv run mantis-v2 rl-freeze-evaluation-baselines --config mantis-v2/configs/rl-entry-topstep-100k.toml --candidate {{quote(candidate)}} --output {{quote(output)}} {{args}}
+
+rl-freeze-evaluation-access-plan serving_freeze baseline_freeze output run_identity created_at:
+    uv run mantis-v2 rl-freeze-evaluation-access-plan --config mantis-v2/configs/rl-entry-topstep-100k.toml --serving-freeze {{quote(serving_freeze)}} --baseline-freeze {{quote(baseline_freeze)}} --output {{quote(output)}} --run-identity {{quote(run_identity)}} --created-at {{quote(created_at)}}
+
+rl-build-evaluation-episodes config access_plan fold:
+    uv run mantis-v2 rl-build-evaluation-episodes --config {{quote(config)}} --access-plan {{quote(access_plan)}} --fold {{fold}}
+
+rl-freeze-evaluation-plan access_plan output run_identity created_at +manifest_args:
+    uv run mantis-v2 rl-freeze-evaluation-plan --config mantis-v2/configs/rl-entry-topstep-100k.toml --access-plan {{quote(access_plan)}} --output {{quote(output)}} --run-identity {{quote(run_identity)}} --created-at {{quote(created_at)}} {{manifest_args}}
+
+rl-evaluate-topstep plan output resume="":
+    uv run mantis-v2 rl-evaluate-topstep --config mantis-v2/configs/rl-entry-topstep-100k.toml --plan {{quote(plan)}} --output {{quote(output)}} {{resume}}

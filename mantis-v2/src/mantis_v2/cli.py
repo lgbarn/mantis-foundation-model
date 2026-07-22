@@ -98,7 +98,20 @@ from mantis_v2.rl_confirmation import (
     run_architecture_ablation,
     run_production_seed_campaign,
 )
-from mantis_v2.rl_episodes import EpisodeContractError, build_episode_manifest
+from mantis_v2.rl_episodes import (
+    EpisodeContractError,
+    build_episode_manifest,
+    build_evaluation_episode_manifest,
+)
+from mantis_v2.rl_evaluation import (
+    EvaluationContractError,
+    freeze_evaluation_baselines,
+    run_independent_baseline_campaign,
+    run_topstep_evaluation,
+    write_evaluation_access_plan,
+    write_evaluation_plan,
+    write_independent_baseline_campaign_plan,
+)
 from mantis_v2.rl_optuna import (
     OptunaSearchError,
     run_production_optuna_study,
@@ -202,6 +215,13 @@ def _parser() -> argparse.ArgumentParser:
         "rl-decide-continuation",
         "rl-run-architecture-ablation",
         "rl-run-seed-campaign",
+        "rl-build-evaluation-episodes",
+        "rl-freeze-independent-baseline-plan",
+        "rl-run-independent-baseline-campaign",
+        "rl-freeze-evaluation-baselines",
+        "rl-freeze-evaluation-access-plan",
+        "rl-freeze-evaluation-plan",
+        "rl-evaluate-topstep",
         "runpod-image-self-check",
         "runpod-image-static-check",
         *_CORPUS_COMMANDS,
@@ -225,6 +245,41 @@ def _parser() -> argparse.ArgumentParser:
                 "--partition", required=True, choices=("training", "validation", "test")
             )
             child.add_argument("--episodes", required=True, type=int)
+        if command == "rl-build-evaluation-episodes":
+            child.add_argument("--fold", required=True, type=int)
+            child.add_argument("--access-plan", required=True, type=Path)
+        if command == "rl-freeze-independent-baseline-plan":
+            child.add_argument("--candidate", required=True, type=Path)
+            child.add_argument("--serving-freeze", required=True, type=Path)
+            child.add_argument("--training-manifest", required=True, action="append", type=Path)
+            child.add_argument("--validation-manifest", required=True, action="append", type=Path)
+            child.add_argument("--output", required=True, type=Path)
+        if command == "rl-run-independent-baseline-campaign":
+            child.add_argument("--plan", required=True, type=Path)
+            child.add_argument("--output", required=True, type=Path)
+            child.add_argument("--resume", action="store_true")
+        if command == "rl-freeze-evaluation-baselines":
+            child.add_argument("--candidate", required=True, type=Path)
+            child.add_argument("--training-manifest", required=True, action="append", type=Path)
+            child.add_argument("--validation-manifest", required=True, action="append", type=Path)
+            child.add_argument("--independent-campaign", required=True, type=Path)
+            child.add_argument("--output", required=True, type=Path)
+        if command == "rl-freeze-evaluation-access-plan":
+            child.add_argument("--serving-freeze", required=True, type=Path)
+            child.add_argument("--baseline-freeze", required=True, type=Path)
+            child.add_argument("--run-identity", required=True)
+            child.add_argument("--created-at", required=True)
+            child.add_argument("--output", required=True, type=Path)
+        if command == "rl-freeze-evaluation-plan":
+            child.add_argument("--access-plan", required=True, type=Path)
+            child.add_argument("--test-manifest", required=True, action="append", type=Path)
+            child.add_argument("--run-identity", required=True)
+            child.add_argument("--created-at", required=True)
+            child.add_argument("--output", required=True, type=Path)
+        if command == "rl-evaluate-topstep":
+            child.add_argument("--plan", required=True, type=Path)
+            child.add_argument("--output", required=True, type=Path)
+            child.add_argument("--resume", action="store_true")
         if command == "rl-account-replay":
             child.add_argument("--input", required=True, type=Path)
             child.add_argument("--output", required=True, type=Path)
@@ -901,6 +956,62 @@ def main() -> None:
                 resume=args.resume,
                 continuation_decision_path=args.continuation_decision,
             )
+        elif args.command == "rl-build-evaluation-episodes":
+            result = build_evaluation_episode_manifest(
+                load_rl_config(args.config),
+                fold_number=args.fold,
+                access_plan_path=args.access_plan,
+            )
+        elif args.command == "rl-freeze-independent-baseline-plan":
+            result = write_independent_baseline_campaign_plan(
+                load_rl_config(args.config),
+                args.candidate,
+                args.serving_freeze,
+                args.training_manifest,
+                args.validation_manifest,
+                args.output,
+            )
+        elif args.command == "rl-run-independent-baseline-campaign":
+            result = run_independent_baseline_campaign(
+                load_rl_config(args.config),
+                args.plan,
+                args.output,
+                resume=args.resume,
+            )
+        elif args.command == "rl-freeze-evaluation-baselines":
+            result = freeze_evaluation_baselines(
+                load_rl_config(args.config),
+                args.candidate,
+                args.training_manifest,
+                args.validation_manifest,
+                args.independent_campaign,
+                args.output,
+            )
+        elif args.command == "rl-freeze-evaluation-access-plan":
+            result = write_evaluation_access_plan(
+                load_rl_config(args.config),
+                args.serving_freeze,
+                args.baseline_freeze,
+                args.output,
+                run_identity=args.run_identity,
+                created_at=args.created_at,
+            )
+        elif args.command == "rl-freeze-evaluation-plan":
+            result = write_evaluation_plan(
+                load_rl_config(args.config),
+                args.access_plan,
+                args.test_manifest,
+                args.output,
+                run_identity=args.run_identity,
+                created_at=args.created_at,
+            )
+        elif args.command == "rl-evaluate-topstep":
+            result = run_topstep_evaluation(
+                load_rl_config(args.config),
+                args.plan,
+                args.output,
+                resume=args.resume,
+            )
         elif args.command == "rl-smoke":
             result = run_maskable_ppo_smoke(
                 load_rl_config(args.config), args.output, resume=args.resume
@@ -974,6 +1085,7 @@ def main() -> None:
         ConfirmationError,
         EpisodeContractError,
         EnvironmentValidationError,
+        EvaluationContractError,
         DownstreamPipelineError,
         EmbeddingContractError,
         EmbeddingArtifactError,

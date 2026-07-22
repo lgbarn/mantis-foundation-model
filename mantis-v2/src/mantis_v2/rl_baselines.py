@@ -49,6 +49,17 @@ class BaselineFitEvidence:
 
 
 @dataclass(frozen=True)
+class HistGradientBoostingFitEvidence:
+    training_rows: int
+    validation_rows: int
+    threshold_source: str
+    threshold_selection: str
+    threshold: float
+    hyperparameters: dict[str, object]
+    random_state: int
+
+
+@dataclass(frozen=True)
 class ReplayResult:
     policy: str
     actions: tuple[int, ...]
@@ -219,6 +230,48 @@ def fit_supervised_baselines(
             "validation",
             logistic_threshold,
             hist_threshold,
+        ),
+    )
+
+
+def fit_hist_gradient_boosting_baseline(
+    training: SupervisedRows,
+    validation: SupervisedRows,
+    *,
+    seed: int,
+) -> tuple[EntryBaseline, HistGradientBoostingClassifier, HistGradientBoostingFitEvidence]:
+    """Fit the fixed HGB on training and choose its threshold on validation only."""
+    train_x, train_y = _validated_rows(training, "training")
+    validation_x, validation_y = _validated_rows(validation, "validation")
+    if train_x.shape[1] != validation_x.shape[1]:
+        raise BaselineContractError("training and validation feature widths differ")
+    hyperparameters: dict[str, object] = {
+        "learning_rate": 0.05,
+        "max_iter": 100,
+        "max_leaf_nodes": 15,
+        "min_samples_leaf": 2,
+        "l2_regularization": 1.0,
+    }
+    model = HistGradientBoostingClassifier(
+        **hyperparameters,
+        random_state=seed,
+    ).fit(train_x, train_y)
+
+    def predict(values: np.ndarray) -> np.ndarray:
+        return np.asarray(model.predict_proba(values)[:, 1], dtype=np.float64)
+
+    threshold = _validation_threshold(validation_y, predict(validation_x))
+    return (
+        _ProbabilityPolicy("hist_gradient_boosting", predict, threshold),
+        model,
+        HistGradientBoostingFitEvidence(
+            training_rows=len(train_x),
+            validation_rows=len(validation_x),
+            threshold_source="validation",
+            threshold_selection="maximum_balanced_accuracy_then_highest_threshold_v1",
+            threshold=threshold,
+            hyperparameters=hyperparameters,
+            random_state=seed,
         ),
     )
 

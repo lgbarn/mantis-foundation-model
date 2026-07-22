@@ -233,7 +233,7 @@ class LoadedEpisodes:
     fold: int = 0
 
 
-def _manifest(path: Path, config: RlConfig) -> dict[str, Any]:
+def _manifest(path: Path, config: RlConfig, expected_partitions: frozenset[str]) -> dict[str, Any]:
     try:
         raw = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as exc:
@@ -241,11 +241,9 @@ def _manifest(path: Path, config: RlConfig) -> dict[str, Any]:
     if raw.get("schema_version") != 1 or raw.get("stage") != "rl-episode-schedule":
         raise EnvironmentValidationError("episode manifest contract is invalid")
     partition = raw.get("partition")
-    if not isinstance(partition, dict) or partition.get("name") not in {
-        "training",
-        "validation",
-    }:
-        raise EnvironmentValidationError("environment validation accepts training/validation only")
+    if not isinstance(partition, dict) or partition.get("name") not in expected_partitions:
+        accepted = "/".join(sorted(expected_partitions))
+        raise EnvironmentValidationError(f"episode loader accepts {accepted} only")
     end = pd.Timestamp(partition.get("end"))
     if end.tzinfo is None or end >= pd.Timestamp(config.evaluation.sealed_holdout_start):
         raise EnvironmentValidationError("episode manifest reaches the sealed holdout")
@@ -271,12 +269,15 @@ def _direction_age(direction: np.ndarray) -> np.ndarray:
     return ages
 
 
-def load_episode_manifest(
-    config: RlConfig, path: Path, repository_root: Path | None = None
+def _load_episode_manifest(
+    config: RlConfig,
+    path: Path,
+    repository_root: Path | None,
+    expected_partitions: frozenset[str],
 ) -> LoadedEpisodes:
     """Load complete bar episodes and mmap candidate embeddings from a schedule manifest."""
     root = repository_root.resolve() if repository_root else Path(__file__).resolve().parents[3]
-    raw = _manifest(path, config)
+    raw = _manifest(path, config, expected_partitions)
     downstream_path = config.upstream.downstream_config_path
     if not downstream_path.is_absolute():
         downstream_path = root / downstream_path
@@ -374,10 +375,40 @@ def load_episode_manifest(
     )
 
 
+def load_episode_manifest(
+    config: RlConfig, path: Path, repository_root: Path | None = None
+) -> LoadedEpisodes:
+    """Load training or validation episodes; test remains inaccessible here."""
+    return _load_episode_manifest(
+        config, path, repository_root, frozenset({"training", "validation"})
+    )
+
+
+def load_test_episode_manifest(
+    config: RlConfig, path: Path, repository_root: Path | None = None
+) -> LoadedEpisodes:
+    """Load only a frozen non-overlapping test schedule before the sealed holdout."""
+    raw = _manifest(path, config, frozenset({"test"}))
+    if (
+        raw.get("schedule_mode") != "chronological_greedy_nonoverlap_v1"
+        or raw.get("overlapping_starts") is not False
+    ):
+        raise EnvironmentValidationError("test evaluation schedule is not fixed non-overlapping")
+    return _load_episode_manifest(config, path, repository_root, frozenset({"test"}))
+
+
 def load_historical_logistic_policy(
     config: RlConfig, fold: int, repository_root: Path | None = None
 ) -> tuple[HistoricalLogisticPolicy, str]:
     """Load the exact rejected Trend Magic logistic head for one fold."""
+    policy, _path, digest = historical_logistic_artifact(config, fold, repository_root)
+    return policy, digest
+
+
+def historical_logistic_artifact(
+    config: RlConfig, fold: int, repository_root: Path | None = None
+) -> tuple[HistoricalLogisticPolicy, Path, str]:
+    """Load the historical head and expose its verified immutable byte identity."""
     root = repository_root.resolve() if repository_root else Path(__file__).resolve().parents[3]
     downstream_path = config.upstream.downstream_config_path
     if not downstream_path.is_absolute():
@@ -408,7 +439,7 @@ def load_historical_logistic_policy(
             np.asarray(values["intercept"], dtype=np.float64),
             float(values["threshold"][0]),
         )
-    return HistoricalLogisticPolicy(head), sha256_file(head_path)
+    return HistoricalLogisticPolicy(head), head_path, sha256_file(head_path)
 
 
 def _supervised_rows(config: RlConfig, loaded: LoadedEpisodes) -> SupervisedRows:

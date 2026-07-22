@@ -2477,6 +2477,11 @@ def run_seed_confirmation(
         ),
         "final_timesteps": continuation_timesteps
         or config.training.confirmation_timesteps_per_seed,
+        "continuation_decision_path": (
+            str(continuation_decision_path.resolve())
+            if continuation_decision_path is not None
+            else None
+        ),
         "continuation_decision_sha256": decision_sha256,
         "attempt_ledger_sha256": [
             {"path": str(path), "sha256": _sha256(path)} for path in ledger_files

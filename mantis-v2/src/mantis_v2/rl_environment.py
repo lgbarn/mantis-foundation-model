@@ -48,6 +48,19 @@ class CandidateData:
 
 
 @dataclass(frozen=True)
+class EntryOrder:
+    """Immutable causal order payload captured at its original opportunity."""
+
+    candidate: CandidateData
+    decision_close: float
+    ticker: str
+    profile: str
+    quantity: int
+    opportunity_identity: str
+    session_identity: str
+
+
+@dataclass(frozen=True)
 class BarData:
     timestamp: datetime
     open: float
@@ -136,6 +149,11 @@ class _Position:
     bars_held: int = 0
 
 
+@dataclass(frozen=True)
+class _PendingEntry:
+    order: EntryOrder
+
+
 _TICKERS = ("ES", "NQ", "RTY", "YM", "GC", "CL", "ZB")
 _MINI_MULTIPLIERS = {
     "ES": 50.0,
@@ -150,9 +168,20 @@ _MICRO_SYMBOLS = {"ES": "mes", "NQ": "mnq", "RTY": "m2k", "YM": "mym", "GC": "mg
 
 
 class TopstepEntryEnvironment:
-    def __init__(self, config: RlConfig, episode: EnvironmentEpisode) -> None:
+    def __init__(
+        self,
+        config: RlConfig,
+        episode: EnvironmentEpisode,
+        *,
+        gap_adverse_extra_ticks: float = 0.0,
+    ) -> None:
+        if not math.isfinite(gap_adverse_extra_ticks) or gap_adverse_extra_ticks < 0:
+            raise EnvironmentContractError(
+                "gap adverse extra ticks must be finite and non-negative"
+            )
         self.config = config
         self.episode = episode
+        self._gap_adverse_extra_ticks = gap_adverse_extra_ticks
         self._rules = self._load_rules()
         self._zone = ZoneInfo(str(self._rules["session"]["timezone"]))
         self._session_start = time.fromisoformat(str(self._rules["session"]["start"]))
@@ -201,12 +230,13 @@ class TopstepEntryEnvironment:
         self._session_start_balance = self._balance
         self._session = self._session_id(self.episode.bars[0].timestamp)
         self._entry_locked = False
-        self._pending: CandidateData | None = None
+        self._pending: _PendingEntry | None = None
         self._position: _Position | None = None
         self._accepted_trades = 0
         self._trading_days = 0
         self._session_activity = False
         self._best_day = 0.0
+        self._ambiguity_count = 0
         self._terminated = False
         self._truncated = False
         self._status = "ACTIVE"
@@ -278,6 +308,14 @@ class TopstepEntryEnvironment:
             else bar.high >= position.stop_price
         )
         if stopped:
+            favorable = bar.high if position.direction > 0 else bar.low
+            favorable_progress = (
+                favorable - position.entry_price
+                if position.direction > 0
+                else position.entry_price - favorable
+            )
+            if favorable_progress >= self.config.exit.activation_r * position.risk_price:
+                self._ambiguity_count += 1
             gap = (
                 bar.open < position.stop_price
                 if position.direction > 0
@@ -404,7 +442,24 @@ class TopstepEntryEnvironment:
             "status": self._status,
         }
 
-    def step(self, action: int) -> tuple[EntryObservation, float, bool, bool, dict[str, object]]:
+    def capture_entry_order(self, opportunity_identity: str) -> EntryOrder:
+        """Capture the current candidate without any values from a later fill bar."""
+        current = self.episode.bars[self._index]
+        if current.candidate is None or not opportunity_identity:
+            raise EnvironmentContractError("entry order requires a current candidate and identity")
+        return EntryOrder(
+            candidate=current.candidate,
+            decision_close=current.close,
+            ticker=self.episode.ticker,
+            profile=self.episode.profile,
+            quantity=self._quantity,
+            opportunity_identity=opportunity_identity,
+            session_identity=self._session,
+        )
+
+    def step(
+        self, action: int, *, entry_order: EntryOrder | None = None
+    ) -> tuple[EntryObservation, float, bool, bool, dict[str, object]]:
         if self._terminated or self._truncated:
             raise EnvironmentContractError("cannot step a completed environment")
         if type(action) is not int or action not in {0, 1} or not self.action_mask()[action]:
@@ -412,7 +467,17 @@ class TopstepEntryEnvironment:
         current = self.episode.bars[self._index]
         if action == 1:
             assert current.candidate is not None
-            self._pending = current.candidate
+            order = entry_order or self.capture_entry_order(current.timestamp.isoformat())
+            if (
+                order.ticker != self.episode.ticker
+                or order.profile != self.episode.profile
+                or order.quantity != self._quantity
+                or not math.isfinite(order.decision_close)
+            ):
+                raise EnvironmentContractError("entry order does not belong to this environment")
+            self._pending = _PendingEntry(order)
+        elif entry_order is not None:
+            raise EnvironmentContractError("entry order requires a take action")
         self._index += 1
         if self._index >= len(self.episode.bars):
             self._index = len(self.episode.bars) - 1
@@ -433,27 +498,46 @@ class TopstepEntryEnvironment:
             self._session_start_balance = self._balance
             self._session_activity = False
             self._entry_locked = False
+            if self._pending is not None:
+                self._pending = None
+                info["entry_cancellation"] = "session_discontinuity"
         if bar.discontinuity:
             if self._position is not None:
                 self._close_position(bar.open)
+            if self._pending is not None:
+                info["entry_cancellation"] = "bar_discontinuity"
             self._pending = None
             info["event"] = "DISCONTINUITY_RESET"
         elif self._pending is not None:
-            candidate = self._pending
+            pending = self._pending
+            order = pending.order
+            candidate = order.candidate
             risk = candidate.atr * 0.5
+            adverse_gap = (candidate.direction > 0 and bar.open > order.decision_close) or (
+                candidate.direction < 0 and bar.open < order.decision_close
+            )
+            gap_ticks = self._gap_adverse_extra_ticks if adverse_gap else 0.0
+            fill_price = bar.open + candidate.direction * gap_ticks * self._tick_size
             self._position = _Position(
-                entry_price=bar.open,
+                entry_price=fill_price,
                 direction=candidate.direction,
                 risk_price=risk,
-                stop_price=bar.open - candidate.direction * risk,
-                favorable_extreme=bar.open,
+                stop_price=fill_price - candidate.direction * risk,
+                favorable_extreme=fill_price,
             )
             self._pending = None
             self._accepted_trades += 1
             self._session_activity = True
             info["fill_timestamp"] = bar.timestamp.isoformat()
-            info["fill_price"] = bar.open
+            info["fill_price"] = fill_price
             info["booked_round_trip_fee"] = self._fee
+            info["gap_adjusted_fill"] = bool(gap_ticks)
+            info["gap_extra_cost"] = gap_ticks * self._tick_value()
+            info["entry_opportunity_identity"] = order.opportunity_identity
+            info["entry_direction"] = candidate.direction
+            info["entry_atr"] = candidate.atr
+            info["entry_risk_price"] = risk
+            info["entry_stop_price"] = fill_price - candidate.direction * risk
         event = self._process_position(bar)
         if event is not None:
             info["event"] = event
@@ -522,6 +606,7 @@ class TopstepEntryEnvironment:
             "mll_floor": self._mll_floor,
             "best_day_profit": self._best_day,
             "consistency_ratio": consistency,
+            "ambiguity_count": self._ambiguity_count,
             "accepted_trades": self._accepted_trades,
             "trading_days": self._trading_days,
             "entry_locked": self._entry_locked,

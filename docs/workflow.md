@@ -61,6 +61,13 @@ them can make a checkpoint intentionally non-resumable.
 | `just rl-account-replay <input> <output> <config>` | Replays marked-equity account fixtures | Atomic replay manifest | CPU; refuses overwrite |
 | `just rl-smoke <output> <config> [--resume]` | Trains the bounded synthetic MaskablePPO qualification | Atomic checkpoint, state, metrics, manifest | 50K CPU steps; no production or holdout data |
 | `just rl-train <training_manifest> <output> <config> [variant] [--resume]` | Trains all declared development seeds on one production training partition | Atomic fold/seed checkpoints, metrics, seed summary | CPU only; no validation, test, or holdout input |
+| `just rl-freeze-independent-baseline-plan ...` | Freezes fresh independent-actor work at the final serving budget | Content-addressed campaign plan | Training/validation only |
+| `just rl-run-independent-baseline-campaign ...` | Trains all folds and seeds 42-51 fresh, then replays validation | Immutable ledger and campaign freeze | Long CPU work; no test access |
+| `just rl-freeze-evaluation-baselines ...` | Freezes historical, HGB, matched-random, and independent PPO baselines | Content-addressed baseline freeze | Training/validation only; no test access |
+| `just rl-freeze-evaluation-access-plan ...` | Authorizes metadata-only test scheduling | Content-addressed access plan | Must complete before any test file opens |
+| `just rl-build-evaluation-episodes <config> <access_plan> <fold>` | Freezes greedy chronological non-overlapping test attempts | Content-addressed test schedule | Metadata only; features and labels remain closed |
+| `just rl-freeze-evaluation-plan ...` | Binds access plan, exact schedules, stresses, gates, and bootstrap rules | Content-addressed evaluation plan | Must complete before feature replay |
+| `just rl-evaluate-topstep <plan> <output> [--resume]` | Replays the frozen test matrix and applies promotion gates | Immutable attempts, ledger, report, verdict | Test access; sealed holdout remains closed |
 | `just runpod-image-build <image>` | Builds the pinned Linux amd64 CUDA image from a clean commit | Local Docker image | Docker CPU/disk/network use; no Pod or registry push |
 | `just runpod-image-scan <image> <output>` | Scans saved image layers and history | Canonical scan JSON | Requires a local Docker daemon |
 | `just runpod-image-self-check <image> <output>` | Verifies image architecture, tools, lock, and source before launch | Canonical static image JSON | Docker emulation is supported; CUDA is checked first inside the Pod |
@@ -565,6 +572,45 @@ versions, and seed.
 The command never reads a production episode manifest, market corpus, embedding
 shard, or sealed-holdout file. Passing this smoke permits later bounded fold
 work; it is not evidence of trading quality or permission to start Optuna.
+
+### Evaluate Topstep promotion on fixed test data
+
+Run this only after architecture qualification and the ten-seed campaign have
+published the candidate and serving freezes. Build one greedy chronological
+non-overlapping schedule per test fold, then freeze baselines and the complete
+evaluation plan before opening any test outcome:
+
+```bash
+just rl-freeze-independent-baseline-plan candidate-freeze.json serving-freeze.json \
+  artifacts/rl-independent-plan --training-manifest training.json \
+  --validation-manifest validation.json
+just rl-run-independent-baseline-campaign independent-baseline-campaign-plan.json \
+  artifacts/rl-independent-campaign
+just rl-freeze-evaluation-baselines candidate-freeze.json artifacts/rl-baselines \
+  --training-manifest training.json --validation-manifest validation.json \
+  --independent-campaign independent-baseline-campaign.json
+just rl-freeze-evaluation-access-plan serving-freeze.json baseline-freeze.json \
+  artifacts/rl-access-plan fixed-test-v1 2026-07-22T16:00:00+00:00
+just rl-build-evaluation-episodes mantis-v2/configs/rl-entry-topstep-100k.toml \
+  evaluation-access-plan.json 0
+just rl-freeze-evaluation-plan evaluation-access-plan.json \
+  artifacts/rl-evaluation-plan fixed-test-v1 2026-07-22T16:00:00+00:00 \
+  --test-manifest fold-00-test.json
+just rl-evaluate-topstep evaluation-plan.json artifacts/rl-evaluation
+```
+
+Repeat training/validation manifest flags for every fold. The independent
+campaign trains every seed fresh at the final serving budget and freezes its
+validation reports before baseline freeze. The access plan must exist before
+the scheduler reads timestamp/session metadata; scheduling never opens feature
+shards or label/outcome columns. The evaluator rehashes the plan, source, environment code,
+checkpoint bytes, schedules, and baseline freeze before replay. It requires at
+least 300 unique seed-42 attempts separately for mini and micro profiles, then
+replays the same fixed attempts for seeds 42-51, all policies, and all stresses.
+Market uncertainty uses one 100,000-replicate synchronized weekly block matrix
+shared by every gated view. A stopped run resumes only with `--resume`; a
+terminal replay error writes a durable `not_promoted` verdict and is never
+retried. Neither planning nor evaluation accepts a sealed-holdout path.
 
 ### Prepare
 

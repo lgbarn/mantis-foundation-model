@@ -86,6 +86,22 @@ just rl-decide-continuation candidate-freeze.json budget-evidence.json \
 just rl-run-seed-campaign candidate-freeze.json artifacts/rl-seed-campaign \
   --training-manifest training.json --validation-manifest validation.json \
   --resume --continuation-decision continuation-decision.json
+just rl-freeze-independent-baseline-plan candidate-freeze.json serving-freeze.json \
+  artifacts/rl-independent-plan --training-manifest training.json \
+  --validation-manifest validation.json
+just rl-run-independent-baseline-campaign independent-baseline-campaign-plan.json \
+  artifacts/rl-independent-campaign
+just rl-freeze-evaluation-baselines candidate-freeze.json artifacts/rl-baselines \
+  --training-manifest training.json --validation-manifest validation.json \
+  --independent-campaign independent-baseline-campaign.json
+just rl-freeze-evaluation-access-plan serving-freeze.json baseline-freeze.json \
+  artifacts/rl-access-plan fixed-test-v1 2026-07-22T16:00:00+00:00
+just rl-build-evaluation-episodes mantis-v2/configs/rl-entry-topstep-100k.toml \
+  evaluation-access-plan.json 0
+just rl-freeze-evaluation-plan evaluation-access-plan.json \
+  artifacts/rl-evaluation-plan fixed-test-v1 2026-07-22T16:00:00+00:00 \
+  --test-manifest fold-00-test.json
+just rl-evaluate-topstep evaluation-plan.json artifacts/rl-evaluation
 just runpod-image-build ghcr.io/lgbarn/mantis-v2-cuda:SOURCE_SHA
 just runpod-image-scan ghcr.io/lgbarn/mantis-v2-cuda:SOURCE_SHA reports/image-scan.json
 just runpod-image-self-check \
@@ -190,6 +206,20 @@ bootstrap LCB is nonnegative, every ticker/profile point estimate is
 nonnegative, and no safety or estimability gate regresses. The seed campaign API
 then records immutable attempts, verifies 2M-to-5M lineage and fresh endpoint
 parity, and emits `serving-freeze-v1`; test remains inaccessible throughout.
+
+The Topstep promotion stage first runs a fresh `independent_actor` campaign for
+every fold and seed 42-51 at the exact final 5M or 10M serving budget. Freeze
+all historical, training-only HGB, participation-matched random, and campaign
+PPO baselines before publishing `evaluation-access-plan-v1`. Only that plan may
+authorize the metadata-only chronological scheduler; it cannot open features,
+labels, outcomes, or policy outputs. After schedules exist, freeze
+`evaluation-plan-v1`; its content hash binds the access plan and all schedules,
+checkpoints, source and lock identities, stresses, thresholds, bootstrap rules,
+and append-only attempt order. `rl-evaluate-topstep` is the only command that
+opens the fixed test schedules. It replays seeds 42-51, writes immutable attempt
+and ledger artifacts, supports `--resume`, and publishes a content-addressed
+report plus `promotion-verdict-v1`. Any terminal replay failure durably records
+`not_promoted`. This workflow never opens the sealed holdout.
 
 The approved CPU RL supply chain resolves from hash-locked `uv.lock` entries:
 

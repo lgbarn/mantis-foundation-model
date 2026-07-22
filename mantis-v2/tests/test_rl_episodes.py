@@ -2,25 +2,152 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from datetime import date, timedelta
+from itertools import pairwise
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 from mantis_v2 import cli
+from mantis_v2.downstream_config import load_downstream_config
+from mantis_v2.rl_config import load_rl_config
 from mantis_v2.rl_episodes import (
     EpisodeContractError,
     Partition,
     _atomic_resume,
     _independent_exchange_calendar,
+    _load_embedding_metadata_only,
     _session_id,
     _session_is_complete,
     _session_ordinal,
     _verified_path,
+    build_chronological_episode_schedule,
     build_episode_schedule,
     read_observation,
 )
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_evaluation_schedule_greedily_keeps_chronological_nonoverlapping_attempts() -> None:
+    sources = {symbol: _rows(symbol, "2025-01-02", sessions=65) for symbol in ("NQ", "ZB")}
+    partition = Partition(
+        name="test",
+        start=pd.Timestamp("2025-01-01", tz="UTC"),
+        end=pd.Timestamp("2025-05-01", tz="UTC"),
+    )
+
+    episodes = build_chronological_episode_schedule(sources, partition, trading_days=20)
+
+    assert episodes == build_chronological_episode_schedule(sources, partition, trading_days=20)
+    assert {episode.profile for episode in episodes if episode.ticker == "ZB"} == {"one_mini"}
+    for ticker in ("NQ", "ZB"):
+        for profile in ("one_mini", "ten_micros"):
+            selected = [
+                episode
+                for episode in episodes
+                if episode.ticker == ticker and episode.profile == profile
+            ]
+            if ticker == "ZB" and profile == "ten_micros":
+                assert selected == []
+                continue
+            assert selected
+            assert all(
+                previous.terminal_end < current.decision_start
+                for previous, current in pairwise(selected)
+            )
+
+
+def test_evaluation_scheduler_reads_metadata_columns_without_opening_features(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = load_rl_config(ROOT / "configs" / "rl-entry-smoke.toml")
+    downstream = load_downstream_config(ROOT / "configs" / "downstream-trend-magic-smoke.toml")
+    metadata_path = tmp_path / "metadata.parquet"
+    feature_path = tmp_path / "features.npy"
+    context = downstream.data.context_bars
+    first = pd.Timestamp("2025-01-06T18:00:00Z")
+    metadata = pd.DataFrame(
+        {
+            "symbol": ["NQ"],
+            "decision_ts": [first],
+            **{f"{timeframe}_index": [context] for timeframe in downstream.data.timeframes},
+            "label": [1],
+            "future_return": [999.0],
+        }
+    )
+    metadata.to_parquet(metadata_path, index=False)
+    feature_path.write_bytes(b"must-not-open")
+    metadata_bytes = metadata_path.read_bytes()
+    manifest_path = tmp_path / "embedding.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "feature_width": 2,
+                "rows": 1,
+                "outputs": [
+                    {
+                        "number": 0,
+                        "rows": 1,
+                        "features": {
+                            "path": str(feature_path),
+                            "sha256": hashlib.sha256(feature_path.read_bytes()).hexdigest(),
+                            "size": feature_path.stat().st_size,
+                        },
+                        "metadata": {
+                            "path": str(metadata_path),
+                            "sha256": hashlib.sha256(metadata_bytes).hexdigest(),
+                            "size": len(metadata_bytes),
+                        },
+                    }
+                ],
+            }
+        )
+    )
+    config = replace(
+        config,
+        upstream=replace(config.upstream, embedding_manifest_path=manifest_path),
+    )
+    timestamps = {
+        ("NQ", timeframe): pd.date_range(
+            "2025-01-01", periods=context + 200, freq=timeframe, tz="UTC"
+        ).to_numpy()
+        for timeframe in downstream.data.timeframes
+    }
+    columns_seen: list[str] = []
+    original_read = pd.read_parquet
+
+    def guarded_read(path: Path, *, columns: list[str]):
+        columns_seen.extend(columns)
+        return original_read(path, columns=columns)
+
+    monkeypatch.setattr(pd, "read_parquet", guarded_read)
+    monkeypatch.setattr(
+        np,
+        "load",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("feature shard opened by metadata scheduler")
+        ),
+    )
+    session = _session_id(first)
+
+    loaded, outputs, width = _load_embedding_metadata_only(
+        config,
+        timestamps,
+        downstream,
+        tmp_path,
+        {"NQ": set()},
+        {"NQ": {session: _session_ordinal(session)}},
+        {"NQ": {session}},
+    )
+
+    assert width == 2
+    assert len(loaded) == 1
+    assert outputs[0]["features"]["path"] == str(feature_path)
+    assert "label" not in columns_seen
+    assert "future_return" not in columns_seen
 
 
 def _rows(symbol: str, first: str, sessions: int = 22) -> pd.DataFrame:

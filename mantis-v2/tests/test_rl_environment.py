@@ -57,6 +57,52 @@ def _episode(*, profile: str = "one_mini") -> EnvironmentEpisode:
     return EnvironmentEpisode("ES", profile, bars)
 
 
+def test_delayed_entry_order_preserves_original_candidate_payload_and_identity() -> None:
+    first = datetime(2025, 1, 6, 15, 0, tzinfo=UTC)
+    original = CandidateData(
+        embedding=np.array([1.0, -2.0], dtype=np.float32),
+        direction=1,
+        trend_line=99.0,
+        atr=2.0,
+        bars_since_direction_change=3,
+        label=1,
+    )
+    later = CandidateData(
+        embedding=np.array([-5.0, 8.0], dtype=np.float32),
+        direction=-1,
+        trend_line=112.0,
+        atr=8.0,
+        bars_since_direction_change=0,
+        label=0,
+    )
+    episode = EnvironmentEpisode(
+        "NQ",
+        "one_mini",
+        (
+            BarData(first, 100.0, 101.0, 99.0, 100.0, 10.0, original),
+            BarData(first + timedelta(minutes=3), 110.0, 111.0, 109.0, 110.0, 11.0, later),
+            BarData(first + timedelta(minutes=6), 105.0, 105.0, 105.0, 105.0, 12.0),
+        ),
+    )
+    environment = TopstepEntryEnvironment(_config(), episode)
+    environment.reset(seed=42)
+    opportunity_identity = f"{first.isoformat()}:original-order"
+    order = environment.capture_entry_order(opportunity_identity)
+
+    environment.step(0)
+    _observation, _reward, _terminated, _truncated, info = environment.step(1, entry_order=order)
+
+    assert order.candidate is original
+    assert order.decision_close == 100.0
+    assert info["entry_opportunity_identity"] == opportunity_identity
+    assert info["entry_direction"] == 1
+    assert info["entry_atr"] == 2.0
+    assert info["entry_risk_price"] == 1.0
+    assert info["fill_price"] == 105.0
+    assert info["entry_stop_price"] == 104.0
+    assert environment.account_state["accepted_trades"] == 1
+
+
 def test_reset_step_mask_and_next_open_fill_are_deterministic() -> None:
     first = TopstepEntryEnvironment(_config(), _episode())
     second = TopstepEntryEnvironment(_config(), _episode())
@@ -83,6 +129,42 @@ def test_reset_step_mask_and_next_open_fill_are_deterministic() -> None:
     assert next_observation.action_mask.tolist() == [True, False]
     with pytest.raises(EnvironmentContractError, match="invalid action"):
         first.step(1)
+
+
+def test_gap_stress_adjusts_only_an_actual_adverse_gap_fill() -> None:
+    environment = TopstepEntryEnvironment(_config(), _episode(), gap_adverse_extra_ticks=1.0)
+    environment.reset(seed=17)
+
+    _, _, _, _, info = environment.step(1)
+
+    assert info["gap_adjusted_fill"] is True
+    assert info["fill_price"] == pytest.approx(100.75)
+    assert info["gap_extra_cost"] == pytest.approx(12.5)
+
+    skipped = TopstepEntryEnvironment(_config(), _episode(), gap_adverse_extra_ticks=1.0)
+    skipped.reset(seed=17)
+    _, _, _, _, skipped_info = skipped.step(0)
+    assert "gap_adjusted_fill" not in skipped_info
+
+
+def test_same_bar_stop_and_activation_is_counted_and_resolved_stop_first() -> None:
+    first = datetime(2025, 1, 6, 15, 0, tzinfo=UTC)
+    episode = EnvironmentEpisode(
+        "ES",
+        "one_mini",
+        (
+            BarData(first, 100.0, 100.0, 100.0, 100.0, 10.0, _candidate()),
+            BarData(first + timedelta(minutes=3), 100.0, 102.0, 99.0, 100.0, 10.0),
+            BarData(first + timedelta(minutes=6), 100.0, 100.0, 100.0, 100.0, 10.0),
+        ),
+    )
+    environment = TopstepEntryEnvironment(_config(), episode)
+    environment.reset(seed=17)
+
+    _, _, _, _, info = environment.step(1)
+
+    assert info["event"] == "STOP"
+    assert environment.account_state["ambiguity_count"] == 1
 
 
 def test_observation_prefix_cannot_see_future_bars_or_labels() -> None:

@@ -58,6 +58,19 @@ class ObservationSpan:
     row_count: int
 
 
+EpisodeWindow = tuple[
+    date,
+    date,
+    int,
+    int,
+    tuple[ObservationSpan, ...],
+    pd.Timestamp,
+    pd.Timestamp,
+    pd.Timestamp,
+    pd.Timestamp,
+]
+
+
 _CHICAGO = ZoneInfo("America/Chicago")
 _EXCHANGE_CALENDAR_VERSION = "cme-globex-weekday-sessions-v1"
 _EXCHANGE_CALENDAR_SHA256 = hashlib.sha256(_EXCHANGE_CALENDAR_VERSION.encode()).hexdigest()
@@ -121,19 +134,7 @@ def _valid_windows(
     trading_days: int,
     session_calendar: tuple[date, ...] | None = None,
     unsafe_sessions: frozenset[date] = frozenset(),
-) -> list[
-    tuple[
-        date,
-        date,
-        int,
-        int,
-        tuple[ObservationSpan, ...],
-        pd.Timestamp,
-        pd.Timestamp,
-        pd.Timestamp,
-        pd.Timestamp,
-    ]
-]:
+) -> list[EpisodeWindow]:
     required = {
         "symbol",
         "decision_ts",
@@ -180,19 +181,7 @@ def _valid_windows(
             if _session_bounds(session)[0] >= partition.start
             and _session_bounds(session)[1] < partition.end
         ]
-    windows: list[
-        tuple[
-            date,
-            date,
-            int,
-            int,
-            tuple[ObservationSpan, ...],
-            pd.Timestamp,
-            pd.Timestamp,
-            pd.Timestamp,
-            pd.Timestamp,
-        ]
-    ] = []
+    windows: list[EpisodeWindow] = []
     for offset in range(len(sessions) - trading_days + 1):
         selected = sessions[offset : offset + trading_days]
         ordinals = np.asarray([_session_ordinal(session) for session in selected])
@@ -319,6 +308,89 @@ def build_episode_schedule(
             )
         )
     return tuple(episodes)
+
+
+def build_chronological_episode_schedule(
+    sources: Mapping[str, pd.DataFrame],
+    partition: Partition,
+    *,
+    trading_days: int = 20,
+    session_calendars: Mapping[str, tuple[date, ...]] | None = None,
+    unsafe_sessions: Mapping[str, frozenset[date]] | None = None,
+) -> tuple[Episode, ...]:
+    """Greedily freeze every complete non-overlapping test attempt in time order."""
+    tickers = tuple(sorted(sources))
+    if not tickers:
+        raise EpisodeContractError("episode sources are empty")
+    if partition.name != "test":
+        raise EpisodeContractError("chronological evaluation schedule requires test partition")
+    if session_calendars is not None and set(session_calendars) != set(tickers):
+        raise EpisodeContractError("session calendars must match episode sources")
+    if unsafe_sessions is not None and set(unsafe_sessions) != set(tickers):
+        raise EpisodeContractError("unsafe sessions must match episode sources")
+    episodes: list[Episode] = []
+    for ticker in tickers:
+        windows = _valid_windows(
+            ticker,
+            sources[ticker],
+            partition,
+            trading_days,
+            None if session_calendars is None else session_calendars[ticker],
+            frozenset() if unsafe_sessions is None else unsafe_sessions[ticker],
+        )
+        if not windows:
+            raise EpisodeContractError(f"no complete episode windows for: {ticker}")
+        selected: list[EpisodeWindow] = []
+        prior_terminal: pd.Timestamp | None = None
+        for window in windows:
+            decision_start = window[6]
+            terminal_end = window[8]
+            if prior_terminal is not None and decision_start <= prior_terminal:
+                continue
+            selected.append(window)
+            prior_terminal = terminal_end
+        profiles = ("one_mini",) if ticker == "ZB" else ("one_mini", "ten_micros")
+        for window in selected:
+            (
+                start,
+                end,
+                first,
+                candidate_count,
+                spans,
+                lookback_start,
+                decision_start,
+                exit_end,
+                terminal_end,
+            ) = window
+            for profile in profiles:
+                episodes.append(
+                    Episode(
+                        len(episodes),
+                        ticker,
+                        profile,
+                        start,
+                        end,
+                        trading_days,
+                        first,
+                        candidate_count,
+                        spans,
+                        lookback_start,
+                        decision_start,
+                        exit_end,
+                        terminal_end,
+                    )
+                )
+    return tuple(
+        sorted(
+            episodes,
+            key=lambda episode: (
+                episode.decision_start,
+                episode.ticker,
+                episode.profile,
+                episode.number,
+            ),
+        )
+    )
 
 
 def read_observation(path: Path, row: int, width: int) -> np.ndarray:
@@ -557,6 +629,119 @@ def _load_embeddings(
     return metadata, output_records, width
 
 
+def _load_embedding_metadata_only(
+    config: RlConfig,
+    timestamps: Mapping[tuple[str, str], np.ndarray],
+    downstream: DownstreamConfig,
+    repository_root: Path,
+    rollover_sessions: Mapping[str, set[date]],
+    session_ordinals: Mapping[str, Mapping[date, int]],
+    complete_sessions: Mapping[str, set[date]],
+) -> tuple[pd.DataFrame, list[dict[str, object]], int]:
+    """Load only scheduler metadata; never open feature shards or label/outcome columns."""
+    manifest_path = config.upstream.embedding_manifest_path
+    if not manifest_path.is_absolute():
+        manifest_path = repository_root / manifest_path
+    manifest = _load_json(manifest_path, "embedding")
+    width = manifest.get("feature_width")
+    outputs = manifest.get("outputs")
+    if not isinstance(width, int) or not isinstance(outputs, list):
+        raise EpisodeContractError("embedding manifest contract is invalid")
+    allowed_columns = [
+        "symbol",
+        "decision_ts",
+        *[f"{timeframe}_index" for timeframe in downstream.data.timeframes],
+    ]
+    frames: list[pd.DataFrame] = []
+    output_records: list[dict[str, object]] = []
+    total_rows = 0
+    for identity in outputs:
+        if not isinstance(identity, dict) or not isinstance(identity.get("number"), int):
+            raise EpisodeContractError("embedding shard identity is invalid")
+        number = int(identity["number"])
+        features_identity = identity.get("features")
+        if not isinstance(features_identity, dict) or not isinstance(
+            features_identity.get("path"), str
+        ):
+            raise EpisodeContractError("features shard descriptor is invalid")
+        metadata_path = _verified_path(
+            identity.get("metadata"), manifest_path.parent, f"metadata shard {number}"
+        )
+        metadata = pd.read_parquet(metadata_path, columns=allowed_columns)
+        rows = identity.get("rows")
+        if len(metadata) != rows:
+            raise EpisodeContractError(f"embedding metadata row count mismatch: {number}")
+        metadata["shard"] = number
+        metadata["row"] = np.arange(len(metadata), dtype=np.int64)
+        frames.append(metadata)
+        total_rows += len(metadata)
+        output_records.append(
+            {
+                "number": number,
+                "rows": rows,
+                "features": features_identity,
+                "metadata": identity["metadata"],
+            }
+        )
+    if total_rows != manifest.get("rows"):
+        raise EpisodeContractError("embedding manifest total row count mismatch")
+    metadata = pd.concat(frames, ignore_index=True)
+    metadata["decision_ts"] = pd.to_datetime(metadata["decision_ts"], utc=True, errors="raise")
+    context = int(downstream.data.context_bars)
+    lookbacks = pd.Series(pd.NaT, index=metadata.index, dtype="datetime64[ns, UTC]")
+    terminal = pd.Series(pd.NaT, index=metadata.index, dtype="datetime64[ns, UTC]")
+    horizon_complete = pd.Series(False, index=metadata.index, dtype=bool)
+    for symbol, group in metadata.groupby("symbol", sort=False):
+        starts: list[pd.DatetimeIndex] = []
+        for timeframe in downstream.data.timeframes:
+            indices = group[f"{timeframe}_index"].to_numpy(dtype=np.int64)
+            if np.any(indices < context - 1) or np.any(
+                indices >= len(timestamps[(str(symbol), timeframe)])
+            ):
+                raise EpisodeContractError("embedding context index is out of range")
+            starts.append(
+                pd.DatetimeIndex(timestamps[(str(symbol), timeframe)][indices - context + 1])
+            )
+        lookbacks.loc[group.index] = pd.to_datetime(
+            np.minimum.reduce([values.asi8 for values in starts]), utc=True
+        )
+        terminal_indices = group["3min_index"].to_numpy(dtype=np.int64) + int(
+            config.exit.horizon_bars
+        )
+        valid = terminal_indices < len(timestamps[(str(symbol), "3min")])
+        if np.any(valid):
+            terminal.loc[group.index[valid]] = pd.to_datetime(
+                timestamps[(str(symbol), "3min")][terminal_indices[valid]], utc=True
+            )
+        horizon_complete.loc[group.index] = valid
+    metadata["lookback_start_ts"] = lookbacks
+    metadata["terminal_ts"] = terminal
+    metadata["label_end_ts"] = terminal
+    sessions = [_session_id(pd.Timestamp(timestamp)) for timestamp in metadata["decision_ts"]]
+    metadata["session_complete"] = [
+        session in complete_sessions[str(symbol)]
+        for symbol, session in zip(metadata["symbol"], sessions, strict=True)
+    ]
+    metadata["session_ordinal"] = [
+        session_ordinals[str(symbol)].get(session, -1)
+        for symbol, session in zip(metadata["symbol"], sessions, strict=True)
+    ]
+    metadata["horizon_complete"] = horizon_complete
+    rollover_safe: list[bool] = []
+    for symbol, lookback, terminal_value, complete in zip(
+        metadata["symbol"], lookbacks, terminal, horizon_complete, strict=True
+    ):
+        if not complete or pd.isna(terminal_value):
+            rollover_safe.append(False)
+            continue
+        first = _session_ordinal(_session_id(pd.Timestamp(lookback)))
+        last = _session_ordinal(_session_id(pd.Timestamp(terminal_value)))
+        banned = {_session_ordinal(value) for value in rollover_sessions[str(symbol)]}
+        rollover_safe.append(not any(first <= value <= last for value in banned))
+    metadata["rollover_safe"] = rollover_safe
+    return metadata, output_records, width
+
+
 def _atomic_resume(path: Path, payload: dict[str, object]) -> None:
     encoded = json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -584,18 +769,33 @@ def build_episode_manifest(
     partition_name: str,
     episode_count: int,
     repository_root: Path | None = None,
+    evaluation: bool = False,
+    access_plan_path: Path | None = None,
 ) -> dict[str, object]:
     """Validate immutable inputs, sample episodes, and publish one atomic schedule."""
     if partition_name not in {"training", "validation", "test"}:
         raise EpisodeContractError("partition must be training, validation, or test")
     root = repository_root.resolve() if repository_root else Path(__file__).resolve().parents[3]
-    output = (
-        config.run.artifact_root
-        / config.run.name
-        / "episodes"
-        / f"fold-{fold_number:02d}-{partition_name}-seed-{config.run.seed}.json"
-    )
-    identities = _build_manifest(config, root, output)["identities"]
+    if evaluation and partition_name != "test":
+        raise EpisodeContractError("evaluation schedule requires the test partition")
+    suffix = "evaluation" if evaluation else f"seed-{config.run.seed}"
+    output_directory = config.run.artifact_root / config.run.name / "episodes"
+    output = output_directory / f"fold-{fold_number:02d}-{partition_name}-{suffix}.json"
+    access_plan: dict[str, object] | None = None
+    if evaluation:
+        if access_plan_path is None:
+            raise EpisodeContractError("evaluation schedule requires an access plan")
+        from mantis_v2.rl_evaluation import _validated_evaluation_access_plan
+
+        try:
+            access_plan, _access_sha256 = _validated_evaluation_access_plan(
+                config, access_plan_path
+            )
+        except ValueError as exc:
+            raise EpisodeContractError("evaluation access plan is invalid") from exc
+        identities = cast(dict[str, object], access_plan["authorized_identities"])
+    else:
+        identities = _build_manifest(config, root, output)["identities"]
     downstream_path = config.upstream.downstream_config_path
     if not downstream_path.is_absolute():
         downstream_path = root / downstream_path
@@ -603,7 +803,8 @@ def build_episode_manifest(
     timestamps, rollover_sessions, session_ordinals, complete_sessions = _validate_corpus(
         config, downstream, root
     )
-    metadata, embedding_outputs, width = _load_embeddings(
+    loader = _load_embedding_metadata_only if evaluation else _load_embeddings
+    metadata, embedding_outputs, width = loader(
         config,
         timestamps,
         downstream,
@@ -633,27 +834,42 @@ def build_episode_manifest(
         for symbol in downstream.data.symbols
     }
     exchange_calendar = _independent_exchange_calendar(start, end)
-    episodes = build_episode_schedule(
-        sources,
-        partition,
-        seed=config.run.seed,
-        episode_count=episode_count,
-        trading_days=config.episode.timeout_trading_days,
-        session_calendars={symbol: exchange_calendar for symbol in downstream.data.symbols},
-        unsafe_sessions={
-            symbol: frozenset(
-                (set(exchange_calendar) - complete_sessions[symbol]) | rollover_sessions[symbol]
-            )
-            for symbol in downstream.data.symbols
-        },
-    )
+    session_calendars = {symbol: exchange_calendar for symbol in downstream.data.symbols}
+    unsafe_sessions = {
+        symbol: frozenset(
+            (set(exchange_calendar) - complete_sessions[symbol]) | rollover_sessions[symbol]
+        )
+        for symbol in downstream.data.symbols
+    }
+    if evaluation:
+        episodes = build_chronological_episode_schedule(
+            sources,
+            partition,
+            trading_days=config.episode.timeout_trading_days,
+            session_calendars=session_calendars,
+            unsafe_sessions=unsafe_sessions,
+        )
+    else:
+        episodes = build_episode_schedule(
+            sources,
+            partition,
+            seed=config.run.seed,
+            episode_count=episode_count,
+            trading_days=config.episode.timeout_trading_days,
+            session_calendars=session_calendars,
+            unsafe_sessions=unsafe_sessions,
+        )
     payload: dict[str, object] = {
         "schema_version": 1,
         "stage": "rl-episode-schedule",
         "fold": fold_number,
         "partition": {"name": partition_name, "start": str(start), "end": str(end)},
         "seed": config.run.seed,
-        "episode_count": episode_count,
+        "episode_count": len(episodes),
+        "schedule_mode": (
+            "chronological_greedy_nonoverlap_v1" if evaluation else "seeded_balanced_v1"
+        ),
+        "overlapping_starts": False if evaluation else None,
         "account_start": config.episode.account_start,
         "identities": identities,
         "embedding": {"feature_width": width, "outputs": embedding_outputs},
@@ -664,5 +880,68 @@ def build_episode_manifest(
         },
         "episodes": [asdict(episode) for episode in episodes],
     }
+    if evaluation:
+        assert access_plan_path is not None and access_plan is not None
+        selected_identity = [
+            {
+                key: value
+                for key, value in asdict(episode).items()
+                if key
+                in {
+                    "number",
+                    "ticker",
+                    "profile",
+                    "lookback_start",
+                    "decision_start",
+                    "exit_end",
+                    "terminal_end",
+                }
+            }
+            for episode in episodes
+        ]
+        payload["schedule_proof"] = {
+            "algorithm": "chronological_greedy_nonoverlap_v1",
+            "selected_identity_sha256": hashlib.sha256(
+                json.dumps(
+                    selected_identity,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode()
+            ).hexdigest(),
+            "builder_code_path": str(Path(__file__).resolve()),
+            "builder_code_sha256": sha256_file(Path(__file__)),
+            "access_plan_path": str(access_plan_path.resolve()),
+            "access_plan_sha256": sha256_file(access_plan_path),
+            "test_metadata_accessed": True,
+            "test_features_accessed": False,
+            "metadata_columns": cast(list[str], access_plan["metadata_columns"]),
+        }
+    if evaluation:
+        digest = hashlib.sha256(
+            (json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n").encode()
+        ).hexdigest()
+        output = output_directory / f"evaluation-schedule-{digest}.json"
+        _atomic_resume(output, payload)
+        return {"schedule_path": str(output), "schedule_sha256": digest, **payload}
     _atomic_resume(output, payload)
     return payload
+
+
+def build_evaluation_episode_manifest(
+    config: RlConfig,
+    *,
+    fold_number: int,
+    access_plan_path: Path,
+    repository_root: Path | None = None,
+) -> dict[str, object]:
+    """Publish the fixed chronological non-overlapping schedule for one test fold."""
+    return build_episode_manifest(
+        config,
+        fold_number=fold_number,
+        partition_name="test",
+        episode_count=1,
+        repository_root=repository_root,
+        evaluation=True,
+        access_plan_path=access_plan_path,
+    )
