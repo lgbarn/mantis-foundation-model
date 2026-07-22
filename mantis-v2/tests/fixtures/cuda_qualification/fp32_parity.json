@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "generator": "linspace",
+  "context_shape": [1, 5, 512],
+  "context_start": -1.0,
+  "context_stop": 1.0,
+  "candle_target_shape": [1, 5, 4],
+  "candle_target_value": 0.125,
+  "leg_target": [[-0.25, 0.5]]
+}

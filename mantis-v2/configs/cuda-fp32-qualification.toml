@@ -1,0 +1,40 @@
+schema_version = 1
+precision = "fp32"
+
+[probe]
+train_updates = 32
+validation_batches = 1
+pin_memory = true
+run_id_pattern = "^cuda-fp32-probe-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$"
+
+[official_base]
+source_repository = "vfeofanov/mantis"
+source_revision = "0c94f8ceb9f1d1421dd292ed917090df8c31605b"
+hub_model = "paris-noah/MantisV2"
+hub_revision = "99fe0f548960e272fbfa4b82fd9b5b5956779dfd"
+weights_sha256 = "49d46d9a49cccdc87c46f4e0088fa52c0a6ef7eb4c13de5cc9815426b7b17ab1"
+
+[parity]
+atol = 0.00001
+rtol = 0.0001
+
+[batch_envelope]
+initial_batch_size = 32
+growth_factor = 2
+memory_cap_fraction = 0.80
+
+[resume]
+total_updates = 32
+interrupt_after_updates = 16
+atol = 0.00001
+rtol = 0.0001
+
+[export]
+atol = 0.00001
+rtol = 0.0001
+
+[trainability]
+full_finetune_trainable_parameters = 4624854
+full_finetune_frozen_parameters = 820800
+transformer_finetune_trainable_parameters = 4385494
+transformer_finetune_frozen_parameters = 1060160

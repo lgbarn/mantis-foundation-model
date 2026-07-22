@@ -382,7 +382,9 @@ def _run_epoch(
     return {key: value / batches for key, value in totals.items()}, batches
 
 
-def train(config: PipelineConfig) -> dict[str, Any]:
+def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> dict[str, Any]:
+    if process_epoch_limit is not None and process_epoch_limit <= 0:
+        raise PipelineError("process_epoch_limit must be positive")
     seed_everything(config.run.seed)
     root = artifact_root(config)
     _assert_run_writable(config, root)
@@ -476,7 +478,10 @@ def train(config: PipelineConfig) -> dict[str, Any]:
         config.training.early_stopping_patience
         and epochs_without_improvement >= config.training.early_stopping_patience
     )
-    for epoch in range(start_epoch, config.training.epochs):
+    end_epoch = config.training.epochs
+    if process_epoch_limit is not None:
+        end_epoch = min(end_epoch, start_epoch + process_epoch_limit)
+    for epoch in range(start_epoch, end_epoch):
         if stopped_early:
             break
         train_loader = _loader(train_dataset, config, shuffle=True, epoch=epoch)
@@ -521,8 +526,12 @@ def train(config: PipelineConfig) -> dict[str, Any]:
             config.training.early_stopping_patience
             and epochs_without_improvement >= config.training.early_stopping_patience
         )
-        checkpoint_due = (epoch + 1) % config.training.checkpoint_every == 0 or (
-            epoch + 1 == config.training.epochs or stopped_early
+        process_stop = epoch + 1 == end_epoch and end_epoch < config.training.epochs
+        checkpoint_due = (
+            (epoch + 1) % config.training.checkpoint_every == 0
+            or epoch + 1 == config.training.epochs
+            or stopped_early
+            or process_stop
         )
         checkpoint_started = time.perf_counter()
         synchronize_device(device)
