@@ -12,7 +12,7 @@ corpus_manifest_path = "/Volumes/Storage/trading-research/data/MANTIS_NEXTLEG_PA
 corpus_manifest_sha256 = "2d8cf8b708c7c743c849059410b3654bc44f9fe4f7d795928de82526e120d703"
 symbols = ["ES", "NQ", "RTY", "YM", "GC", "CL", "ZB"]
 contract_multipliers = [50.0, 20.0, 50.0, 5.0, 100.0, 1000.0, 1000.0]
-timeframes = ["1min", "3min", "15min"]
+timeframes = ["1min", "3min", "5min", "15min"]
 decision_timeframe = "3min"
 timestamp_column = "datetime"
 timestamp_semantics = "bar_open"
@@ -24,6 +24,7 @@ max_relative_close_jump = 0.05
 [foundation]
 manifest_path = "/Volumes/Storage/trading-research/artifacts/mantis-foundation-model/mantisv2-nextleg-parquet-v2/export/manifest.json"
 weights_sha256 = "aab5bac1459a3cf0b08663d1d327e79ee3c1337dd51a30e16def53b8f563c1b9"
+export_role = "promoted"
 return_transf_layer = -1
 output_token = "cls_token"
 preprocessing = "nextleg_standardized"

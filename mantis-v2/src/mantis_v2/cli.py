@@ -50,6 +50,8 @@ from mantis_v2.downstream_pipeline import (
     walk_forward as downstream_walk_forward,
 )
 from mantis_v2.embedding import EmbeddingContractError
+from mantis_v2.embedding_artifacts import EmbeddingArtifactError
+from mantis_v2.embedding_qualification import qualify_embedding_files
 from mantis_v2.model import ModelContractError
 from mantis_v2.monitoring import MonitoringError, serve_tensorboard
 from mantis_v2.pipeline import (
@@ -188,6 +190,17 @@ def _parser() -> argparse.ArgumentParser:
     candidate_or_failure.add_argument("--candidate", type=Path)
     candidate_or_failure.add_argument("--failure")
     bf16_qualification.add_argument("--output", required=True, type=Path)
+    embedding_qualification = subparsers.add_parser("cuda-embedding-qualify")
+    embedding_qualification.add_argument("--qualification-config", required=True, type=Path)
+    embedding_qualification.add_argument("--identity", required=True, type=Path)
+    embedding_qualification.add_argument("--foundation-manifest", required=True, type=Path)
+    embedding_qualification.add_argument("--cpu-features", required=True, type=Path)
+    embedding_qualification.add_argument("--cuda-features", required=True, type=Path)
+    embedding_qualification.add_argument("--cpu-metadata", required=True, type=Path)
+    embedding_qualification.add_argument("--cuda-metadata", required=True, type=Path)
+    embedding_qualification.add_argument("--shard-directory", required=True, type=Path)
+    embedding_qualification.add_argument("--performance", required=True, type=Path)
+    embedding_qualification.add_argument("--output", required=True, type=Path)
     for command in ("transfer-bundle", "transfer-promote", "transfer-backup-verify"):
         transfer = subparsers.add_parser(command)
         transfer.add_argument("--config", required=True, type=Path)
@@ -247,6 +260,19 @@ def main() -> None:
                 reference_path=args.reference,
                 candidate_path=args.candidate,
                 failure=args.failure,
+                output_path=args.output,
+            )
+        elif args.command == "cuda-embedding-qualify":
+            result = qualify_embedding_files(
+                config_path=args.qualification_config,
+                identity_path=args.identity,
+                foundation_manifest_path=args.foundation_manifest,
+                cpu_features_path=args.cpu_features,
+                cuda_features_path=args.cuda_features,
+                cpu_metadata_path=args.cpu_metadata,
+                cuda_metadata_path=args.cuda_metadata,
+                shard_directory=args.shard_directory,
+                performance_path=args.performance,
                 output_path=args.output,
             )
         elif args.command == "transfer-bundle":
@@ -418,6 +444,7 @@ def main() -> None:
         EnvironmentValidationError,
         DownstreamPipelineError,
         EmbeddingContractError,
+        EmbeddingArtifactError,
         StrategyContractError,
         TopstepContractError,
         WalkForwardContractError,

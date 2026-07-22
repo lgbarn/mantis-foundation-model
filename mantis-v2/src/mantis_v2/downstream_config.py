@@ -21,7 +21,7 @@ class DownstreamRunConfig:
     name: str
     seed: int
     artifact_root: Path
-    device: Literal["auto", "cpu", "mps"]
+    device: Literal["cpu", "cuda", "mps"]
     allow_overwrite: bool
 
 
@@ -47,6 +47,7 @@ class DownstreamDataConfig:
 class FoundationConfig:
     manifest_path: Path
     weights_sha256: str
+    export_role: Literal["diagnostic_candidate", "promoted"]
     return_transf_layer: int
     output_token: Literal["cls_token", "combined"]
     preprocessing: Literal["nextleg_standardized"]
@@ -152,7 +153,7 @@ class DownstreamConfig:
             return None
         return {
             "version": _TREND_MAGIC_CONTRACT_VERSION,
-            "input_timeframes": ["1min", "3min", "15min"],
+            "input_timeframes": list(self.data.timeframes),
             "decision_timeframe": "3min",
             "candidate_rule": "every_eligible_closed_3min_state_bar",
             "direction_owner": "trend_magic",
@@ -246,6 +247,7 @@ _EXPECTED: dict[str, set[str]] = {
     "foundation": {
         "manifest_path",
         "weights_sha256",
+        "export_role",
         "return_transf_layer",
         "output_token",
         "preprocessing",
@@ -474,7 +476,7 @@ def load_downstream_config(path: str | Path, overrides: tuple[str, ...] = ()) ->
             name=str(run["name"]),
             seed=_int(run["seed"], "run.seed"),
             artifact_root=Path(str(run["artifact_root"])),
-            device=_choice(run["device"], "run.device", {"auto", "cpu", "mps"}),
+            device=_choice(run["device"], "run.device", {"cpu", "cuda", "mps"}),
             allow_overwrite=_bool(run["allow_overwrite"], "run.allow_overwrite"),
         ),
         data=DownstreamDataConfig(
@@ -512,6 +514,11 @@ def load_downstream_config(path: str | Path, overrides: tuple[str, ...] = ()) ->
         foundation=FoundationConfig(
             manifest_path=Path(str(foundation["manifest_path"])),
             weights_sha256=str(foundation["weights_sha256"]),
+            export_role=_choice(
+                foundation["export_role"],
+                "foundation.export_role",
+                {"diagnostic_candidate", "promoted"},
+            ),
             return_transf_layer=_int(
                 foundation["return_transf_layer"],
                 "foundation.return_transf_layer",
@@ -691,8 +698,14 @@ def _validate(config: DownstreamConfig) -> None:
             )
     elif has_manifest_path or has_manifest_sha:
         raise ConfigError("CSV and synthetic data cannot bind a Parquet corpus manifest")
-    if config.data.timeframes != ("1min", "3min", "15min"):
-        raise ConfigError("data.timeframes must be ordered exactly as 1min, 3min, 15min")
+    supported_timeframes = {
+        ("1min", "3min", "15min"),
+        ("1min", "3min", "5min", "15min"),
+    }
+    if config.data.timeframes not in supported_timeframes:
+        raise ConfigError(
+            "data.timeframes must use an ordered registered three- or four-timeframe recipe"
+        )
     if config.data.decision_timeframe != "3min":
         raise ConfigError("data.decision_timeframe must be 3min")
     if isinstance(config.strategy, TrendMagicStrategyConfig):

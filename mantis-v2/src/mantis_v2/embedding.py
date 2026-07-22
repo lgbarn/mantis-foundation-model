@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -77,18 +77,29 @@ def _validated_evidence(manifest_path: Path, manifest: dict[str, Any]) -> tuple[
     return legacy_path, sha256_file(legacy_path)
 
 
-def _device(config: DownstreamConfig) -> torch.device:
-    requested = config.run.device
+def resolve_embedding_device(
+    requested: Literal["cpu", "cuda", "mps"],
+    *,
+    cuda_available: Callable[[], bool] | None = None,
+    mps_available: Callable[[], bool] | None = None,
+) -> torch.device:
+    """Resolve only an explicitly requested downstream embedding device."""
+    cuda_available = cuda_available or torch.cuda.is_available
+    mps_available = mps_available or torch.backends.mps.is_available
+    if requested == "cuda":
+        if not cuda_available():
+            raise EmbeddingContractError("CUDA was requested but is unavailable")
+        return torch.device("cuda")
     if requested == "mps":
-        if not torch.backends.mps.is_available():
+        if not mps_available():
             raise EmbeddingContractError("MPS was requested but is unavailable")
-        return torch.device("mps")
-    if requested == "auto" and torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
 
 
-def load_foundation(config: DownstreamConfig) -> LoadedFoundation:
+def load_foundation(
+    config: DownstreamConfig, *, device: torch.device | None = None
+) -> LoadedFoundation:
     """Load only the encoder from a parity-verified validated export."""
     manifest_path = config.foundation.manifest_path
     try:
@@ -112,10 +123,13 @@ def load_foundation(config: DownstreamConfig) -> LoadedFoundation:
     actual_sha = sha256_file(weights_path)
     if actual_sha != config.foundation.weights_sha256:
         raise EmbeddingContractError("foundation safetensors digest does not match config")
+    if manifest.get("export_role") != config.foundation.export_role:
+        raise EmbeddingContractError("foundation export role does not match config")
     recorded_sha = manifest.get("weights_sha256")
     if recorded_sha is not None and recorded_sha != actual_sha:
         raise EmbeddingContractError("foundation safetensors digest does not match manifest")
-    device = _device(config)
+    if device is None:
+        device = resolve_embedding_device(config.run.device)
     model = MantisV2(
         return_transf_layer=config.foundation.return_transf_layer,
         output_token=config.foundation.output_token,
@@ -175,10 +189,14 @@ def iter_symbol_embeddings(
     symbol: str,
     config: DownstreamConfig,
     foundation: LoadedFoundation,
+    *,
+    start_row: int = 0,
 ) -> Iterator[tuple[int, int, np.ndarray]]:
-    """Extract concatenated 1m/3m/15m channel embeddings in bounded batches."""
+    """Extract concatenated four-timeframe channel embeddings in bounded batches."""
     if candidates.empty:
         raise EmbeddingContractError(f"candidate table is empty for {symbol}")
+    if start_row < 0 or start_row > len(candidates):
+        raise EmbeddingContractError("embedding resume row is outside the candidate table")
     streams = {
         timeframe: load_market_frame(config, symbol, timeframe)
         .loc[:, list(config.data.feature_columns)]
@@ -187,7 +205,7 @@ def iter_symbol_embeddings(
     }
     batch_size = config.foundation.batch_size
     channels = len(config.data.feature_columns)
-    for start in range(0, len(candidates), batch_size):
+    for start in range(start_row, len(candidates), batch_size):
         stop = min(start + batch_size, len(candidates))
         timeframe_embeddings: list[torch.Tensor] = []
         with torch.inference_mode():
