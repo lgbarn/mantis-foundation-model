@@ -30,7 +30,7 @@ the immutable image owns the runtime, and existing MantisV2 commands own model
 behavior.
 
 Implementation proceeds through zero-cost dry runs before a human-approved
-two-hour Secure Cloud A40 qualification. Production remains locked until CUDA,
+two-hour Secure Cloud H100 SXM qualification. Production remains locked until CUDA,
 precision, resume, embedding, CPU-host, TensorBoard, artifact, and projected-cost
 gates pass. Foundation and Trend Magic form one gated DAG; Topstep constrained
 PPO, Optuna, Monte Carlo, and policy export form a separately CPU-qualified DAG.
@@ -126,9 +126,9 @@ The 2026 Sealed Holdout is never available to infrastructure or model selection.
 
 - Use one repository context and the canonical terms in the root glossary.
 - Use one on-demand Secure Cloud Pod at a time. The first qualification target
-  is an A40 with 48 GB VRAM, at least 8 vCPU, at least 32 GB RAM, and a two-hour
-  hard deadline. Price and availability are observations, never configuration
-  truths.
+  is an H100 SXM with 80 GB VRAM, at least 8 vCPU, at least 32 GB RAM, and a
+  two-hour hard deadline. Price and availability are observations, never
+  configuration truths.
 - Use one provider-sized 150 GB Standard network volume. Enforce a 120 GB
   high-water policy and at least 30,000,000,000 measured free bytes.
 - Terraform owns the network volume and private Pod template. It does not create

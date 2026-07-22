@@ -41,7 +41,7 @@ def _desired_contract() -> dict[str, Any]:
         "schema_version": 1,
         "lifecycle_owner": "terraform-stable-v1",
         "volume": {
-            "dataCenterId": "US-CA-2",
+            "dataCenterId": "US-MO-1",
             "name": "mantis-v2-standard-volume-v1",
             "size": 150,
         },

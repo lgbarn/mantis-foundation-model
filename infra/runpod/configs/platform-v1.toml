@@ -2,8 +2,8 @@ schema_version = 1
 
 [provider]
 secure_cloud = true
-allowed_gpu_types = ["NVIDIA A40", "NVIDIA L40", "NVIDIA L40S", "NVIDIA A100 80GB PCIe"]
-allowed_datacenters = ["US-CA-2"]
+allowed_gpu_types = ["NVIDIA H100 80GB HBM3", "NVIDIA L40S", "NVIDIA A40"]
+allowed_datacenters = ["US-MO-1"]
 minimum_vcpu = 8
 minimum_ram_gb = 32
 container_disk_gb = 50

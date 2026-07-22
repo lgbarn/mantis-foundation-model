@@ -19,7 +19,7 @@
     "volumeMountPath": "/workspace/mantis"
   },
   "volume": {
-    "dataCenterId": "US-CA-2",
+    "dataCenterId": "US-MO-1",
     "name": "mantis-v2-standard-volume-v1",
     "size": 150
   }
