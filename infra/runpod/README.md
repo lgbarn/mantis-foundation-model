@@ -367,12 +367,28 @@ NVIDIA A40 with 48 GB VRAM, at least 8 vCPU, and at least 32 GB host RAM. A
 read-only query on 2026-07-21 returned $0.44/hour with Low availability; always
 re-query immediately before launch.
 
-Do not spend on a benchmark until the repository has a pinned CUDA image, a
-real-data CUDA probe, TensorBoard event writing, precision configuration,
-cross-device and interrupted-resume parity fixtures, CUDA embedding support,
-resource instrumentation, transfer verification, and an independent shutdown
-watchdog. The benchmark is the first post-implementation acceptance gate, not
-a planning-time claim that CUDA is already qualified.
+The repository now has a pinned CUDA image, real-data FP32 probe contract,
+TensorBoard event writing, fixed cross-device and interrupted-resume oracles,
+resource evidence schemas, and transfer verification. CUDA embedding, BF16,
+and the independent shutdown watchdog remain separate gates. The first paid
+benchmark is still a post-implementation human acceptance gate, not evidence
+that CUDA is already qualified.
+
+Run the fail-closed FP32 probe inside the pinned image with a unique absent run
+identity and machine-local real-data paths:
+
+```bash
+just probe-cuda-fp32 \
+  mantis-v2/configs/nextleg-parquet-v2-probe.toml \
+  mantis-v2/configs/cuda-fp32-qualification.toml \
+  cuda-fp32-probe-YYYYMMDDTHHMMSSZ-1234abcd \
+  /workspace/artifacts
+```
+
+This command performs exactly 32 optimizer updates and one pre-holdout
+validation batch, then evaluates and verifies the selected safetensors export.
+It cannot resume, overwrite, fall back to scratch weights, or unlock holdout
+data. CPU-only execution emits a skip record and does not qualify the path.
 
 Run the A40 alone first with a two-hour hard deadline. A longer qualification
 requires a new explicit approval after reviewing that result. The cumulative

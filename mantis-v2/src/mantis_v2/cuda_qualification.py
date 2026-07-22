@@ -352,8 +352,12 @@ def build_probe_config(
         )
     if pipeline.evaluation.allow_holdout:
         raise QualificationError("CUDA qualification must not unlock the holdout")
+    if pipeline.data.root == "synthetic":
+        raise QualificationError("CUDA qualification requires real pre-holdout data")
     if pipeline.model.mode == "scratch":
         raise QualificationError("CUDA qualification requires official-base initialization")
+    if pipeline.model.mode not in {"full_finetune", "transformer_finetune"}:
+        raise QualificationError("CUDA qualification requires a supported fine-tune mode")
 
     expected_base = qualification.official_base
     actual_base = pipeline.model

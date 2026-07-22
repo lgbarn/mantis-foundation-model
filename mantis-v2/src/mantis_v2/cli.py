@@ -10,10 +10,17 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+import torch
+
 from mantis_v2.checkpoint import CheckpointError
 from mantis_v2.config import ConfigError, PipelineConfig, load_config
 from mantis_v2.corpus import CorpusRepairError, repair_corpus, validate_corpus
 from mantis_v2.corpus_config import load_corpus_repair_config
+from mantis_v2.cuda_qualification import (
+    QualificationError,
+    load_qualification_config,
+    run_probe_and_export,
+)
 from mantis_v2.data import DataContractError, inspect_streams
 from mantis_v2.downstream_config import DownstreamConfig, load_downstream_config
 from mantis_v2.downstream_pipeline import (
@@ -168,6 +175,11 @@ def _parser() -> argparse.ArgumentParser:
     runpod_plan.add_argument("--authorization", type=Path)
     runpod_plan.add_argument("--evaluated-at", required=True)
     runpod_plan.add_argument("--output", required=True, type=Path)
+    cuda_probe = subparsers.add_parser("cuda-fp32-probe")
+    cuda_probe.add_argument("--config", required=True, type=Path)
+    cuda_probe.add_argument("--qualification-config", required=True, type=Path)
+    cuda_probe.add_argument("--run-id", required=True)
+    cuda_probe.add_argument("--artifact-root", required=True, type=Path)
     for command in ("transfer-bundle", "transfer-promote", "transfer-backup-verify"):
         transfer = subparsers.add_parser(command)
         transfer.add_argument("--config", required=True, type=Path)
@@ -213,6 +225,14 @@ def main() -> None:
     try:
         if args.command == "runpod-image-self-check":
             result = runpod_image_self_check()
+        elif args.command == "cuda-fp32-probe":
+            result = run_probe_and_export(
+                load_config(args.config),
+                load_qualification_config(args.qualification_config),
+                run_id=args.run_id,
+                artifact_root=args.artifact_root,
+                cuda_available=torch.cuda.is_available(),
+            )
         elif args.command == "transfer-bundle":
             transfer_config = load_transfer_config(args.config)
             transfer_manifest = write_bundle_manifest(
@@ -387,6 +407,7 @@ def main() -> None:
         WalkForwardContractError,
         RunpodConfigError,
         LaunchPlanError,
+        QualificationError,
         TransferBundleError,
         TransferConfigError,
     ) as exc:

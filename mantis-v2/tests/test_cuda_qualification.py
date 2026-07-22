@@ -9,6 +9,7 @@ import pytest
 import torch
 from mantis.architecture import MantisV2
 from mantis_v2 import model as model_module
+from mantis_v2.cli import _parser
 from mantis_v2.config import load_config
 from mantis_v2.cuda_qualification import (
     ArtifactParityEvidence,
@@ -94,6 +95,22 @@ def test_probe_contract_rejects_holdout_or_unofficial_initialization(tmp_path: P
     with pytest.raises(QualificationError, match="official-base"):
         build_probe_config(
             replace(pipeline, model=replace(pipeline.model, mode="scratch")),
+            qualification,
+            run_id=run_id,
+            artifact_root=tmp_path,
+        )
+
+    with pytest.raises(QualificationError, match="real pre-holdout data"):
+        build_probe_config(
+            replace(pipeline, data=replace(pipeline.data, root="synthetic")),
+            qualification,
+            run_id=run_id,
+            artifact_root=tmp_path,
+        )
+
+    with pytest.raises(QualificationError, match="fine-tune mode"):
+        build_probe_config(
+            replace(pipeline, model=replace(pipeline.model, mode="head_only")),
             qualification,
             run_id=run_id,
             artifact_root=tmp_path,
@@ -525,3 +542,23 @@ def test_preregistered_counts_match_the_pinned_upstream_architecture(
         )
         assert trainable == getattr(qualification.trainability, f"{mode}_trainable_parameters")
         assert frozen == getattr(qualification.trainability, f"{mode}_frozen_parameters")
+
+
+def test_cuda_probe_cli_requires_explicit_identity_paths() -> None:
+    args = _parser().parse_args(
+        [
+            "cuda-fp32-probe",
+            "--config",
+            "pipeline.toml",
+            "--qualification-config",
+            "qualification.toml",
+            "--run-id",
+            "cuda-fp32-probe-20260721T120000Z-a1b2c3d4",
+            "--artifact-root",
+            "/artifacts",
+        ]
+    )
+
+    assert args.command == "cuda-fp32-probe"
+    assert args.qualification_config == Path("qualification.toml")
+    assert args.artifact_root == Path("/artifacts")

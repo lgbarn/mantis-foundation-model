@@ -33,6 +33,9 @@ smoke:
 probe-mps:
     uv run mantis-v2 probe --config mantis-v2/configs/nextleg-parquet-v2-probe.toml
 
+probe-cuda-fp32 config qualification run_id artifact_root:
+    uv run mantis-v2 cuda-fp32-probe --config {{quote(config)}} --qualification-config {{quote(qualification)}} --run-id {{quote(run_id)}} --artifact-root {{quote(artifact_root)}}
+
 verify-upstream:
     uv run mantis-v2 verify-upstream --config mantis-v2/configs/nextleg.toml
 
