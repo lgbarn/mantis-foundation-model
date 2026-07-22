@@ -1,0 +1,26 @@
+{
+  "lifecycle_owner": "terraform-stable-v1",
+  "schema_version": 1,
+  "template": {
+    "category": "NVIDIA",
+    "containerDiskInGb": 50,
+    "dockerEntrypoint": [],
+    "dockerStartCmd": [],
+    "env": {},
+    "imageName": "ghcr.io/lgbarn/mantis-v2-cuda@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "isPublic": false,
+    "isServerless": false,
+    "name": "mantis-v2-private-template-v1",
+    "ports": [
+      "22/tcp"
+    ],
+    "readme": "lifecycle-owner: terraform-stable-v1",
+    "volumeInGb": 0,
+    "volumeMountPath": "/workspace/mantis"
+  },
+  "volume": {
+    "dataCenterId": "US-CA-2",
+    "name": "mantis-v2-standard-volume-v1",
+    "size": 150
+  }
+}

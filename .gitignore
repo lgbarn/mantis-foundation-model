@@ -19,6 +19,17 @@ reports/
 output/
 tmp/
 infra/runpod/local.toml
+infra/runpod/terraform/.terraform/
+infra/runpod/terraform/*.tfstate
+infra/runpod/terraform/*.tfstate.*
+infra/runpod/terraform/*.tfplan
+infra/runpod/terraform/*.tfplan.json
+infra/runpod/terraform/*.auto.tfvars
+infra/runpod/terraform/*.auto.tfvars.json
+infra/runpod/terraform/terraform.tfvars
+infra/runpod/terraform/*.backend.hcl
+infra/runpod/terraform/*.json
+!infra/runpod/terraform/*.example.json
 *.pt
 *.pth
 *.onnx
