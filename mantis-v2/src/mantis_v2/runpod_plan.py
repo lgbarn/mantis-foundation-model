@@ -129,7 +129,7 @@ def _matching_volume(intent: LaunchIntent, inventory: InventorySnapshot) -> Inve
 def _projected_spend(
     platform: PlatformConfig, intent: LaunchIntent, price_per_gpu_hour: Decimal
 ) -> Decimal:
-    hours = Decimal(intent.maximum_duration_seconds) / Decimal(3600)
+    hours = Decimal(intent.maximum_duration_seconds + 600 + 120) / Decimal(3600)
     compute = price_per_gpu_hour * Decimal(intent.gpu_count) * hours
     container = (
         platform.billing.container_disk_usd_per_gb_month
@@ -220,6 +220,15 @@ def _policy_reasons(
     if authorization is None:
         reasons.append("authorization_required")
     else:
+        if not authorization.autopay_disabled:
+            reasons.append("autopay_not_attested_disabled")
+        if (
+            authorization.ordinary_launch_cutoff_usd != platform.budget.ordinary_launch_cutoff_usd
+            or authorization.campaign_ceiling_usd != platform.budget.account_ceiling_usd
+        ):
+            reasons.append("authorization_budget_limits_mismatch")
+        if authorization.recovery_authorized is not (intent.stage == "recovery"):
+            reasons.append("authorization_recovery_mismatch")
         if authorization.subject_digest != subject_digest:
             reasons.append("authorization_subject_mismatch")
         if authorization.authorized_at > evaluated_at:

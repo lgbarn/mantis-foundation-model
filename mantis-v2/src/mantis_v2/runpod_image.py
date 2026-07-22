@@ -57,6 +57,7 @@ def runtime_inventory(
     runner: Runner = _run,
     torch_module: Any | None = None,
     lock_path: Path = Path("/opt/mantis/uv.lock"),
+    require_cuda: bool = True,
 ) -> dict[str, Any]:
     required = (
         "MANTIS_BASE_IMAGE",
@@ -131,7 +132,7 @@ def runtime_inventory(
         },
         "packages": packages,
     }
-    if not compatible:
+    if require_cuda and not compatible:
         raise ImageContractError("CUDA runtime or driver is incompatible", inventory)
     if inventory["platform"]["architecture"] != "x86_64":
         raise ImageContractError("image runtime architecture must be x86_64")
@@ -143,6 +144,11 @@ def runtime_inventory(
     return inventory
 
 
-def self_check() -> dict[str, Any]:
+def self_check(*, require_cuda: bool = True) -> dict[str, Any]:
     """Collect deterministic inventory before any workload path is opened."""
-    return runtime_inventory()
+    return {
+        "schema_version": 1,
+        "passed": True,
+        "scope": "runtime_cuda" if require_cuda else "static_image",
+        "inventory": runtime_inventory() if require_cuda else runtime_inventory(require_cuda=False),
+    }

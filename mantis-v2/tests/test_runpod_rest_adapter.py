@@ -59,6 +59,8 @@ def _pod_response() -> dict[str, object]:
         "costPerHr": "0.44",
         "vcpuCount": 8,
         "memoryInGb": 32,
+        "lastStartedAt": "2026-07-21T13:59:55Z",
+        "lastStatusChange": "2026-07-21T13:59:56Z",
         "env": {"RUNPOD_API_KEY": "provider-secret"},
     }
 
@@ -105,6 +107,8 @@ def test_create_uses_exact_pinned_rest_v1_exchange_and_normalizes_response() -> 
         "costPerHr": "0.44",
         "vcpuCount": 8,
         "memoryInGb": 32,
+        "lastStartedAt": "2026-07-21T13:59:55Z",
+        "lastStatusChange": "2026-07-21T13:59:56Z",
     }
     assert "provider-secret" not in json.dumps(created)
 

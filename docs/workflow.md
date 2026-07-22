@@ -63,8 +63,12 @@ them can make a checkpoint intentionally non-resumable.
 | `just rl-train <training_manifest> <output> <config> [variant] [--resume]` | Trains all declared development seeds on one production training partition | Atomic fold/seed checkpoints, metrics, seed summary | CPU only; no validation, test, or holdout input |
 | `just runpod-image-build <image>` | Builds the pinned Linux amd64 CUDA image from a clean commit | Local Docker image | Docker CPU/disk/network use; no Pod or registry push |
 | `just runpod-image-scan <image> <output>` | Scans saved image layers and history | Canonical scan JSON | Requires a local Docker daemon |
-| `just runpod-image-self-check <image> <output>` | Verifies CUDA, driver, tools, lock, and runtime inventory | Canonical runtime JSON | Requires Docker plus a compatible NVIDIA GPU |
-| `just runpod-launch <decision> <local>` | Creates one receipt-bound Pod from an approved decision | Durable Pod receipt | Real paid API mutation; exact unexpired authorization required |
+| `just runpod-image-self-check <image> <output>` | Verifies image architecture, tools, lock, and source before launch | Canonical static image JSON | Docker emulation is supported; CUDA is checked first inside the Pod |
+| `just transfer-stage-runpod <config> <local> <decision>` | Rehashes and pre-stages the immutable bundle through RunPod S3 | Network-volume objects | Live storage writes; no paid Pod |
+| `just runpod-seal-workload <spec> <output-root>` | Seals all training, data, image, watchdog, and budget identities | Content-addressed workload manifest | Local only |
+| `just runpod-bind-workload <manifest> <decision> <pod-path> <time> <output>` | Binds an approved provider decision to one immediate workload | Immutable bound decision | Local only |
+| `just runpod-supervise-workload <manifest> <decision> <local> <runpodctl>` | Verifies staging, creates, monitors, terminates, reconciles, and replicates one Pod | Durable receipts and replicated artifacts | The only permitted paid Pod create path |
+| `just runpod-launch <decision> <local>` | Rejects unsupervised Pod creation | Nothing | Always fails closed |
 | `just runpod-status <pod-id> <run-name> <local>` | Reads allowlisted status for one receipted Pod | Redacted JSON status | Real provider read |
 | `just runpod-terminate <pod-id> <run-name> <local>` | Terminates one exact receipted Pod idempotently | Durable termination receipt | Real provider mutation |
 | `just runpod-enforce-deadline <pod-id> <local>` | Enforces the durable hard deadline | Durable termination receipt | Real provider mutation after deadline |

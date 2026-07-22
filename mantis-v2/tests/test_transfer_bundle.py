@@ -215,7 +215,7 @@ def test_stage_bundle_uploads_only_absent_or_size_mismatched_objects(tmp_path: P
     (source / "alpha.txt").write_bytes(b"alpha\n")
     (source / "nested" / "beta.bin").write_bytes(b"\x00\xff")
     manifest = transfer_bundle.build_bundle(source)
-    prefix = f"transfer/incoming/{manifest.bundle_digest}"
+    prefix = f"mantis/transfer/incoming/{manifest.bundle_digest}"
     alpha_key = f"{prefix}/files/alpha.txt"
     beta_key = f"{prefix}/files/nested/beta.bin"
     manifest_key = f"{prefix}/manifest.json"
@@ -239,7 +239,7 @@ def test_stage_bundle_resumes_after_interrupted_upload(tmp_path: Path) -> None:
     (source / "alpha.txt").write_bytes(b"alpha\n")
     (source / "beta.txt").write_bytes(b"beta\n")
     manifest = transfer_bundle.build_bundle(source)
-    prefix = f"transfer/incoming/{manifest.bundle_digest}"
+    prefix = f"mantis/transfer/incoming/{manifest.bundle_digest}"
     alpha_key = f"{prefix}/files/alpha.txt"
     beta_key = f"{prefix}/files/beta.txt"
     manifest_key = f"{prefix}/manifest.json"

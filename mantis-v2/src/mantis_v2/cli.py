@@ -7,6 +7,7 @@ import json
 import os
 import socket
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -55,6 +56,25 @@ from mantis_v2.downstream_pipeline import (
 from mantis_v2.embedding import EmbeddingContractError
 from mantis_v2.embedding_artifacts import EmbeddingArtifactError
 from mantis_v2.embedding_qualification import qualify_embedding_files
+from mantis_v2.foundation_diagnostic import DiagnosticError, score_diagnostic_fixture
+from mantis_v2.foundation_fixture import (
+    FoundationFixtureError,
+    embed_diagnostic_fixture,
+    freeze_diagnostic_fixture,
+)
+from mantis_v2.foundation_matrix import (
+    FoundationMatrixError,
+    decide_confirmation_gate,
+    decide_five_minute_gate,
+    decide_mode_gate,
+    finalize_cell_result,
+    promote_selected_export,
+    render_confirmation_plan,
+    render_initial_plan,
+    render_mode_plan,
+    run_matrix_cell,
+    write_matrix_decision,
+)
 from mantis_v2.model import ModelContractError
 from mantis_v2.monitoring import MonitoringError, serve_tensorboard
 from mantis_v2.pipeline import (
@@ -94,7 +114,7 @@ from mantis_v2.rl_validation import (
     EnvironmentValidationError,
     write_environment_validation,
 )
-from mantis_v2.runpod_config import RunpodConfigError, load_local_config
+from mantis_v2.runpod_config import RunpodConfigError, canonical_digest, load_local_config
 from mantis_v2.runpod_image import ImageContractError
 from mantis_v2.runpod_image import self_check as runpod_image_self_check
 from mantis_v2.runpod_lifecycle import (
@@ -109,6 +129,20 @@ from mantis_v2.runpod_lifecycle import (
 )
 from mantis_v2.runpod_plan import LaunchPlanError, write_launch_decision
 from mantis_v2.runpod_rest_adapter import RunpodAdapterError, RunpodRestV1Adapter
+from mantis_v2.runpod_s3 import AwsCliS3TransferAdapter, RunpodS3Error
+from mantis_v2.runpod_s3_workload import RunpodS3WorkloadIO
+from mantis_v2.runpod_workload import (
+    WorkloadError,
+    bind_workload_decision,
+    execute_workload_manifest,
+    seal_workload_manifest,
+    supervise_workload,
+    validate_workload_manifest,
+)
+from mantis_v2.runpodctl_adapter import (
+    RunpodctlCreateAdapter,
+    RunpodctlError,
+)
 from mantis_v2.runtime import RuntimeContractError
 from mantis_v2.strategy import StrategyContractError
 from mantis_v2.topstep import TopstepContractError
@@ -169,12 +203,17 @@ def _parser() -> argparse.ArgumentParser:
         "rl-run-architecture-ablation",
         "rl-run-seed-campaign",
         "runpod-image-self-check",
+        "runpod-image-static-check",
         *_CORPUS_COMMANDS,
         *_DOWNSTREAM_COMMANDS,
         "tensorboard",
     ):
         child = subparsers.add_parser(command)
-        if command not in ("runpod-image-self-check", "tensorboard"):
+        if command not in (
+            "runpod-image-self-check",
+            "runpod-image-static-check",
+            "tensorboard",
+        ):
             child.add_argument("--config", required=True, type=Path)
         if command == "tensorboard":
             child.add_argument("--run-root", required=True, type=Path)
@@ -279,6 +318,23 @@ def _parser() -> argparse.ArgumentParser:
     deadline = subparsers.add_parser("runpod-enforce-deadline")
     deadline.add_argument("--pod-id", required=True)
     deadline.add_argument("--local", required=True, type=Path)
+    workload_execute = subparsers.add_parser("workload-execute")
+    workload_execute.add_argument("--manifest", required=True, type=Path)
+    workload_bind = subparsers.add_parser("runpod-bind-workload")
+    workload_bind.add_argument("--manifest", required=True, type=Path)
+    workload_bind.add_argument("--decision", required=True, type=Path)
+    workload_bind.add_argument("--pod-manifest-path", required=True, type=Path)
+    workload_bind.add_argument("--output", required=True, type=Path)
+    workload_bind.add_argument("--evaluated-at", required=True)
+    workload_supervise = subparsers.add_parser("runpod-supervise-workload")
+    workload_supervise.add_argument("--manifest", required=True, type=Path)
+    workload_supervise.add_argument("--decision", required=True, type=Path)
+    workload_supervise.add_argument("--local", required=True, type=Path)
+    workload_supervise.add_argument("--runpodctl-binary", required=True, type=Path)
+    workload_supervise.add_argument("--aws-binary", default="aws", type=Path)
+    workload_seal = subparsers.add_parser("runpod-seal-workload")
+    workload_seal.add_argument("--spec", required=True, type=Path)
+    workload_seal.add_argument("--output-root", required=True, type=Path)
     cuda_probe = subparsers.add_parser("cuda-fp32-probe")
     cuda_probe.add_argument("--config", required=True, type=Path)
     cuda_probe.add_argument("--qualification-config", required=True, type=Path)
@@ -315,8 +371,56 @@ def _parser() -> argparse.ArgumentParser:
     stage_dry_run = subparsers.add_parser("transfer-stage-dry-run")
     stage_dry_run.add_argument("--config", required=True, type=Path)
     stage_dry_run.add_argument("--remote-inventory", required=True, type=Path)
+    stage_runpod = subparsers.add_parser("transfer-stage-runpod")
+    stage_runpod.add_argument("--config", required=True, type=Path)
+    stage_runpod.add_argument("--local", required=True, type=Path)
+    stage_runpod.add_argument("--decision", required=True, type=Path)
+    stage_runpod.add_argument("--aws-binary", default="aws", type=Path)
     manifest_inspect = subparsers.add_parser("transfer-manifest-inspect")
     manifest_inspect.add_argument("--manifest", required=True, type=Path)
+    fixture_freeze = subparsers.add_parser("foundation-fixture-freeze")
+    fixture_freeze.add_argument("--config", required=True, type=Path)
+    fixture_freeze.add_argument("--output-root", required=True, type=Path)
+    fixture_embed = subparsers.add_parser("foundation-fixture-embed")
+    fixture_embed.add_argument("--config", required=True, type=Path)
+    fixture_embed.add_argument("--fixture", required=True, type=Path)
+    fixture_embed.add_argument("--foundation-manifest", required=True, type=Path)
+    fixture_embed.add_argument("--output-root", required=True, type=Path)
+    fixture_score = subparsers.add_parser("foundation-diagnostic-score")
+    fixture_score.add_argument("--fixture", required=True, type=Path)
+    fixture_score.add_argument("--candidate", required=True, type=Path)
+    fixture_score.add_argument("--reference", required=True, type=Path)
+    fixture_score.add_argument("--output", required=True, type=Path)
+    matrix_initial = subparsers.add_parser("foundation-matrix-plan-initial")
+    matrix_initial.add_argument("--config", required=True, type=Path)
+    matrix_initial.add_argument("--output-root", required=True, type=Path)
+    for command in ("foundation-matrix-plan-mode", "foundation-matrix-plan-confirmation"):
+        matrix_plan = subparsers.add_parser(command)
+        matrix_plan.add_argument("--config", required=True, type=Path)
+        matrix_plan.add_argument("--decision", required=True, type=Path)
+        matrix_plan.add_argument("--output-root", required=True, type=Path)
+    matrix_cell = subparsers.add_parser("foundation-matrix-cell")
+    matrix_cell.add_argument("--plan", required=True, type=Path)
+    matrix_cell.add_argument("--cell-id", required=True)
+    matrix_finalize = subparsers.add_parser("foundation-matrix-finalize")
+    matrix_finalize.add_argument("--plan", required=True, type=Path)
+    matrix_finalize.add_argument("--cell-id", required=True)
+    matrix_finalize.add_argument("--foundation-receipt", required=True, type=Path)
+    matrix_finalize.add_argument("--diagnostic", required=True, type=Path)
+    for command in (
+        "foundation-matrix-decide-five-minute",
+        "foundation-matrix-decide-mode",
+        "foundation-matrix-decide-confirmation",
+    ):
+        gate = subparsers.add_parser(command)
+        gate.add_argument("--result", required=True, nargs="+", type=Path)
+        gate.add_argument("--output", required=True, type=Path)
+        if command == "foundation-matrix-decide-confirmation":
+            gate.add_argument("--selection", required=True, type=Path)
+    matrix_promote = subparsers.add_parser("foundation-matrix-promote")
+    matrix_promote.add_argument("--decision", required=True, type=Path)
+    matrix_promote.add_argument("--cell-result", required=True, type=Path)
+    matrix_promote.add_argument("--output-root", required=True, type=Path)
     return parser
 
 
@@ -351,6 +455,16 @@ def _load_json_object(path: Path) -> dict[str, object]:
     return loaded
 
 
+def _load_matrix_json(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FoundationMatrixError(f"matrix JSON is unreadable: {path}") from exc
+    if not isinstance(value, dict):
+        raise FoundationMatrixError(f"matrix JSON must be an object: {path}")
+    return value
+
+
 def _live_adapter(
     local_path: Path, *, expected_local_digest: str | None = None
 ) -> tuple[Path, RunpodRestV1Adapter]:
@@ -382,6 +496,88 @@ def main() -> None:
     try:
         if args.command == "runpod-image-self-check":
             result = runpod_image_self_check()
+        elif args.command == "runpod-image-static-check":
+            result = runpod_image_self_check(require_cuda=False)
+        elif args.command == "workload-execute":
+            result = execute_workload_manifest(args.manifest)
+            if result["return_code"] != 0:
+                raise WorkloadError("training command failed inside the Pod")
+        elif args.command == "runpod-bind-workload":
+            result = {
+                "decision": str(
+                    bind_workload_decision(
+                        manifest_path=args.manifest,
+                        decision=_load_json_object(args.decision),
+                        pod_manifest_path=args.pod_manifest_path,
+                        output_path=args.output,
+                        evaluated_at=datetime.fromisoformat(
+                            args.evaluated_at.replace("Z", "+00:00")
+                        ),
+                    )
+                )
+            }
+        elif args.command == "runpod-supervise-workload":
+            manifest = validate_workload_manifest(args.manifest)
+            decision = _load_json_object(args.decision)
+            local_digest = decision.get("local_digest")
+            if not isinstance(local_digest, str):
+                raise LifecycleError("invalid_launch_decision:local_digest")
+            state_root, rest_adapter = _live_adapter(args.local, expected_local_digest=local_digest)
+            local = load_local_config(args.local)
+            access_key = os.environ.get(local.secrets.s3_access_key_id_env, "")
+            secret_key = os.environ.get(local.secrets.s3_secret_access_key_env, "")
+            s3_adapter = AwsCliS3TransferAdapter(
+                aws_binary=args.aws_binary,
+                datacenter_id=str(decision.get("datacenter_id", "")),
+                volume_id=str(decision.get("volume_id", "")),
+                access_key_id=access_key,
+                secret_access_key=secret_key,
+            )
+            workload = decision.get("workload")
+            if not isinstance(workload, dict) or not isinstance(workload.get("environment"), dict):
+                raise WorkloadError("bound workload environment is missing")
+            pod_manifest_path = workload["environment"].get("MANTIS_WORKLOAD_MANIFEST")
+            if not isinstance(pod_manifest_path, str):
+                raise WorkloadError("bound Pod manifest path is missing")
+            io = RunpodS3WorkloadIO(
+                adapter=s3_adapter,
+                manifest_path=args.manifest,
+                pod_manifest_path=pod_manifest_path,
+                provider=rest_adapter,
+                state_root=state_root,
+            )
+            io.verify_input_bundle_staged()
+            io.stage_control_files()
+            token_path = Path(str(manifest["monitor"]["token"]["controller_path"]))
+            heartbeat_token = token_path.read_text().strip()
+            if not heartbeat_token:
+                raise WorkloadError("heartbeat token is empty")
+            create_adapter = RunpodctlCreateAdapter(
+                rest=rest_adapter,
+                binary=args.runpodctl_binary,
+                binary_sha256=str(manifest["runpodctl"]["binary_sha256"]),
+                version=str(manifest["runpodctl"]["version"]),
+                source_commit=str(manifest["runpodctl"]["source_commit"]),
+            )
+            result = supervise_workload(
+                manifest_path=args.manifest,
+                decision=decision,
+                state_root=state_root,
+                adapter=create_adapter,
+                heartbeat_token=heartbeat_token,
+                heartbeat_source=io.heartbeat_source,
+                collect_diagnostics=io.collect_diagnostics,
+                checkpoint=io.checkpoint,
+                replicate=io.replicate,
+                now=lambda: datetime.now(UTC),
+                sleep=time.sleep,
+            )
+        elif args.command == "runpod-seal-workload":
+            result = {
+                "manifest": str(
+                    seal_workload_manifest(_load_json_object(args.spec), args.output_root)
+                )
+            }
         elif args.command == "cuda-fp32-probe":
             result = run_probe_and_export(
                 load_config(args.config),
@@ -411,6 +607,79 @@ def main() -> None:
                 performance_path=args.performance,
                 output_path=args.output,
             )
+        elif args.command == "foundation-fixture-freeze":
+            result = {"manifest": str(freeze_diagnostic_fixture(args.config, args.output_root))}
+        elif args.command == "foundation-fixture-embed":
+            result = {
+                "manifest": str(
+                    embed_diagnostic_fixture(
+                        args.config,
+                        args.fixture,
+                        args.foundation_manifest,
+                        args.output_root,
+                    )
+                )
+            }
+        elif args.command == "foundation-diagnostic-score":
+            result = {
+                "result": str(
+                    score_diagnostic_fixture(
+                        args.fixture,
+                        args.candidate,
+                        args.reference,
+                        args.output,
+                    )
+                )
+            }
+        elif args.command == "foundation-matrix-plan-initial":
+            result = {"plan": str(render_initial_plan(args.config, args.output_root))}
+        elif args.command in {
+            "foundation-matrix-plan-mode",
+            "foundation-matrix-plan-confirmation",
+        }:
+            decision = _load_matrix_json(args.decision)
+            renderer = (
+                render_mode_plan
+                if args.command == "foundation-matrix-plan-mode"
+                else render_confirmation_plan
+            )
+            result = {"plan": str(renderer(args.config, decision, args.output_root))}
+        elif args.command == "foundation-matrix-cell":
+            result = {"foundation_receipt": str(run_matrix_cell(args.plan, args.cell_id))}
+        elif args.command == "foundation-matrix-finalize":
+            result = {
+                "result": str(
+                    finalize_cell_result(
+                        args.plan,
+                        args.cell_id,
+                        args.foundation_receipt,
+                        args.diagnostic,
+                    )
+                )
+            }
+        elif args.command in {
+            "foundation-matrix-decide-five-minute",
+            "foundation-matrix-decide-mode",
+            "foundation-matrix-decide-confirmation",
+        }:
+            cell_results = [_load_matrix_json(path) for path in args.result]
+            if args.command == "foundation-matrix-decide-five-minute":
+                decision = decide_five_minute_gate(cell_results)
+            elif args.command == "foundation-matrix-decide-mode":
+                decision = decide_mode_gate(cell_results)
+            else:
+                decision = decide_confirmation_gate(cell_results, _load_matrix_json(args.selection))
+            result = {"decision": str(write_matrix_decision(decision, args.output))}
+        elif args.command == "foundation-matrix-promote":
+            result = {
+                "manifest": str(
+                    promote_selected_export(
+                        args.decision,
+                        args.cell_result,
+                        args.output_root,
+                    )
+                )
+            }
         elif args.command == "transfer-bundle":
             transfer_config = load_transfer_config(args.config)
             transfer_manifest = write_bundle_manifest(
@@ -444,6 +713,36 @@ def main() -> None:
                 "dry_run": True,
                 "incoming_prefix": receipt.incoming_prefix,
                 "planned_uploads": receipt.uploaded,
+                "skipped": receipt.skipped,
+            }
+        elif args.command == "transfer-stage-runpod":
+            transfer_config = load_transfer_config(args.config)
+            local = load_local_config(args.local)
+            decision = _load_json_object(args.decision)
+            decision_digest = decision.get("decision_digest")
+            unsigned = {key: value for key, value in decision.items() if key != "decision_digest"}
+            if decision_digest != canonical_digest(unsigned):
+                raise LifecycleError("invalid_launch_decision:decision_digest")
+            access_key = os.environ.get(local.secrets.s3_access_key_id_env, "")
+            secret_key = os.environ.get(local.secrets.s3_secret_access_key_env, "")
+            transfer_adapter = AwsCliS3TransferAdapter(
+                aws_binary=args.aws_binary,
+                datacenter_id=str(decision.get("datacenter_id", "")),
+                volume_id=str(decision.get("volume_id", "")),
+                access_key_id=access_key,
+                secret_access_key=secret_key,
+            )
+            transfer_manifest = load_bundle_manifest(transfer_config.source.manifest)
+            receipt = stage_bundle(
+                transfer_config.source.root,
+                transfer_manifest,
+                transfer_adapter,
+            )
+            result = {
+                "bundle_digest": receipt.bundle_digest,
+                "decision_digest": decision_digest,
+                "incoming_prefix": receipt.incoming_prefix,
+                "uploaded": receipt.uploaded,
                 "skipped": receipt.skipped,
             }
         elif args.command == "transfer-manifest-inspect":
@@ -504,6 +803,8 @@ def main() -> None:
             )
         elif args.command in {"runpod-launch", "runpod-reconcile-launch"}:
             decision = _load_json_object(args.decision)
+            if args.command == "runpod-launch":
+                raise LifecycleError("supervised_workload_command_required")
             local_digest = decision.get("local_digest")
             if not isinstance(local_digest, str):
                 raise LifecycleError("invalid_launch_decision:local_digest")
@@ -687,10 +988,16 @@ def main() -> None:
         Bf16QualificationError,
         TransferBundleError,
         TransferConfigError,
+        DiagnosticError,
+        FoundationFixtureError,
+        FoundationMatrixError,
+        WorkloadError,
+        RunpodS3Error,
+        RunpodctlError,
     ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
-    if args.command == "runpod-image-self-check":
+    if args.command in {"runpod-image-self-check", "runpod-image-static-check"}:
         print(json.dumps(result, sort_keys=True, separators=(",", ":"), default=str))
     else:
         print(json.dumps(result, indent=2, sort_keys=True, default=str))

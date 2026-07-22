@@ -1,0 +1,33 @@
+schema_version = 1
+name = "mantisv2-foundation-accuracy-v1"
+base_config = "nextleg-parquet-v1.toml"
+artifact_root = "/workspace/mantis/runs"
+data_root = "/workspace/mantis/inputs/4d12c3f334dba95fb045905d89654f16d63e75b68f8423ae8726eac06d70fba6/corpus/market"
+corpus_manifest_path = "/workspace/mantis/inputs/4d12c3f334dba95fb045905d89654f16d63e75b68f8423ae8726eac06d70fba6/corpus/manifest.json"
+device = "cuda"
+screen_seeds = [42, 43, 44]
+confirmation_seeds = [42, 43, 44, 45, 46]
+three_timeframes = ["1min", "3min", "15min"]
+four_timeframes = ["1min", "3min", "5min", "15min"]
+screen_train_steps = 200
+screen_validation_steps = 20
+preserved_train_steps = 267
+preserved_validation_steps = 27
+batch_size = 128
+
+[families]
+equity_index = ["ES", "NQ", "RTY", "YM"]
+metals = ["GC", "SI"]
+energy = ["CL"]
+rates = ["ZB", "ZN"]
+
+[diagnostic]
+fixture_manifest = "/workspace/mantis/inputs/4d12c3f334dba95fb045905d89654f16d63e75b68f8423ae8726eac06d70fba6/diagnostic/580e49362974727f9aab83a2ca31147b719c4974b5fd617e4aa221adb161ac61/manifest.json"
+fixture_manifest_sha256 = "a3108ac373ff44ed67bb036e79002ac2508309168dd953854d43a3f7b147a859"
+fixture_digest = "580e49362974727f9aab83a2ca31147b719c4974b5fd617e4aa221adb161ac61"
+fit_before = "2024-01-01T00:00:00+00:00"
+score_start = "2025-01-01T00:00:00+00:00"
+score_end = "2026-01-01T00:00:00+00:00"
+seed = 0
+fit_cap = 25000
+score_cap = 25000

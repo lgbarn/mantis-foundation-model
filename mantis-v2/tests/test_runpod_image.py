@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from mantis_v2.runpod_image import ImageContractError, _run, runtime_inventory
+from mantis_v2.runpod_image import ImageContractError, _run, runtime_inventory, self_check
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -91,6 +91,17 @@ def test_runtime_inventory_is_canonical_and_complete(tmp_path: Path, monkeypatch
     assert result["torch"]["cuda_runtime"] == "13.0"
     assert result["tools"]["uv"] == "uv 0.11.30"
     assert result["packages"]
+
+
+def test_self_check_wraps_inventory_in_explicit_pass_receipt(monkeypatch) -> None:
+    monkeypatch.setattr("mantis_v2.runpod_image.runtime_inventory", lambda: {"identity": "ok"})
+
+    assert self_check() == {
+        "schema_version": 1,
+        "passed": True,
+        "scope": "runtime_cuda",
+        "inventory": {"identity": "ok"},
+    }
 
 
 @pytest.mark.parametrize(

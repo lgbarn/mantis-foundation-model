@@ -17,6 +17,7 @@ from mantis_v2.pipeline import (
     _assert_run_writable,
     _loader,
     _stratified_validation_indices,
+    _stream_macro_metrics,
     _validation_state,
     evaluate,
     export,
@@ -29,6 +30,17 @@ from tensorboard.backend.event_processing.event_accumulator import EventAccumula
 from torch.utils.data import DataLoader, Dataset
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_stream_group_metrics_are_equal_weight_macros_not_row_weighted() -> None:
+    metrics = {
+        "ES_3min": {"total": 1.0, "candle": 0.4, "leg": 0.6},
+        "NQ_3min": {"total": 3.0, "candle": 1.4, "leg": 1.6},
+    }
+
+    result = _stream_macro_metrics(metrics, ["ES_3min", "NQ_3min"])
+
+    assert result == pytest.approx({"total": 2.0, "candle": 0.9, "leg": 1.1})
 
 
 class IndexDataset(Dataset[dict[str, torch.Tensor]]):
@@ -361,6 +373,15 @@ def test_evaluation_authorizes_export_of_exact_best_checkpoint(tmp_path: Path) -
     assert evaluation["checkpoint"]["sha256"]
     assert evaluation["checkpoint"]["epoch"] == 0
     assert evaluation["checkpoint"]["global_step"] == 1
+    assert set(evaluation["metrics"]) == {
+        "micro",
+        "macro",
+        "by_stream",
+        "by_symbol",
+        "by_timeframe",
+    }
+    assert set(evaluation["metrics"]["micro"]) == {"total", "candle", "leg"}
+    assert set(evaluation["metrics"]["by_timeframe"]) == {"1min"}
     assert manifest["validation_gate"]["verified"] is True
     assert manifest["validation_gate"]["checkpoint_sha256"] == evaluation["checkpoint"]["sha256"]
     bundled_evaluation = Path(manifest["validation_gate"]["evaluation"])
@@ -430,17 +451,17 @@ def test_evaluation_rejects_checkpoint_replaced_during_run(
 ) -> None:
     config = _trained_smoke_config(tmp_path, "evaluation-race")
     checkpoint_path = tmp_path / "evaluation-race" / "checkpoints" / "best.pt"
-    original_run_epoch = pipeline_module._run_epoch
+    original_evaluation = pipeline_module._run_evaluation_views
 
     def replace_after_evaluation(*args: Any, **kwargs: Any) -> tuple[dict[str, float], int]:
-        result = original_run_epoch(*args, **kwargs)
+        result = original_evaluation(*args, **kwargs)
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
         first_tensor = next(iter(checkpoint["model"].values()))
         first_tensor.view(-1)[0] += 1
         torch.save(checkpoint, checkpoint_path)
         return result
 
-    monkeypatch.setattr(pipeline_module, "_run_epoch", replace_after_evaluation)
+    monkeypatch.setattr(pipeline_module, "_run_evaluation_views", replace_after_evaluation)
     with pytest.raises(PipelineError, match="best checkpoint changed during evaluation"):
         evaluate(config)
 

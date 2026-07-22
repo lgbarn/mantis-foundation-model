@@ -90,11 +90,26 @@ runpod-reconcile-spend pod_id run_name local:
 runpod-enforce-deadline pod_id local:
     uv run mantis-v2 runpod-enforce-deadline --pod-id {{quote(pod_id)}} --local {{quote(local)}}
 
+runpod-workload-execute manifest:
+    uv run mantis-v2 workload-execute --manifest {{quote(manifest)}}
+
+runpod-seal-workload spec output_root:
+    uv run mantis-v2 runpod-seal-workload --spec {{quote(spec)}} --output-root {{quote(output_root)}}
+
+runpod-bind-workload manifest decision pod_manifest_path evaluated_at output:
+    uv run mantis-v2 runpod-bind-workload --manifest {{quote(manifest)}} --decision {{quote(decision)}} --pod-manifest-path {{quote(pod_manifest_path)}} --evaluated-at {{quote(evaluated_at)}} --output {{quote(output)}}
+
+runpod-supervise-workload manifest decision local runpodctl_binary aws_binary="aws":
+    uv run mantis-v2 runpod-supervise-workload --manifest {{quote(manifest)}} --decision {{quote(decision)}} --local {{quote(local)}} --runpodctl-binary {{quote(runpodctl_binary)}} --aws-binary {{quote(aws_binary)}}
+
 transfer-bundle config:
     uv run mantis-v2 transfer-bundle --config {{quote(config)}}
 
 transfer-stage-dry-run config remote_inventory:
     uv run mantis-v2 transfer-stage-dry-run --config {{quote(config)}} --remote-inventory {{quote(remote_inventory)}}
+
+transfer-stage-runpod config local decision aws_binary="aws":
+    uv run mantis-v2 transfer-stage-runpod --config {{quote(config)}} --local {{quote(local)}} --decision {{quote(decision)}} --aws-binary {{quote(aws_binary)}}
 
 transfer-manifest-inspect manifest:
     uv run mantis-v2 transfer-manifest-inspect --manifest {{quote(manifest)}}
@@ -167,6 +182,42 @@ export config:
 
 validated-export config:
     uv run mantis-v2 validated-export --config {{config}}
+
+foundation-fixture-freeze config output_root:
+    uv run mantis-v2 foundation-fixture-freeze --config {{quote(config)}} --output-root {{quote(output_root)}}
+
+foundation-fixture-embed config fixture foundation_manifest output_root:
+    uv run mantis-v2 foundation-fixture-embed --config {{quote(config)}} --fixture {{quote(fixture)}} --foundation-manifest {{quote(foundation_manifest)}} --output-root {{quote(output_root)}}
+
+foundation-diagnostic-score fixture candidate reference output:
+    uv run mantis-v2 foundation-diagnostic-score --fixture {{quote(fixture)}} --candidate {{quote(candidate)}} --reference {{quote(reference)}} --output {{quote(output)}}
+
+foundation-matrix-plan-initial config output_root:
+    uv run mantis-v2 foundation-matrix-plan-initial --config {{quote(config)}} --output-root {{quote(output_root)}}
+
+foundation-matrix-plan-mode config decision output_root:
+    uv run mantis-v2 foundation-matrix-plan-mode --config {{quote(config)}} --decision {{quote(decision)}} --output-root {{quote(output_root)}}
+
+foundation-matrix-plan-confirmation config decision output_root:
+    uv run mantis-v2 foundation-matrix-plan-confirmation --config {{quote(config)}} --decision {{quote(decision)}} --output-root {{quote(output_root)}}
+
+foundation-matrix-decide-five-minute output *results:
+    uv run mantis-v2 foundation-matrix-decide-five-minute --output {{quote(output)}} --result {{results}}
+
+foundation-matrix-decide-mode output *results:
+    uv run mantis-v2 foundation-matrix-decide-mode --output {{quote(output)}} --result {{results}}
+
+foundation-matrix-decide-confirmation selection output *results:
+    uv run mantis-v2 foundation-matrix-decide-confirmation --selection {{quote(selection)}} --output {{quote(output)}} --result {{results}}
+
+foundation-matrix-cell plan cell_id:
+    uv run mantis-v2 foundation-matrix-cell --plan {{quote(plan)}} --cell-id {{quote(cell_id)}}
+
+foundation-matrix-finalize plan cell_id foundation_receipt diagnostic:
+    uv run mantis-v2 foundation-matrix-finalize --plan {{quote(plan)}} --cell-id {{quote(cell_id)}} --foundation-receipt {{quote(foundation_receipt)}} --diagnostic {{quote(diagnostic)}}
+
+foundation-matrix-promote decision cell_result output_root:
+    uv run mantis-v2 foundation-matrix-promote --decision {{quote(decision)}} --cell-result {{quote(cell_result)}} --output-root {{quote(output_root)}}
 
 downstream-prepare config:
     uv run mantis-v2 downstream-prepare --config {{config}}
