@@ -71,6 +71,23 @@ from mantis_v2.runpod_plan import LaunchPlanError, write_launch_decision
 from mantis_v2.runtime import RuntimeContractError
 from mantis_v2.strategy import StrategyContractError
 from mantis_v2.topstep import TopstepContractError
+from mantis_v2.transfer_bundle import (
+    DryRunS3Adapter,
+    TransferBundleError,
+    decide_retention,
+    load_bundle_manifest,
+    stage_bundle,
+    verify_and_promote,
+    verify_backup_pair,
+    verify_download,
+    write_bundle_manifest,
+)
+from mantis_v2.transfer_config import (
+    TransferConfigError,
+    load_remote_inventory,
+    load_retention_authorization,
+    load_transfer_config,
+)
 from mantis_v2.walk_forward import WalkForwardContractError
 
 _DOWNSTREAM_COMMANDS = {
@@ -151,6 +168,21 @@ def _parser() -> argparse.ArgumentParser:
     runpod_plan.add_argument("--authorization", type=Path)
     runpod_plan.add_argument("--evaluated-at", required=True)
     runpod_plan.add_argument("--output", required=True, type=Path)
+    for command in ("transfer-bundle", "transfer-promote", "transfer-backup-verify"):
+        transfer = subparsers.add_parser(command)
+        transfer.add_argument("--config", required=True, type=Path)
+        if command == "transfer-backup-verify":
+            transfer.add_argument("--completed-artifact-digest", required=True)
+    retention = subparsers.add_parser("transfer-retention-check")
+    retention.add_argument("--config", required=True, type=Path)
+    retention.add_argument("--completed-artifact-digest", required=True)
+    retention.add_argument("--run-state", required=True, choices=("active", "inactive"))
+    retention.add_argument("--authorization", type=Path)
+    stage_dry_run = subparsers.add_parser("transfer-stage-dry-run")
+    stage_dry_run.add_argument("--config", required=True, type=Path)
+    stage_dry_run.add_argument("--remote-inventory", required=True, type=Path)
+    manifest_inspect = subparsers.add_parser("transfer-manifest-inspect")
+    manifest_inspect.add_argument("--manifest", required=True, type=Path)
     return parser
 
 
@@ -181,6 +213,85 @@ def main() -> None:
     try:
         if args.command == "runpod-image-self-check":
             result = runpod_image_self_check()
+        elif args.command == "transfer-bundle":
+            transfer_config = load_transfer_config(args.config)
+            transfer_manifest = write_bundle_manifest(
+                transfer_config.source.root,
+                transfer_config.source.include,
+                transfer_config.source.manifest,
+            )
+            result = {
+                "bundle_digest": transfer_manifest.bundle_digest,
+                "manifest": str(transfer_config.source.manifest),
+                "total_size": transfer_manifest.total_size,
+            }
+        elif args.command == "transfer-promote":
+            transfer_config = load_transfer_config(args.config)
+            promotion = verify_and_promote(
+                transfer_config.mounted.incoming_root,
+                transfer_config.mounted.final_parent,
+                load_bundle_manifest(transfer_config.source.manifest),
+            )
+            result = asdict(promotion)
+        elif args.command == "transfer-stage-dry-run":
+            transfer_config = load_transfer_config(args.config)
+            transfer_manifest = load_bundle_manifest(transfer_config.source.manifest)
+            receipt = stage_bundle(
+                transfer_config.source.root,
+                transfer_manifest,
+                DryRunS3Adapter(load_remote_inventory(args.remote_inventory)),
+            )
+            result = {
+                "bundle_digest": receipt.bundle_digest,
+                "dry_run": True,
+                "incoming_prefix": receipt.incoming_prefix,
+                "planned_uploads": receipt.uploaded,
+                "skipped": receipt.skipped,
+            }
+        elif args.command == "transfer-manifest-inspect":
+            transfer_manifest = load_bundle_manifest(args.manifest)
+            result = {
+                "bundle_digest": transfer_manifest.bundle_digest,
+                "entry_count": len(transfer_manifest.entries),
+                "path_roots": sorted(
+                    {entry.path.split("/", maxsplit=1)[0] for entry in transfer_manifest.entries}
+                ),
+                "total_size": transfer_manifest.total_size,
+            }
+        elif args.command in {"transfer-backup-verify", "transfer-retention-check"}:
+            transfer_config = load_transfer_config(args.config)
+            transfer_manifest = load_bundle_manifest(transfer_config.source.manifest)
+            internal = verify_download(
+                transfer_config.backups.internal_root,
+                expected_manifest=transfer_manifest,
+                local_manifest=load_bundle_manifest(transfer_config.backups.internal_manifest),
+                completed_artifact_digest=args.completed_artifact_digest,
+                role="internal_ssd",
+            )
+            external = verify_download(
+                transfer_config.backups.external_root,
+                expected_manifest=transfer_manifest,
+                local_manifest=load_bundle_manifest(transfer_config.backups.external_manifest),
+                completed_artifact_digest=args.completed_artifact_digest,
+                role="external_drive",
+            )
+            backups = verify_backup_pair(internal, external)
+            if args.command == "transfer-backup-verify":
+                result = asdict(backups)
+            else:
+                authorization = (
+                    load_retention_authorization(args.authorization) if args.authorization else None
+                )
+                result = asdict(
+                    decide_retention(
+                        remote_identity=transfer_config.remote_identity,
+                        bundle_digest=transfer_manifest.bundle_digest,
+                        completed_artifact_digest=args.completed_artifact_digest,
+                        backups=backups,
+                        authorization=authorization,
+                        run_active=args.run_state == "active",
+                    )
+                )
         elif args.command == "runpod-plan":
             result = write_launch_decision(
                 platform_path=args.platform,
@@ -276,6 +387,8 @@ def main() -> None:
         WalkForwardContractError,
         RunpodConfigError,
         LaunchPlanError,
+        TransferBundleError,
+        TransferConfigError,
     ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc

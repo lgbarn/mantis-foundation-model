@@ -19,6 +19,7 @@ reports/
 output/
 tmp/
 infra/runpod/local.toml
+infra/runpod/transfer.*.toml
 infra/runpod/terraform/.terraform/
 infra/runpod/terraform/*.tfstate
 infra/runpod/terraform/*.tfstate.*

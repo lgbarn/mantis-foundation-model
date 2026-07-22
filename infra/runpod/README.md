@@ -230,6 +230,98 @@ drive is excluded from Time Machine and is not a sufficient sole backup.
 Deletion remains an explicit operator action and is permitted only after both
 copies match the transfer manifest.
 
+### Transfer Bundle commands
+
+Copy `configs/transfer.example.toml` to an ignored machine-local path and
+replace every placeholder. The strict config contains paths and immutable
+identities only; S3 credentials remain in the local environment and never
+enter commands, manifests, receipts, logs, or remote object names.
+
+Build the canonical manifest from an immutable internal-SSD snapshot:
+
+```bash
+just transfer-bundle infra/runpod/transfer.local.toml
+```
+
+The command rejects unsafe paths, duplicate normalized paths, symlinks,
+special files, and source mutation. It publishes the manifest atomically and
+refuses overwrite. Before enabling a concrete S3 client, exercise the exact
+injected staging policy against a synthetic HEAD inventory:
+
+```bash
+just transfer-stage-dry-run \
+  infra/runpod/transfer.local.toml \
+  infra/runpod/examples/remote-inventory-empty.json
+```
+
+This command hashes every source again, uses object size only to plan absent or
+size-mismatched PUTs, and performs zero network or object writes. ETag is
+accepted as opaque inventory evidence and deliberately ignored. The production
+`S3TransferAdapter` seam follows the RunPod
+[S3-compatible API](https://docs.runpod.io/storage/s3-api) object-key mapping
+and AWS [HeadObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html)
+size semantics. This repository intentionally installs no SDK and ships no
+credential-bearing adapter; inject a reviewed local adapter rather than putting
+keys in config or command arguments. Never use destructive sync.
+
+Inside a Pod with the network volume mounted, set the config's mounted paths to
+the incoming `files` directory and immutable final parent, then run:
+
+```bash
+just transfer-promote infra/runpod/transfer.pod.toml
+```
+
+Every mounted byte is checked against SHA-256 before one atomic directory
+rename. Missing, corrupt, wrong-size, unexpected, linked, or special content
+leaves the final input absent. Repeating the command verifies the existing
+final directory and does not replace it.
+
+After an expensive Completed Artifact has been copied to the internal SSD and
+separately to the external drive, place a canonical local manifest beside each
+copy as configured and verify both:
+
+```bash
+just transfer-backup-verify \
+  infra/runpod/transfer.local.toml \
+  COMPLETED_ARTIFACT_DIGEST
+```
+
+The two roots must be distinct and both manifests, bundle digests, file bytes,
+and Completed Artifact identity must agree. The command verifies existing
+copies; it does not perform a download or copy.
+
+Retention is a decision-only, fail-closed command. First obtain the exact
+subject digest from a refusal:
+
+```bash
+just transfer-retention-check \
+  infra/runpod/transfer.local.toml \
+  COMPLETED_ARTIFACT_DIGEST inactive
+```
+
+A human may then create an uncommitted authorization JSON with exactly
+`schema_version`, `subject_digest`, and `approved_by`, and recheck through
+`transfer-retention-check-authorized`. Active run state, absent or mismatched
+backups, Completed Artifact drift, or authorization drift deterministically
+refuses. The CLI never deletes remote or local data; the isolated deletion
+executor exists only behind an explicit verified decision and is covered by a
+temporary-directory test.
+
+The following no-I/O dry run validates the synthetic manifest fixture whose
+total is the measured 1,395,349,697-byte clean input bundle:
+
+```bash
+just transfer-manifest-inspect \
+  infra/runpod/examples/measured-input-bundle.fixture.json
+```
+
+It reports total size `1395349697` and roots `cache`, `corpus`, and `dbn`.
+Fixture entry digests and category sizes are deterministic test oracles, not a
+production upload manifest. The production manifest must be rebuilt from the
+immutable snapshot containing the three original DBN.ZST archives, 64 repaired
+corpus files, and pinned MantisV2 cache. Historical continuation checkpoints
+and the 54.6 GB artifact tree are not members and must not be added.
+
 ## Accuracy-first training contract
 
 The RunPod candidate is a fresh supervised futures-adaptation run from the
