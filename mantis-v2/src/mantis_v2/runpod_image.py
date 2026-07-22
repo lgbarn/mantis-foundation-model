@@ -139,7 +139,7 @@ def runtime_inventory(
     if inventory["platform"]["python"].split(".")[:2] != ["3", "12"]:
         raise ImageContractError("image runtime requires Python 3.12")
     expected_uv = environment["MANTIS_UV_VERSION"]
-    if inventory["tools"]["uv"] != f"uv {expected_uv}":
+    if inventory["tools"]["uv"].split()[:2] != ["uv", expected_uv]:
         raise ImageContractError("installed uv version does not match the image contract")
     return inventory
 

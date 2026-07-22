@@ -40,11 +40,14 @@ class FakeTorch:
         return [0]
 
 
-def _runner(driver_available: bool = True):
+def _runner(
+    driver_available: bool = True,
+    uv_output: str = "uv 0.11.30 (x86_64-unknown-linux-musl)",
+):
     versions = {
         "git": "git version 2.43.0",
         "ssh": "OpenSSH_9.6p1 Ubuntu-3ubuntu13.18",
-        "uv": "uv 0.11.30",
+        "uv": uv_output,
     }
 
     def run(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -89,8 +92,27 @@ def test_runtime_inventory_is_canonical_and_complete(tmp_path: Path, monkeypatch
     assert result["identities"]["lock_sha256"] == environment["MANTIS_LOCK_SHA256"]
     assert result["driver"] == {"version": "580.65.06", "compatible": True, "error": ""}
     assert result["torch"]["cuda_runtime"] == "13.0"
-    assert result["tools"]["uv"] == "uv 0.11.30"
+    assert result["tools"]["uv"] == "uv 0.11.30 (x86_64-unknown-linux-musl)"
     assert result["packages"]
+
+
+def test_runtime_inventory_rejects_wrong_uv_version_with_platform_suffix(
+    tmp_path: Path, monkeypatch
+) -> None:
+    lock = tmp_path / "uv.lock"
+    lock.write_text("version = 1\n")
+    import hashlib
+
+    monkeypatch.setattr("mantis_v2.runpod_image.platform.machine", lambda: "x86_64")
+    monkeypatch.setattr("mantis_v2.runpod_image.platform.python_version", lambda: "3.12.11")
+
+    with pytest.raises(ImageContractError, match="installed uv version"):
+        runtime_inventory(
+            environment=_environment(hashlib.sha256(lock.read_bytes()).hexdigest()),
+            runner=_runner(uv_output="uv 0.11.29 (x86_64-unknown-linux-musl)"),
+            torch_module=FakeTorch(True),
+            lock_path=lock,
+        )
 
 
 def test_self_check_wraps_inventory_in_explicit_pass_receipt(monkeypatch) -> None:
