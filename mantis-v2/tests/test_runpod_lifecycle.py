@@ -672,3 +672,33 @@ def test_create_price_drift_fails_closed_without_second_create(tmp_path: Path) -
 
     assert adapter.create_calls == 1
     assert not (state_root / "receipts" / "pods").exists()
+
+
+def test_incomplete_decision_is_rejected_before_provider_access(tmp_path: Path) -> None:
+    decision = _approved_decision()
+    del decision["template_id"]
+
+    class UntouchedAdapter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def inventory(self) -> list[dict[str, object]]:
+            self.calls += 1
+            return []
+
+        def create(self, submitted: dict[str, object], deadline: datetime) -> dict[str, object]:
+            self.calls += 1
+            return {}
+
+    adapter = UntouchedAdapter()
+    state_root = tmp_path / "state"
+    with pytest.raises(LifecycleError, match="^invalid_launch_decision:template_id$"):
+        launch_pod(
+            decision=decision,
+            state_root=state_root,
+            adapter=adapter,
+            now=lambda: datetime(2026, 7, 21, 12, 0, tzinfo=UTC),
+        )
+
+    assert adapter.calls == 0
+    assert not (state_root / "attempts").exists()

@@ -67,6 +67,52 @@ def _payload_digest(payload: Mapping[str, object]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _validate_launch_decision(decision: Mapping[str, object]) -> str:
+    if decision.get("schema_version") != 1 or decision.get("allowed") is not True:
+        raise LifecycleError("launch_not_approved")
+    decision_digest = _required_string(decision.get("decision_digest"), "decision_digest")
+    if not re.fullmatch(r"[0-9a-f]{64}", decision_digest):
+        raise LifecycleError("invalid_launch_decision:decision_digest")
+    for field in (
+        "run_name",
+        "gpu_type",
+        "datacenter_id",
+        "image_ref",
+        "template_id",
+        "volume_id",
+        "volume_mount_path",
+    ):
+        _required_string(decision.get(field), field)
+    for field in (
+        "gpu_count",
+        "vcpu",
+        "ram_gb",
+        "container_disk_gb",
+        "maximum_duration_seconds",
+    ):
+        _required_int(decision.get(field), field)
+    image_ref = str(decision["image_ref"])
+    if not re.search(r"@sha256:[0-9a-f]{64}$", image_ref):
+        raise LifecycleError("invalid_launch_decision:image_ref")
+    mount_path = str(decision["volume_mount_path"])
+    if not mount_path.startswith("/") or ".." in mount_path.split("/"):
+        raise LifecycleError("invalid_launch_decision:volume_mount_path")
+    _required_decimal(
+        decision.get("observed_price_usd_per_gpu_hour"),
+        "observed_price_usd_per_gpu_hour",
+    )
+    _required_decimal(decision.get("projected_spend_usd"), "projected_spend_usd")
+    stage = _required_string(decision.get("stage"), "stage")
+    if stage not in {"qualification", "production", "recovery"}:
+        raise LifecycleError("invalid_launch_decision:stage")
+    authorization_digest = _required_string(
+        decision.get("authorization_digest"), "authorization_digest"
+    )
+    if not re.fullmatch(r"[0-9a-f]{64}", authorization_digest):
+        raise LifecycleError("invalid_launch_decision:authorization_digest")
+    return decision_digest
+
+
 def _publish_json(path: Path, payload: Mapping[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
@@ -218,11 +264,7 @@ def launch_pod(
     now: Clock,
 ) -> dict[str, object]:
     """Create at most one Pod from an approved decision and publish its receipt."""
-    if decision.get("schema_version") != 1 or decision.get("allowed") is not True:
-        raise LifecycleError("launch_not_approved")
-    decision_digest = _required_string(decision.get("decision_digest"), "decision_digest")
-    if not re.fullmatch(r"[0-9a-f]{64}", decision_digest):
-        raise LifecycleError("invalid_launch_decision:decision_digest")
+    decision_digest = _validate_launch_decision(decision)
 
     descriptor, lock_path = _acquire_lock(state_root)
     try:
