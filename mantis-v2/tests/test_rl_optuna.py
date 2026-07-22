@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 
@@ -17,13 +18,16 @@ from mantis_v2.rl_optuna import (
     SeedValidationOutcome,
     TrialEvaluation,
     TrialRequest,
+    _atomic_json_idempotent,
     _canonical_sha256,
     _completed_evaluations,
+    _completed_search_seed,
     _search_space_payload,
     _storage_url,
     _study_contract,
     derive_trial_identity,
     run_optuna_study,
+    run_production_optuna_study,
     select_winner,
     validate_study_manifests,
 )
@@ -525,6 +529,95 @@ def test_production_outcome_requires_checkpoint_bound_500k_evidence() -> None:
     proven.require_production_evidence()
 
 
+def test_metrics_only_search_seed_is_resumed_to_publish_its_manifest(tmp_path: Path) -> None:
+    config = load_rl_config(ROOT / "configs" / "rl-entry-topstep-100k.toml")
+    identity = derive_trial_identity(config, "metrics-crash-v1", 0)
+    parameters = {
+        name: distribution.choices[0] if distribution.choices else distribution.low
+        for name, distribution in SEARCH_SPACE.items()
+    }
+    request = TrialRequest(
+        identity,
+        MappingProxyType(parameters),
+        PolicyVariant.SHARED_TICKER_VALUE,
+        tmp_path / "training.json",
+        tmp_path / "validation.json",
+        0,
+        tmp_path / "trial",
+        (),
+        lambda _outcome: None,
+    )
+    seed_output = tmp_path / "trial" / "seed-0"
+    seed_output.mkdir(parents=True)
+    (seed_output / "metrics.json").write_text(
+        json.dumps(
+            {
+                "status": "complete",
+                "identities": {
+                    "seed": identity.seeds[0],
+                    "search_trial_number": 0,
+                    "search_seed_index": 0,
+                    "ppo_hyperparameters": parameters,
+                },
+            }
+        )
+    )
+
+    assert _completed_search_seed(seed_output, request, 0) is None
+
+
+def test_validation_artifact_publication_is_idempotent_after_a_crash(tmp_path: Path) -> None:
+    path = tmp_path / "validation" / "seed-0.json"
+    payload = {"schema_version": 1, "stage": "rl-optuna-seed-validation", "seed": 101}
+
+    _atomic_json_idempotent(path, payload)
+    original = path.read_bytes()
+    _atomic_json_idempotent(path, payload)
+
+    assert path.read_bytes() == original
+    with pytest.raises(Exception, match="immutable artifact mismatch"):
+        _atomic_json_idempotent(path, {**payload, "seed": 202})
+
+
+def test_production_wrapper_rejects_actual_episodes_reaching_holdout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import mantis_v2.rl_optuna as search
+
+    config = load_rl_config(ROOT / "configs" / "rl-entry-topstep-100k.toml")
+    training = SimpleNamespace(
+        partition="training",
+        fold=0,
+        episodes=(
+            SimpleNamespace(bars=(SimpleNamespace(timestamp=datetime(2025, 6, 1, tzinfo=UTC)),)),
+        ),
+    )
+    validation = SimpleNamespace(
+        partition="validation",
+        fold=0,
+        episodes=(
+            SimpleNamespace(
+                bars=(
+                    SimpleNamespace(timestamp=datetime(2025, 12, 1, tzinfo=UTC)),
+                    SimpleNamespace(timestamp=datetime(2026, 1, 2, tzinfo=UTC)),
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(search, "load_training_episodes", lambda *_args: training)
+    monkeypatch.setattr(search, "load_episode_manifest", lambda *_args: validation)
+
+    with pytest.raises(Exception, match="episodes reach the sealed holdout"):
+        run_production_optuna_study(
+            config,
+            tmp_path / "training.json",
+            tmp_path / "validation.json",
+            tmp_path / "output",
+            study_name="holdout-overlap-v1",
+            variant="shared_ticker_value",
+        )
+
+
 def test_running_trial_resumes_same_plan_before_any_new_ask(tmp_path: Path) -> None:
     config = load_rl_config(ROOT / "configs" / "rl-entry-topstep-100k.toml")
     training = tmp_path / "training.json"
@@ -730,7 +823,10 @@ def test_full_state_cap_refuses_before_mutating_running_pruned_or_failed_trials(
     assert after == before
 
 
-def test_modified_ledger_cannot_participate_in_winner_selection(tmp_path: Path) -> None:
+@pytest.mark.parametrize("tamper", ("parameters", "evaluation", "trial_number"))
+def test_modified_ledger_cannot_participate_in_winner_selection(
+    tmp_path: Path, tamper: str
+) -> None:
     config = load_rl_config(ROOT / "configs" / "rl-entry-topstep-100k.toml")
     training = tmp_path / "training.json"
     validation = tmp_path / "validation.json"
@@ -759,7 +855,12 @@ def test_modified_ledger_cannot_participate_in_winner_selection(tmp_path: Path) 
     )
     ledger_path = output / "ledger" / "trial-0000.json"
     ledger = json.loads(ledger_path.read_text())
-    ledger["parameters"]["batch_size"] = 999
+    if tamper == "parameters":
+        ledger["parameters"]["batch_size"] = 999
+    elif tamper == "evaluation":
+        ledger["evaluation"]["outcomes"][0]["blows"] = 1
+    else:
+        ledger["evaluation"]["trial_number"] = 1
     ledger_path.write_text(json.dumps(ledger))
     study = optuna.load_study(
         study_name="tamper-v1", storage=_storage_url(output / "study.sqlite3")

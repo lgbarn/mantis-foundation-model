@@ -451,6 +451,14 @@ def _atomic_json_no_overwrite(path: Path, payload: Mapping[str, object]) -> None
         temporary.unlink(missing_ok=True)
 
 
+def _atomic_json_idempotent(path: Path, payload: Mapping[str, object]) -> None:
+    if path.exists():
+        if _load_trial_ledger(path) != dict(payload):
+            raise OptunaSearchError(f"immutable artifact mismatch: {path}")
+        return
+    _atomic_json_no_overwrite(path, payload)
+
+
 def _storage_url(database: Path) -> str:
     return f"sqlite:///{database.resolve()}"
 
@@ -594,11 +602,8 @@ def _tell_from_ledger(study: optuna.Study, trial_number: int, ledger: Mapping[st
         if not isinstance(evaluation_raw, dict):
             raise OptunaSearchError("complete trial ledger lacks validation evidence")
         evaluation = _load_evaluation(evaluation_raw)
-        values = (
-            evaluation.pass_rate_lcb_95 if evaluation.feasible else -1.0,
-            evaluation.median_pass_days if evaluation.feasible else 1_000_000_000.0,
-        )
-        study.tell(trial_number, values=values[0])
+        value = evaluation.pass_rate_lcb_95 if evaluation.feasible else -1.0
+        study.tell(trial_number, values=value)
     elif ledger.get("state") == "failed":
         study.tell(trial_number, state=TrialState.FAIL)
     elif ledger.get("state") == "pruned":
@@ -640,7 +645,17 @@ def _completed_evaluations(
         evaluation = ledger.get("evaluation")
         if not isinstance(evaluation, dict):
             raise OptunaSearchError("complete trial ledger lacks validation evidence")
-        evaluations.append(_load_evaluation(evaluation))
+        loaded_evaluation = _load_evaluation(evaluation)
+        expected_seeds = derive_trial_identity(config, study_name, trial_number).seeds
+        expected_value = loaded_evaluation.pass_rate_lcb_95 if loaded_evaluation.feasible else -1.0
+        if (
+            loaded_evaluation.trial_number != trial_number
+            or tuple(outcome.seed for outcome in loaded_evaluation.outcomes) != expected_seeds
+            or frozen.value != expected_value
+            or frozen.user_attrs.get("validation_blow_count") != loaded_evaluation.aggregate_blows
+        ):
+            raise OptunaSearchError("trial evaluation does not match persistent Optuna state")
+        evaluations.append(loaded_evaluation)
     return tuple(evaluations)
 
 
@@ -651,6 +666,25 @@ def _completed_search_seed(
     metrics_path = path / "metrics.json"
     if not manifest_path.exists() and not metrics_path.exists():
         return None
+    if metrics_path.exists() and not manifest_path.exists():
+        try:
+            metrics = json.loads(metrics_path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise OptunaSearchError("recoverable search seed metrics are invalid") from exc
+        identities = metrics.get("identities") if isinstance(metrics, dict) else None
+        if (
+            not isinstance(metrics, dict)
+            or metrics.get("status") != "complete"
+            or not isinstance(identities, dict)
+            or identities.get("seed") != request.identity.seeds[seed_index]
+            or identities.get("search_trial_number") != request.identity.trial_number
+            or identities.get("search_seed_index") != seed_index
+            or identities.get("ppo_hyperparameters") != dict(request.parameters)
+        ):
+            raise OptunaSearchError("recoverable search seed provenance mismatch")
+        return None
+    if manifest_path.exists() and not metrics_path.exists():
+        raise OptunaSearchError("completed search seed manifest lacks metrics")
     try:
         manifest = json.loads(manifest_path.read_text())
         metrics = json.loads(metrics_path.read_text())
@@ -819,7 +853,7 @@ def execute_optuna_trial(config: RlConfig, request: TrialRequest) -> TrialEvalua
             "sealed_holdout_accessed": False,
         }
         validation_path = request.artifact_directory / "validation" / f"seed-{seed_index}.json"
-        _atomic_json_no_overwrite(validation_path, validation_core)
+        _atomic_json_idempotent(validation_path, validation_core)
         outcome = replace(
             outcome,
             completed_timesteps=completed_timesteps,
@@ -1189,6 +1223,11 @@ def run_production_optuna_study(
         raise OptunaSearchError("production study manifests are not same-fold train/validation")
     training_end = max(episode.bars[-1].timestamp for episode in training.episodes)
     validation_start = min(episode.bars[0].timestamp for episode in validation.episodes)
+    validation_end = max(episode.bars[-1].timestamp for episode in validation.episodes)
+    if training_end >= config.evaluation.sealed_holdout_start or validation_end >= (
+        config.evaluation.sealed_holdout_start
+    ):
+        raise OptunaSearchError("production study episodes reach the sealed holdout")
     if training_end >= validation_start:
         raise OptunaSearchError("production study train/validation schedules overlap")
     return run_optuna_study(
