@@ -13,6 +13,7 @@ from mantis_v2.runpod_lifecycle import (
     launch_pod,
     pod_status,
     reconcile_launch,
+    reconcile_spend,
     reconcile_termination,
     terminate_pod,
 )
@@ -32,6 +33,8 @@ def _approved_decision() -> dict[str, object]:
         "container_disk_gb": 50,
         "maximum_duration_seconds": 7200,
         "projected_spend_usd": "0.88",
+        "stage": "qualification",
+        "authorization_digest": "b" * 64,
         "observed_price_usd_per_gpu_hour": "0.44",
         "image_ref": "registry.example/mantis@sha256:" + "a" * 64,
         "template_id": "template-fixture",
@@ -525,3 +528,102 @@ def test_unknown_terminate_reconciles_absence_without_retry(tmp_path: Path) -> N
     assert first == second
     assert first["provider_deleted"] is True
     assert first["reconciliation_evidence"] == "fresh_inventory_absence"
+
+
+def test_spend_stays_reserved_until_receipts_and_billing_reconcile(tmp_path: Path) -> None:
+    decision = _approved_decision()
+
+    class BillingAdapter:
+        def __init__(self) -> None:
+            self.billing_calls = 0
+
+        def inventory(self) -> list[dict[str, object]]:
+            return []
+
+        def create(self, submitted: dict[str, object], deadline: datetime) -> dict[str, object]:
+            return {
+                "id": "pod-billing",
+                "name": decision["run_name"],
+                "desiredStatus": "RUNNING",
+                "imageName": decision["image_ref"],
+                "templateId": decision["template_id"],
+                "networkVolumeId": decision["volume_id"],
+                "costPerHr": 0.44,
+                "vcpuCount": 8,
+                "memoryInGb": 32,
+            }
+
+        def terminate(self, pod_id: str) -> dict[str, object]:
+            return {"deleted": True, "id": pod_id}
+
+        def billing(self, pod_id: str) -> dict[str, object] | None:
+            self.billing_calls += 1
+            if self.billing_calls == 1:
+                return None
+            return {
+                "pod_id": pod_id,
+                "actual_cost_usd": "0.22",
+                "RUNPOD_API_KEY": "must-not-escape",
+            }
+
+    adapter = BillingAdapter()
+    state_root = tmp_path / "state"
+    pod_receipt = launch_pod(
+        decision=decision,
+        state_root=state_root,
+        adapter=adapter,
+        now=lambda: datetime(2026, 7, 21, 12, 0, tzinfo=UTC),
+    )
+    attempt = json.loads(
+        (state_root / "attempts" / f"{decision['decision_digest']}.json").read_text()
+    )
+    assert attempt["spend_state"] == "reserved"
+    assert attempt["reserved_spend_usd"] == "0.88"
+
+    with pytest.raises(LifecycleError, match="^termination_receipt_required$"):
+        reconcile_spend(
+            pod_id="pod-billing",
+            run_name=str(decision["run_name"]),
+            state_root=state_root,
+            adapter=adapter,
+            now=lambda: datetime(2026, 7, 21, 12, 30, tzinfo=UTC),
+        )
+    terminate_pod(
+        pod_id="pod-billing",
+        run_name=str(decision["run_name"]),
+        state_root=state_root,
+        adapter=adapter,
+        now=lambda: datetime(2026, 7, 21, 12, 31, tzinfo=UTC),
+    )
+    with pytest.raises(LifecycleError, match="^provider_billing_pending$"):
+        reconcile_spend(
+            pod_id="pod-billing",
+            run_name=str(decision["run_name"]),
+            state_root=state_root,
+            adapter=adapter,
+            now=lambda: datetime(2026, 7, 21, 12, 32, tzinfo=UTC),
+        )
+
+    first = reconcile_spend(
+        pod_id="pod-billing",
+        run_name=str(decision["run_name"]),
+        state_root=state_root,
+        adapter=adapter,
+        now=lambda: datetime(2026, 7, 21, 12, 33, tzinfo=UTC),
+    )
+    second = reconcile_spend(
+        pod_id="pod-billing",
+        run_name=str(decision["run_name"]),
+        state_root=state_root,
+        adapter=adapter,
+        now=lambda: datetime(2026, 7, 21, 12, 34, tzinfo=UTC),
+    )
+
+    assert first == second
+    assert adapter.billing_calls == 2
+    assert first["spend_state"] == "reconciled"
+    assert first["reserved_spend_usd"] == "0.88"
+    assert first["actual_spend_usd"] == "0.22"
+    assert first["stage"] == "qualification"
+    assert "must-not-escape" not in json.dumps(first)
+    assert pod_receipt["decision_digest"] == decision["decision_digest"]

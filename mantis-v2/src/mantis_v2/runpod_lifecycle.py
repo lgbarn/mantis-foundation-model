@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -36,6 +37,8 @@ class LifecycleAdapter(Protocol):
 
     def terminate(self, pod_id: str) -> Mapping[str, object]: ...
 
+    def billing(self, pod_id: str) -> Mapping[str, object] | None: ...
+
 
 def _required_string(value: object, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
@@ -47,6 +50,21 @@ def _required_int(value: object, field: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise LifecycleError(f"invalid_launch_decision:{field}")
     return value
+
+
+def _required_decimal(value: object, field: str) -> Decimal:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise LifecycleError(f"invalid_launch_decision:{field}") from exc
+    if not parsed.is_finite() or parsed < 0:
+        raise LifecycleError(f"invalid_launch_decision:{field}")
+    return parsed
+
+
+def _payload_digest(payload: Mapping[str, object]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _publish_json(path: Path, payload: Mapping[str, object]) -> None:
@@ -143,6 +161,12 @@ def _pod_receipt(
         "volume_id": decision["volume_id"],
         "vcpu": decision["vcpu"],
         "ram_gb": decision["ram_gb"],
+        "stage": decision["stage"],
+        "authorization_digest": decision["authorization_digest"],
+        "reserved_spend_usd": str(
+            _required_decimal(decision.get("projected_spend_usd"), "projected_spend_usd")
+        ),
+        "spend_state": "reserved",
         "observed_price_usd_per_gpu_hour": str(observed_price),
         "started_at": started_at.isoformat().replace("+00:00", "Z"),
         "deadline": deadline.isoformat().replace("+00:00", "Z"),
@@ -213,6 +237,17 @@ def launch_pod(
             decision.get("maximum_duration_seconds"), "maximum_duration_seconds"
         )
         deadline = started_at + timedelta(seconds=duration)
+        reserved_spend = _required_decimal(
+            decision.get("projected_spend_usd"), "projected_spend_usd"
+        )
+        stage = _required_string(decision.get("stage"), "stage")
+        if stage not in {"qualification", "production", "recovery"}:
+            raise LifecycleError("invalid_launch_decision:stage")
+        authorization_digest = _required_string(
+            decision.get("authorization_digest"), "authorization_digest"
+        )
+        if not re.fullmatch(r"[0-9a-f]{64}", authorization_digest):
+            raise LifecycleError("invalid_launch_decision:authorization_digest")
         attempt_path = attempt_dir / f"{decision_digest}.json"
         _publish_json(
             attempt_path,
@@ -223,6 +258,10 @@ def launch_pod(
                 "attempted_at": started_at.isoformat().replace("+00:00", "Z"),
                 "deadline": deadline.isoformat().replace("+00:00", "Z"),
                 "state": "create_requested",
+                "stage": stage,
+                "authorization_digest": authorization_digest,
+                "reserved_spend_usd": str(reserved_spend),
+                "spend_state": "reserved",
             },
         )
         try:
@@ -472,6 +511,71 @@ def reconcile_termination(
             "reconciliation_evidence": "fresh_inventory_absence",
         }
         _publish_json(termination_path, receipt)
+        return receipt
+    finally:
+        os.close(descriptor)
+        lock_path.unlink(missing_ok=True)
+
+
+def reconcile_spend(
+    *,
+    pod_id: str,
+    run_name: str,
+    state_root: Path,
+    adapter: LifecycleAdapter,
+    now: Clock,
+) -> dict[str, object]:
+    """Move reserved spend to actual only from receipt-backed billing evidence."""
+    exact_pod_id = _pod_identity(pod_id)
+    pod_receipt = _read_receipt(
+        state_root / "receipts" / "pods" / f"{exact_pod_id}.json", exact_pod_id
+    )
+    if pod_receipt.get("run_name") != run_name:
+        raise LifecycleError("run_identity_mismatch")
+    termination_path = state_root / "receipts" / "terminations" / f"{exact_pod_id}.json"
+    if not termination_path.exists():
+        raise LifecycleError("termination_receipt_required")
+    termination_receipt = _read_receipt(termination_path, exact_pod_id)
+    spend_path = state_root / "receipts" / "spend" / f"{exact_pod_id}.json"
+    if spend_path.exists():
+        return _read_receipt(spend_path, exact_pod_id)
+
+    try:
+        descriptor, lock_path = _acquire_lock(state_root, f"spend-{exact_pod_id}.lock")
+    except LifecycleError as exc:
+        if spend_path.exists():
+            return _read_receipt(spend_path, exact_pod_id)
+        raise LifecycleError("spend_reconciliation_in_progress") from exc
+    try:
+        if spend_path.exists():
+            return _read_receipt(spend_path, exact_pod_id)
+        try:
+            billing = adapter.billing(exact_pod_id)
+        except Exception as exc:
+            raise LifecycleError("provider_billing_failed") from exc
+        if billing is None:
+            raise LifecycleError("provider_billing_pending")
+        if not isinstance(billing, Mapping) or billing.get("pod_id") != exact_pod_id:
+            raise LifecycleError("provider_identity_mismatch")
+        actual_spend = _required_decimal(billing.get("actual_cost_usd"), "billing.actual_cost_usd")
+        reserved_spend = _required_decimal(
+            pod_receipt.get("reserved_spend_usd"), "receipt.reserved_spend_usd"
+        )
+        receipt: dict[str, object] = {
+            "schema_version": 1,
+            "pod_id": exact_pod_id,
+            "run_name": run_name,
+            "decision_digest": pod_receipt["decision_digest"],
+            "authorization_digest": pod_receipt["authorization_digest"],
+            "stage": pod_receipt["stage"],
+            "reserved_spend_usd": str(reserved_spend),
+            "actual_spend_usd": str(actual_spend),
+            "spend_state": "reconciled",
+            "pod_receipt_digest": _payload_digest(pod_receipt),
+            "termination_receipt_digest": _payload_digest(termination_receipt),
+            "reconciled_at": now().astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        }
+        _publish_json(spend_path, receipt)
         return receipt
     finally:
         os.close(descriptor)
