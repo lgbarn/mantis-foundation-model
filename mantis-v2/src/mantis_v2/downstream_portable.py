@@ -10,6 +10,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+import pyarrow.parquet as pq
+
 from mantis_v2.corpus import CorpusRepairError, validate_corpus_binding
 from mantis_v2.downstream_config import DownstreamConfig, load_downstream_config
 from mantis_v2.downstream_pipeline import (
@@ -21,7 +24,12 @@ from mantis_v2.downstream_pipeline import (
     simulate,
     walk_forward,
 )
-from mantis_v2.embedding_artifacts import FOUR_TIMEFRAME_CONTRACT
+from mantis_v2.embedding_artifacts import (
+    FOUR_TIMEFRAME_CONTRACT,
+    EmbeddingArtifactError,
+    EmbeddingIdentity,
+    scan_embedding_pairs,
+)
 from mantis_v2.model import sha256_file
 from mantis_v2.strategy import market_path
 
@@ -363,6 +371,7 @@ def bind_consumer(
     expected_width = len(producer.data.timeframes) * len(producer.data.feature_columns)
     embedding_dim = embed.get("embedding_dim_per_channel")
     outputs = embed.get("outputs")
+    identity_raw = embed.get("embedding_identity")
     if (
         embed.get("schema_version") != 1
         or embed.get("stage") != "embed"
@@ -373,15 +382,50 @@ def bind_consumer(
         or embed.get("feature_width") != expected_width * embedding_dim
         or not isinstance(outputs, list)
         or not outputs
+        or not isinstance(identity_raw, dict)
         or embed.get("rows") != sum(int(output.get("rows", -1)) for output in outputs)
     ):
         raise PortableDownstreamError("embedding manifest does not match the exact producer")
-    for output in outputs:
-        for role in ("features", "metadata"):
-            identity = output.get(role)
-            path = Path(str(identity.get("path", ""))) if isinstance(identity, dict) else Path("")
-            if not path.is_file() or sha256_file(path) != identity.get("sha256"):
-                raise PortableDownstreamError(f"embedding {role} shard identity mismatch")
+    try:
+        identity = EmbeddingIdentity(
+            **{**identity_raw, "timeframes": tuple(identity_raw.get("timeframes", ()))},
+        )
+        expected_identity = EmbeddingIdentity(
+            export_role=producer.foundation.export_role,
+            foundation_export_sha256=sha256_file(producer.foundation.manifest_path),
+            producer_config_sha256=producer.embedding_contract_digest,
+            corpus_sha256=str(embed.get("prepare_manifest_sha256", "")),
+            source_digest=producer.run.source_digest,
+            lock_digest=producer.run.lock_digest,
+            timeframes=producer.data.timeframes,
+            feature_width=int(embed["feature_width"]),
+        )
+        scanned = list(scan_embedding_pairs(embed_path.parent / "shards", identity))
+    except (TypeError, ValueError, EmbeddingArtifactError) as exc:
+        raise PortableDownstreamError("embedding pair receipts are invalid") from exc
+    if (
+        identity != expected_identity
+        or embed.get("source_digest") != producer.run.source_digest
+        or embed.get("lock_digest") != producer.run.lock_digest
+        or scanned != outputs
+    ):
+        raise PortableDownstreamError("embedding provenance does not match the exact producer")
+    for output in scanned:
+        feature_path = Path(output["features"]["path"])
+        metadata_path = Path(output["metadata"]["path"])
+        try:
+            features = np.load(feature_path, mmap_mode="r", allow_pickle=False)
+            metadata_rows = pq.ParquetFile(metadata_path).metadata.num_rows
+        except (OSError, ValueError) as exc:
+            raise PortableDownstreamError("embedding shard content is unreadable") from exc
+        sample_indices = sorted({0, len(features) // 2, len(features) - 1})
+        if (
+            features.ndim != 2
+            or features.shape != (output["rows"], embed["feature_width"])
+            or metadata_rows != output["rows"]
+            or not np.isfinite(features[sample_indices]).all()
+        ):
+            raise PortableDownstreamError("embedding shard content contract mismatch")
     consumer = replace(
         template,
         run=replace(

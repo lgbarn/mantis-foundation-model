@@ -13,6 +13,7 @@ from mantis_v2 import downstream_portable as portable_module
 from mantis_v2.downstream_config import load_downstream_config
 from mantis_v2.downstream_pipeline import _manifest_base
 from mantis_v2.downstream_portable import PortableDownstreamError, run_stage
+from mantis_v2.embedding_artifacts import EmbeddingIdentity, publish_embedding_pair
 from mantis_v2.model import sha256_file
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -216,12 +217,28 @@ def test_cli_binds_exact_portable_producer_and_consumer_configs(
     assert len(binding["source_digest"]) == 64
     assert len(binding["lock_digest"]) == 64
 
-    feature_path = tmp_path / "features.npy"
-    with feature_path.open("wb") as handle:
-        np.save(handle, np.zeros((1, 80), dtype=np.float32), allow_pickle=False)
-    metadata_path = tmp_path / "metadata.parquet"
-    metadata_path.write_bytes(b"metadata")
-    embed_manifest = tmp_path / "embed-manifest.json"
+    embed_root = tmp_path / "embed"
+    prepare_manifest = tmp_path / "prepare-manifest.json"
+    prepare_manifest.write_text("{}")
+    identity = EmbeddingIdentity(
+        export_role=producer.foundation.export_role,
+        foundation_export_sha256=sha256_file(producer.foundation.manifest_path),
+        producer_config_sha256=producer.embedding_contract_digest,
+        corpus_sha256=sha256_file(prepare_manifest),
+        source_digest=producer.run.source_digest,
+        lock_digest=producer.run.lock_digest,
+        timeframes=producer.data.timeframes,
+        feature_width=80,
+    )
+    pair = publish_embedding_pair(
+        embed_root / "shards",
+        0,
+        0,
+        np.zeros((1, 80), dtype=np.float32),
+        pd.DataFrame({"row": [0]}),
+        identity,
+    )
+    embed_manifest = embed_root / "manifest.json"
     embed_manifest.write_text(
         json.dumps(
             {
@@ -230,23 +247,17 @@ def test_cli_binds_exact_portable_producer_and_consumer_configs(
                 "workflow_digest": producer.workflow_digest,
                 "strategy_contract": producer.strategy_contract,
                 "foundation_weights_sha256": producer.foundation.weights_sha256,
+                "source_digest": producer.run.source_digest,
+                "lock_digest": producer.run.lock_digest,
+                "prepare_manifest_sha256": sha256_file(prepare_manifest),
+                "embedding_identity": {
+                    **identity.__dict__,
+                    "timeframes": list(identity.timeframes),
+                },
                 "embedding_dim_per_channel": 4,
                 "feature_width": 80,
                 "rows": 1,
-                "outputs": [
-                    {
-                        "number": 0,
-                        "rows": 1,
-                        "features": {
-                            "path": str(feature_path),
-                            "sha256": sha256_file(feature_path),
-                        },
-                        "metadata": {
-                            "path": str(metadata_path),
-                            "sha256": sha256_file(metadata_path),
-                        },
-                    }
-                ],
+                "outputs": [pair],
             }
         )
     )
