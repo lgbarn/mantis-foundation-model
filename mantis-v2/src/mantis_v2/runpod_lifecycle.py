@@ -150,6 +150,12 @@ def _pod_receipt(
         observed_price = Decimal(str(provider_pod["costPerHr"]))
     except (KeyError, InvalidOperation, ValueError) as exc:
         raise LifecycleError("incomplete_provider_response:create.costPerHr") from exc
+    approved_price = _required_decimal(
+        decision.get("observed_price_usd_per_gpu_hour"),
+        "observed_price_usd_per_gpu_hour",
+    )
+    if observed_price != approved_price:
+        raise LifecycleError("provider_price_mismatch")
 
     return {
         "schema_version": 1,

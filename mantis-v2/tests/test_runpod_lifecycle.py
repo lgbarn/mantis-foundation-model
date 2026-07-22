@@ -627,3 +627,48 @@ def test_spend_stays_reserved_until_receipts_and_billing_reconcile(tmp_path: Pat
     assert first["stage"] == "qualification"
     assert "must-not-escape" not in json.dumps(first)
     assert pod_receipt["decision_digest"] == decision["decision_digest"]
+
+
+def test_create_price_drift_fails_closed_without_second_create(tmp_path: Path) -> None:
+    decision = _approved_decision()
+
+    class PriceDriftAdapter:
+        def __init__(self) -> None:
+            self.create_calls = 0
+
+        def inventory(self) -> list[dict[str, object]]:
+            return []
+
+        def create(self, submitted: dict[str, object], deadline: datetime) -> dict[str, object]:
+            self.create_calls += 1
+            return {
+                "id": "pod-price-drift",
+                "name": decision["run_name"],
+                "desiredStatus": "RUNNING",
+                "imageName": decision["image_ref"],
+                "templateId": decision["template_id"],
+                "networkVolumeId": decision["volume_id"],
+                "costPerHr": 0.45,
+                "vcpuCount": 8,
+                "memoryInGb": 32,
+            }
+
+    adapter = PriceDriftAdapter()
+    state_root = tmp_path / "state"
+    with pytest.raises(LifecycleError, match="^provider_price_mismatch$"):
+        launch_pod(
+            decision=decision,
+            state_root=state_root,
+            adapter=adapter,
+            now=lambda: datetime(2026, 7, 21, 12, 0, tzinfo=UTC),
+        )
+    with pytest.raises(LifecycleError, match="^launch_reconciliation_required$"):
+        launch_pod(
+            decision=decision,
+            state_root=state_root,
+            adapter=adapter,
+            now=lambda: datetime(2026, 7, 21, 12, 1, tzinfo=UTC),
+        )
+
+    assert adapter.create_calls == 1
+    assert not (state_root / "receipts" / "pods").exists()
