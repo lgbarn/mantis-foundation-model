@@ -274,6 +274,7 @@ def _load_episode_manifest(
     path: Path,
     repository_root: Path | None,
     expected_partitions: frozenset[str],
+    episode_records: object | None = None,
 ) -> LoadedEpisodes:
     """Load complete bar episodes and mmap candidate embeddings from a schedule manifest."""
     root = repository_root.resolve() if repository_root else Path(__file__).resolve().parents[3]
@@ -295,7 +296,7 @@ def _load_episode_manifest(
     market_cache: dict[str, tuple[pd.DataFrame, np.ndarray, np.ndarray]] = {}
     episodes: list[EnvironmentEpisode] = []
     feature_refs: list[FeatureRef] = []
-    raw_episodes = raw.get("episodes")
+    raw_episodes = raw.get("episodes") if episode_records is None else episode_records
     if not isinstance(raw_episodes, list) or not raw_episodes:
         raise EnvironmentValidationError("episode manifest has no episodes")
     for episode in raw_episodes:
@@ -385,16 +386,33 @@ def load_episode_manifest(
 
 
 def load_test_episode_manifest(
-    config: RlConfig, path: Path, repository_root: Path | None = None
+    config: RlConfig,
+    path: Path,
+    repository_root: Path | None = None,
+    *,
+    coverage: str | None = None,
 ) -> LoadedEpisodes:
-    """Load only a frozen non-overlapping test schedule before the sealed holdout."""
+    """Load a frozen headline or labeled overlap-coverage test schedule."""
     raw = _manifest(path, config, frozenset({"test"}))
     if (
         raw.get("schedule_mode") != "chronological_greedy_nonoverlap_v1"
         or raw.get("overlapping_starts") is not False
     ):
         raise EnvironmentValidationError("test evaluation schedule is not fixed non-overlapping")
-    return _load_episode_manifest(config, path, repository_root, frozenset({"test"}))
+    records: object | None = None
+    if coverage is not None:
+        stress_coverage = raw.get("stress_coverage")
+        selected = stress_coverage.get(coverage) if isinstance(stress_coverage, dict) else None
+        records = selected.get("episodes") if isinstance(selected, dict) else None
+        if coverage != "overlapping_starts" or not isinstance(records, list) or not records:
+            raise EnvironmentValidationError("test stress coverage is invalid")
+    return _load_episode_manifest(
+        config,
+        path,
+        repository_root,
+        frozenset({"test"}),
+        records,
+    )
 
 
 def load_historical_logistic_policy(

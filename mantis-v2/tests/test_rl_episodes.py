@@ -25,6 +25,7 @@ from mantis_v2.rl_episodes import (
     _verified_path,
     build_chronological_episode_schedule,
     build_episode_schedule,
+    build_overlapping_episode_coverage,
     read_observation,
 )
 
@@ -40,8 +41,29 @@ def test_evaluation_schedule_greedily_keeps_chronological_nonoverlapping_attempt
     )
 
     episodes = build_chronological_episode_schedule(sources, partition, trading_days=20)
+    overlap_coverage = build_overlapping_episode_coverage(sources, partition, trading_days=20)
 
     assert episodes == build_chronological_episode_schedule(sources, partition, trading_days=20)
+    assert overlap_coverage == build_overlapping_episode_coverage(
+        sources, partition, trading_days=20
+    )
+    assert {
+        (episode.ticker, episode.profile, episode.decision_start, episode.terminal_end)
+        for episode in episodes
+    }.isdisjoint(
+        {
+            (episode.ticker, episode.profile, episode.decision_start, episode.terminal_end)
+            for episode in overlap_coverage
+        }
+    )
+    for episode in overlap_coverage:
+        assert any(
+            episode.ticker == headline.ticker
+            and episode.profile == headline.profile
+            and episode.decision_start <= headline.terminal_end
+            and headline.decision_start <= episode.terminal_end
+            for headline in episodes
+        )
     assert {episode.profile for episode in episodes if episode.ticker == "ZB"} == {"one_mini"}
     for ticker in ("NQ", "ZB"):
         for profile in ("one_mini", "ten_micros"):

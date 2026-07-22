@@ -105,6 +105,28 @@ def test_summary_rejects_overlap_nonchronology_and_nonfinite_metrics() -> None:
         summarize_attempts(broken)
 
 
+def test_baseline_result_differences_cover_every_view_without_bootstrap() -> None:
+    rows: list[dict[str, object]] = []
+    for policy in sorted(rl_evaluation._POLICIES):
+        for index in range(2):
+            rows.append({**_attempt(index), "policy": policy, "stress": "primary"})
+
+    reports = rl_evaluation._baseline_result_differences(rows, "primary")
+
+    assert {report["baseline"] for report in reports} == rl_evaluation._POLICIES - {"candidate"}
+    for report in reports:
+        assert set(report["views"]) == {
+            "pooled",
+            "fold",
+            "ticker",
+            "profile",
+            "regime_block",
+            "seed",
+            "cell",
+        }
+        assert report["views"]["pooled"][0]["pass_rate_difference"] == 0.0
+
+
 def test_headline_wilson_uses_unique_seed_42_attempts_and_preserves_negative_cushion() -> None:
     rows = []
     for index in range(300):
@@ -268,6 +290,7 @@ def test_promotion_is_fail_closed_for_each_profile_seed_baseline_and_stress() ->
                 "gap_adverse_tick",
                 "latency_1bar",
                 "missed_fill_10pct",
+                "overlapping_starts",
                 "same_bar_adverse",
             )
         },
@@ -290,6 +313,7 @@ def test_promotion_is_fail_closed_for_each_profile_seed_baseline_and_stress() ->
                 "gap_adverse_tick",
                 "latency_1bar",
                 "missed_fill_10pct",
+                "overlapping_starts",
                 "same_bar_adverse",
             )
         },
@@ -335,6 +359,7 @@ def test_sensitivity_performance_does_not_create_a_post_hoc_gate() -> None:
             "gap_adverse_tick",
             "latency_1bar",
             "missed_fill_10pct",
+            "overlapping_starts",
             "same_bar_adverse",
         )
     }
@@ -630,7 +655,9 @@ def test_plan_is_content_addressed_and_frozen_before_test_access(
             rl_evaluation._validated_evaluation_plan(config, mutated_path)
 
 
-def test_pre_promotion_contract_binds_selector_and_shared_shield(tmp_path: Path) -> None:
+def test_pre_promotion_contract_binds_selector_and_shared_shield(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     config = load_rl_config(ROOT / "configs" / "rl-entry-smoke.toml")
     serving_sha256 = "a" * 64
     bundles = [tmp_path / f"bundle-{fold}.json" for fold in (0, 1)]
@@ -661,25 +688,41 @@ def test_pre_promotion_contract_binds_selector_and_shared_shield(tmp_path: Path)
         "test_accessed": False,
         "sealed_holdout_accessed": False,
     }
-    selector_data = json.dumps(selector_payload, sort_keys=True, separators=(",", ":")).encode()
-    selector = tmp_path / (
-        f"deployment-checkpoint-selection-{hashlib.sha256(selector_data).hexdigest()}.json"
-    )
-    selector.write_bytes(selector_data)
-    references: dict[str, dict[str, str]] = {}
+
+    def write_addressed(prefix: str, payload: dict[str, object]) -> Path:
+        data = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        path = tmp_path / f"{prefix}-{hashlib.sha256(data).hexdigest()}.json"
+        path.write_bytes(data)
+        return path
+
+    selector = write_addressed("deployment-checkpoint-selection", selector_payload)
+    reference_paths: dict[str, Path] = {}
     for name in (
         "mask_source",
         "observation_schema",
         "rule_snapshot",
-        "fee_snapshot",
         "calendar_snapshot",
     ):
         path = tmp_path / f"{name}.json"
         path.write_text(name)
-        references[name] = {
-            "path": str(path.resolve()),
-            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        reference_paths[name] = path
+
+    def expected_references(_config: object) -> dict[str, dict[str, str]]:
+        result = {
+            name: {
+                "path": str(path.resolve()),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+            for name, path in reference_paths.items()
         }
+        result["fee_snapshot"] = {
+            "identity": config.fees.snapshot,
+            "sha256": config.fee_digest,
+        }
+        return result
+
+    monkeypatch.setattr(rl_evaluation, "_expected_risk_shield_identities", expected_references)
+    references = expected_references(config)
     shield_payload = {
         "schema_version": 1,
         "stage": "risk-shield-contract-v1",
@@ -693,9 +736,7 @@ def test_pre_promotion_contract_binds_selector_and_shared_shield(tmp_path: Path)
         "sealed_holdout_accessed": False,
         **references,
     }
-    shield_data = json.dumps(shield_payload, sort_keys=True, separators=(",", ":")).encode()
-    shield = tmp_path / f"risk-shield-contract-{hashlib.sha256(shield_data).hexdigest()}.json"
-    shield.write_bytes(shield_data)
+    shield = write_addressed("risk-shield-contract", shield_payload)
 
     result = rl_evaluation._validated_pre_promotion_serving_contract(
         config, serving, serving_sha256, selector, shield
@@ -703,8 +744,85 @@ def test_pre_promotion_contract_binds_selector_and_shared_shield(tmp_path: Path)
 
     assert result["deployment_selector"]["selected_fold"] == 1
     assert result["risk_shield"]["version"] == "RiskShieldV1"
+
+    selector_mutations = {
+        "schema": ("schema_version", 2),
+        "stage": ("stage", "wrong"),
+        "status": ("status", "incomplete"),
+        "selector": ("selector", "metric-ranked"),
+        "seed": ("serving_seed", 43),
+        "fold": ("selected_fold", 0),
+        "serving": ("serving_freeze_sha256", "f" * 64),
+        "checkpoint_path": ("checkpoint_bundle_path", str(bundles[0].resolve())),
+        "checkpoint_sha": ("checkpoint_bundle_sha256", "f" * 64),
+        "config": ("config_sha256", "f" * 64),
+        "source": ("source_sha256", "f" * 64),
+        "lock": ("dependency_lock_sha256", "f" * 64),
+        "test": ("test_accessed", True),
+        "holdout": ("sealed_holdout_accessed", True),
+    }
+    for name, (field, value) in selector_mutations.items():
+        mutated = dict(selector_payload)
+        mutated[field] = value
+        path = write_addressed(f"deployment-checkpoint-selection-{name}", mutated)
+        renamed = tmp_path / (
+            f"deployment-checkpoint-selection-{hashlib.sha256(path.read_bytes()).hexdigest()}.json"
+        )
+        path.rename(renamed)
+        with pytest.raises(EvaluationContractError, match="selection is not authorized"):
+            rl_evaluation._validated_pre_promotion_serving_contract(
+                config, serving, serving_sha256, renamed, shield
+            )
+
+    shield_mutations = {
+        "schema": ("schema_version", 2),
+        "stage": ("stage", "wrong"),
+        "status": ("status", "incomplete"),
+        "version": ("version", "RiskShieldV0"),
+        "config": ("config_sha256", "f" * 64),
+        "source": ("source_sha256", "f" * 64),
+        "lock": ("dependency_lock_sha256", "f" * 64),
+        "consumers": ("consumers", ["serving"]),
+        "test": ("test_accessed", True),
+        "holdout": ("sealed_holdout_accessed", True),
+    }
+    for name, (field, value) in shield_mutations.items():
+        mutated = dict(shield_payload)
+        mutated[field] = value
+        path = write_addressed(f"risk-shield-contract-{name}", mutated)
+        renamed = (
+            tmp_path / f"risk-shield-contract-{hashlib.sha256(path.read_bytes()).hexdigest()}.json"
+        )
+        path.rename(renamed)
+        with pytest.raises(EvaluationContractError, match="RiskShield contract"):
+            rl_evaluation._validated_pre_promotion_serving_contract(
+                config, serving, serving_sha256, selector, renamed
+            )
+
+    altered_authority = dict(shield_payload)
+    altered_authority["mask_source"] = {
+        "path": str((tmp_path / "attacker.py").resolve()),
+        "sha256": "f" * 64,
+    }
+    altered_shield = write_addressed("risk-shield-contract", altered_authority)
+    with pytest.raises(EvaluationContractError, match="approved identities"):
+        rl_evaluation._validated_pre_promotion_serving_contract(
+            config, serving, serving_sha256, selector, altered_shield
+        )
+
+    incomplete_serving = {
+        "seed_artifacts": [
+            serving["seed_artifacts"][0],
+            {**serving["seed_artifacts"][1], "fold": 2},
+        ]
+    }
+    with pytest.raises(EvaluationContractError, match="incomplete or nonchronological"):
+        rl_evaluation._validated_pre_promotion_serving_contract(
+            config, incomplete_serving, serving_sha256, selector, shield
+        )
+
     Path(references["calendar_snapshot"]["path"]).write_text("changed")
-    with pytest.raises(EvaluationContractError, match="calendar_snapshot identity"):
+    with pytest.raises(EvaluationContractError, match="approved identities"):
         rl_evaluation._validated_pre_promotion_serving_contract(
             config, serving, serving_sha256, selector, shield
         )
@@ -749,6 +867,26 @@ def test_test_schedule_validator_requires_content_addressed_filename(tmp_path: P
         "overlapping_starts": False,
         "identities": {"config": {"sha256": config.digest}},
         "episodes": [episode],
+        "stress_coverage": {
+            "overlapping_starts": {
+                "stage": "overlapping-start-coverage-v1",
+                "promotion_denominator": False,
+                "overlapping_starts": True,
+                "episode_count": 1,
+                "identity_sha256": "",
+                "episodes": [
+                    {
+                        "number": 1,
+                        "ticker": "NQ",
+                        "profile": "one_mini",
+                        "lookback_start": "2025-01-06T13:30:00+00:00",
+                        "decision_start": "2025-01-06T14:00:00+00:00",
+                        "exit_end": "2025-01-06T15:00:00+00:00",
+                        "terminal_end": "2025-01-06T16:00:00+00:00",
+                    }
+                ],
+            }
+        },
         "schedule_proof": {
             "algorithm": "chronological_greedy_nonoverlap_v1",
             "selected_identity_sha256": hashlib.sha256(
@@ -758,6 +896,10 @@ def test_test_schedule_validator_requires_content_addressed_filename(tmp_path: P
             "builder_code_sha256": hashlib.sha256(builder.read_bytes()).hexdigest(),
         },
     }
+    overlap = schedule["stress_coverage"]["overlapping_starts"]
+    overlap["identity_sha256"] = hashlib.sha256(
+        json.dumps(overlap["episodes"], sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     data = json.dumps(schedule, sort_keys=True, separators=(",", ":")).encode()
     digest = hashlib.sha256(data).hexdigest()
     mutable_name = tmp_path / "test-schedule.json"
@@ -1570,6 +1712,7 @@ def test_successful_evaluation_report_serializes_transfer_cell_evidence(
         "gap_adverse_tick",
         "latency_1bar",
         "missed_fill_10pct",
+        "overlapping_starts",
         "same_bar_adverse",
     ):
         for seed in range(42, 52):
@@ -1615,7 +1758,7 @@ def test_successful_evaluation_report_serializes_transfer_cell_evidence(
     monkeypatch.setattr(
         rl_evaluation,
         "_group_summaries",
-        lambda _rows: {
+        lambda _rows, **_kwargs: {
             "pooled": summary,
             "profile": [
                 {"profile": "one_mini", "summary": summary},
@@ -1634,6 +1777,29 @@ def test_successful_evaluation_report_serializes_transfer_cell_evidence(
         }
 
     monkeypatch.setattr(rl_evaluation, "_point_and_lcb", fixed_effect)
+    result_differences = [
+        {
+            "baseline": baseline,
+            "views": {
+                view: []
+                for view in (
+                    "pooled",
+                    "fold",
+                    "ticker",
+                    "profile",
+                    "regime_block",
+                    "seed",
+                    "cell",
+                )
+            },
+        }
+        for baseline in sorted(rl_evaluation._POLICIES - {"candidate"})
+    ]
+    monkeypatch.setattr(
+        rl_evaluation,
+        "_baseline_result_differences",
+        lambda _rows, _stress: result_differences,
+    )
     monkeypatch.setattr(
         rl_evaluation,
         "promotion_verdict",
@@ -1644,13 +1810,12 @@ def test_successful_evaluation_report_serializes_transfer_cell_evidence(
 
     payload = json.loads(Path(result["report_path"]).read_text())
     transfer = payload["numeric_gate_evidence"]["primary"]["transfer_effects"]
-    descriptive = payload["numeric_gate_evidence"]["primary"]["descriptive_baseline_effects"]
     assert len(transfer) == len(cells) + 1
     assert {"ticker", "profile", "point_difference", "lcb_95"} <= set(transfer[0])
-    assert set(descriptive["pooled"]) == {
-        "historical_rejected_logistic_head",
-        "hist_gradient_boosting",
-    }
+    assert payload["stress_metrics"]["primary"]["result_differences"] == result_differences
+    assert (
+        payload["stress_metrics"]["overlapping_starts"]["result_differences"] == result_differences
+    )
     assert len(bootstrap_matrix_ids) == 1
 
 
@@ -1712,7 +1877,7 @@ def test_default_production_runner_replays_real_environment_path(
     monkeypatch.setattr(
         rl_evaluation,
         "load_test_episode_manifest",
-        lambda *_args: LoadedEpisodes(
+        lambda *_args, **_kwargs: LoadedEpisodes(
             episodes=(episode,),
             feature_refs=(),
             manifest_sha256="c" * 64,
@@ -1851,7 +2016,7 @@ def test_production_runner_covers_policy_stress_and_cost_orchestration(
     monkeypatch.setattr(
         rl_evaluation,
         "load_test_episode_manifest",
-        lambda *_args: LoadedEpisodes(
+        lambda *_args, **_kwargs: LoadedEpisodes(
             episodes=(episode,),
             feature_refs=(),
             manifest_sha256="c" * 64,

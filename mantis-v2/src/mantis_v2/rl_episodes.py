@@ -393,6 +393,83 @@ def build_chronological_episode_schedule(
     )
 
 
+def build_overlapping_episode_coverage(
+    sources: Mapping[str, pd.DataFrame],
+    partition: Partition,
+    *,
+    trading_days: int = 20,
+    session_calendars: Mapping[str, tuple[date, ...]] | None = None,
+    unsafe_sessions: Mapping[str, frozenset[date]] | None = None,
+) -> tuple[Episode, ...]:
+    """Freeze complete starts excluded only because they overlap a headline attempt."""
+    headline = build_chronological_episode_schedule(
+        sources,
+        partition,
+        trading_days=trading_days,
+        session_calendars=session_calendars,
+        unsafe_sessions=unsafe_sessions,
+    )
+    selected = {
+        (episode.ticker, episode.decision_start, episode.terminal_end) for episode in headline
+    }
+    coverage: list[Episode] = []
+    for ticker in sorted(sources):
+        windows = _valid_windows(
+            ticker,
+            sources[ticker],
+            partition,
+            trading_days,
+            None if session_calendars is None else session_calendars[ticker],
+            frozenset() if unsafe_sessions is None else unsafe_sessions[ticker],
+        )
+        profiles = ("one_mini",) if ticker == "ZB" else ("one_mini", "ten_micros")
+        for window in windows:
+            (
+                start,
+                end,
+                first,
+                candidate_count,
+                spans,
+                lookback_start,
+                decision_start,
+                exit_end,
+                terminal_end,
+            ) = window
+            if (ticker, decision_start, terminal_end) in selected:
+                continue
+            for profile in profiles:
+                coverage.append(
+                    Episode(
+                        len(coverage),
+                        ticker,
+                        profile,
+                        start,
+                        end,
+                        trading_days,
+                        first,
+                        candidate_count,
+                        spans,
+                        lookback_start,
+                        decision_start,
+                        exit_end,
+                        terminal_end,
+                    )
+                )
+    if not coverage:
+        raise EpisodeContractError("evaluation has no overlapping-start stress coverage")
+    return tuple(
+        sorted(
+            coverage,
+            key=lambda episode: (
+                episode.decision_start,
+                episode.ticker,
+                episode.profile,
+                episode.number,
+            ),
+        )
+    )
+
+
 def read_observation(path: Path, row: int, width: int) -> np.ndarray:
     """Read one immutable feature row without loading its shard into memory."""
     features = np.load(path, mmap_mode="r", allow_pickle=False)
@@ -849,6 +926,13 @@ def build_episode_manifest(
             session_calendars=session_calendars,
             unsafe_sessions=unsafe_sessions,
         )
+        overlapping_coverage = build_overlapping_episode_coverage(
+            sources,
+            partition,
+            trading_days=config.episode.timeout_trading_days,
+            session_calendars=session_calendars,
+            unsafe_sessions=unsafe_sessions,
+        )
     else:
         episodes = build_episode_schedule(
             sources,
@@ -859,6 +943,7 @@ def build_episode_manifest(
             session_calendars=session_calendars,
             unsafe_sessions=unsafe_sessions,
         )
+        overlapping_coverage = ()
     payload: dict[str, object] = {
         "schema_version": 1,
         "stage": "rl-episode-schedule",
@@ -916,6 +1001,24 @@ def build_episode_manifest(
             "test_metadata_accessed": True,
             "test_features_accessed": False,
             "metadata_columns": cast(list[str], access_plan["metadata_columns"]),
+        }
+        overlap_identity = [asdict(episode) for episode in overlapping_coverage]
+        payload["stress_coverage"] = {
+            "overlapping_starts": {
+                "stage": "overlapping-start-coverage-v1",
+                "promotion_denominator": False,
+                "overlapping_starts": True,
+                "episode_count": len(overlap_identity),
+                "identity_sha256": hashlib.sha256(
+                    json.dumps(
+                        overlap_identity,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        default=str,
+                    ).encode()
+                ).hexdigest(),
+                "episodes": overlap_identity,
+            }
         }
     if evaluation:
         digest = hashlib.sha256(

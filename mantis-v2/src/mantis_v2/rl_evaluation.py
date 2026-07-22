@@ -102,6 +102,7 @@ _SENSITIVITY_STRESSES = {
     "latency_1bar",
     "missed_fill_10pct",
     "same_bar_adverse",
+    "overlapping_starts",
 }
 _REQUIRED_STRESSES = _NUMERIC_STRESSES | _SENSITIVITY_STRESSES
 _HEADLINE = "primary"
@@ -151,12 +152,34 @@ _ATTEMPT_FIELDS = {
 }
 
 
-def _digest_string(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and len(value) == 64
-        and all(character in "0123456789abcdef" for character in value)
-    )
+def _expected_risk_shield_identities(config: RlConfig) -> dict[str, dict[str, str]]:
+    """Derive shield trust anchors independently of the supplied shield artifact."""
+    repository = Path(__file__).resolve().parents[3]
+    rule_path = config.upstream.rule_contract_path
+    if not rule_path.is_absolute():
+        rule_path = repository / rule_path
+    paths = {
+        "mask_source": repository / "mantis-v2/src/mantis_v2/rl_risk_shield.py",
+        "observation_schema": Path(__file__).resolve().with_name("rl_environment.py"),
+        "rule_snapshot": rule_path,
+        "calendar_snapshot": repository / "mantis-v2/configs/topstep-holiday-calendar.json",
+    }
+    try:
+        identities = {
+            name: {"path": str(path.resolve()), "sha256": _sha256(path)}
+            for name, path in paths.items()
+        }
+    except OSError as exc:
+        raise EvaluationContractError(
+            "issue #11 RiskShield or calendar authority is not installed"
+        ) from exc
+    if identities["rule_snapshot"]["sha256"] != config.upstream.rule_contract_sha256:
+        raise EvaluationContractError("configured Topstep rule authority changed")
+    identities["fee_snapshot"] = {
+        "identity": config.fees.snapshot,
+        "sha256": config.fee_digest,
+    }
+    return identities
 
 
 def wilson_one_sided(
@@ -223,7 +246,9 @@ def _timestamp(value: object, field: str) -> datetime:
     return parsed
 
 
-def _validated_attempts(rows: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
+def _validated_attempts(
+    rows: Sequence[Mapping[str, object]], *, allow_overlap: bool = False
+) -> list[Mapping[str, object]]:
     if not rows:
         raise EvaluationContractError("attempt rows are missing")
     identities: set[tuple[object, ...]] = set()
@@ -266,6 +291,9 @@ def _validated_attempts(rows: Sequence[Mapping[str, object]]) -> list[Mapping[st
                     "accepted_trades",
                     "eligible_entries",
                     "costs",
+                    "commission_costs",
+                    "slippage_costs",
+                    "gap_costs",
                     "maximum_drawdown",
                     "best_day_profit",
                     "consistency_ratio",
@@ -299,13 +327,15 @@ def _validated_attempts(rows: Sequence[Mapping[str, object]]) -> list[Mapping[st
         stream = (row["fold"], row["seed"], row["ticker"], row["profile"])
         if stream in previous and start <= previous[stream]:
             raise EvaluationContractError("attempts must be strictly chronological")
-        previous[stream] = end
+        previous[stream] = start if allow_overlap else end
     return list(rows)
 
 
-def summarize_attempts(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
+def summarize_attempts(
+    rows: Sequence[Mapping[str, object]], *, allow_overlap: bool = False
+) -> dict[str, object]:
     """Summarize one policy/stress slice without hiding raw account outcomes."""
-    attempts = _validated_attempts(rows)
+    attempts = _validated_attempts(rows, allow_overlap=allow_overlap)
     market_keys = {
         (row["fold"], row["episode_id"], row["ticker"], row["profile"]) for row in attempts
     }
@@ -1640,26 +1670,9 @@ def _validated_pre_promotion_serving_contract(
         or shield.get("sealed_holdout_accessed") is not False
     ):
         raise EvaluationContractError("RiskShield contract is not authorized")
-    references: dict[str, dict[str, str]] = {}
-    for name in (
-        "mask_source",
-        "observation_schema",
-        "rule_snapshot",
-        "fee_snapshot",
-        "calendar_snapshot",
-    ):
-        reference = shield.get(name)
-        if (
-            not isinstance(reference, dict)
-            or not isinstance(reference.get("path"), str)
-            or not _digest_string(reference.get("sha256"))
-            or _sha256(Path(cast(str, reference["path"]))) != reference["sha256"]
-        ):
-            raise EvaluationContractError(f"RiskShield {name} identity is invalid")
-        references[name] = {
-            "path": str(Path(cast(str, reference["path"])).resolve()),
-            "sha256": cast(str, reference["sha256"]),
-        }
+    references = _expected_risk_shield_identities(config)
+    if any(shield.get(name) != reference for name, reference in references.items()):
+        raise EvaluationContractError("RiskShield authority differs from approved identities")
     return {
         "deployment_selector": {
             "path": str(deployment_selector_path.resolve()),
@@ -1763,6 +1776,7 @@ def write_evaluation_access_plan(
         ],
         "schedule_construction": {
             "algorithm": "chronological_greedy_nonoverlap_v1",
+            "overlap_coverage_algorithm": "all_rejected_overlapping_starts_v1",
             "ticker_local": True,
             "scheduler_code_path": str(Path(__file__).resolve().with_name("rl_episodes.py")),
             "scheduler_code_sha256": _sha256(Path(__file__).resolve().with_name("rl_episodes.py")),
@@ -1944,6 +1958,58 @@ def _validated_test_schedule_reference(
                 "terminal_end": raw["terminal_end"],
             }
         )
+    stress_coverage = schedule.get("stress_coverage")
+    overlap = (
+        stress_coverage.get("overlapping_starts") if isinstance(stress_coverage, dict) else None
+    )
+    overlap_episodes = overlap.get("episodes") if isinstance(overlap, dict) else None
+    if (
+        not isinstance(overlap, dict)
+        or overlap.get("stage") != "overlapping-start-coverage-v1"
+        or overlap.get("promotion_denominator") is not False
+        or overlap.get("overlapping_starts") is not True
+        or not isinstance(overlap_episodes, list)
+        or not overlap_episodes
+        or overlap.get("episode_count") != len(overlap_episodes)
+        or overlap.get("identity_sha256")
+        != hashlib.sha256(_canonical_bytes(overlap_episodes)).hexdigest()
+    ):
+        raise EvaluationContractError("overlapping-start stress coverage is invalid")
+    headline_intervals: dict[tuple[str, str], list[tuple[datetime, datetime]]] = defaultdict(list)
+    for raw in episodes:
+        assert isinstance(raw, dict)
+        headline_intervals[(cast(str, raw["ticker"]), cast(str, raw["profile"]))].append(
+            (
+                _timestamp(raw["decision_start"], "headline decision_start"),
+                _timestamp(raw["terminal_end"], "headline terminal_end"),
+            )
+        )
+    overlap_numbers: set[int] = set()
+    for raw in overlap_episodes:
+        if not isinstance(raw, dict):
+            raise EvaluationContractError("overlapping-start episode is invalid")
+        number = raw.get("number")
+        ticker = raw.get("ticker")
+        profile = raw.get("profile")
+        decision = _timestamp(raw.get("decision_start"), "overlap decision_start")
+        terminal = _timestamp(raw.get("terminal_end"), "overlap terminal_end")
+        lookback = _timestamp(raw.get("lookback_start"), "overlap lookback_start")
+        exit_end = _timestamp(raw.get("exit_end"), "overlap exit_end")
+        stream = (cast(str, ticker), cast(str, profile))
+        if (
+            type(number) is not int
+            or number in overlap_numbers
+            or ticker not in TICKERS
+            or profile not in PROFILES
+            or (ticker == "ZB" and profile != "one_mini")
+            or not (partition_start <= lookback <= decision <= exit_end <= terminal < partition_end)
+            or not any(
+                decision <= headline_terminal and terminal >= headline_decision
+                for headline_decision, headline_terminal in headline_intervals.get(stream, [])
+            )
+        ):
+            raise EvaluationContractError("overlapping-start episode is not valid coverage")
+        overlap_numbers.add(number)
     proof = schedule.get("schedule_proof")
     identity_sha256 = hashlib.sha256(_canonical_bytes(selected_identities)).hexdigest()
     if (
@@ -2008,6 +2074,12 @@ def _evaluation_contract_fields(
             "base": "primary",
             "ambiguous_stop_target_resolution": "stop_first",
             "record_ambiguity_count": True,
+            "numeric_promotion_gates": False,
+        },
+        "overlapping_starts": {
+            "base": "primary",
+            "schedule": "all_rejected_overlapping_starts_v1",
+            "promotion_denominator": False,
             "numeric_promotion_gates": False,
         },
     }
@@ -2222,7 +2294,9 @@ def _attempt_slice(row: Mapping[str, object]) -> dict[str, object]:
     return {field: row[field] for field in _ATTEMPT_FIELDS}
 
 
-def _group_summaries(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
+def _group_summaries(
+    rows: Sequence[Mapping[str, object]], *, allow_overlap: bool = False
+) -> dict[str, object]:
     dimensions = {
         "fold": ("fold",),
         "ticker": ("ticker",),
@@ -2232,7 +2306,9 @@ def _group_summaries(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
         "cell": ("fold", "ticker", "profile", "regime_block", "seed"),
     }
     result: dict[str, object] = {
-        "pooled": summarize_attempts([_attempt_slice(row) for row in rows])
+        "pooled": summarize_attempts(
+            [_attempt_slice(row) for row in rows], allow_overlap=allow_overlap
+        )
     }
     for name, fields in dimensions.items():
         grouped: dict[tuple[object, ...], list[Mapping[str, object]]] = defaultdict(list)
@@ -2241,7 +2317,10 @@ def _group_summaries(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
         result[name] = [
             {
                 **{field: key[index] for index, field in enumerate(fields)},
-                "summary": summarize_attempts([_attempt_slice(row) for row in grouped[key]]),
+                "summary": summarize_attempts(
+                    [_attempt_slice(row) for row in grouped[key]],
+                    allow_overlap=allow_overlap,
+                ),
             }
             for key in sorted(grouped, key=lambda item: tuple(str(value) for value in item))
         ]
@@ -2858,7 +2937,9 @@ def _production_evaluation_runner(config: RlConfig, plan: Mapping[str, object]) 
     baseline_folds = {
         cast(int, item["fold"]): item for item in cast(list[dict[str, object]], baseline["folds"])
     }
-    loaded_schedules: dict[Path, tuple[LoadedEpisodes, list[dict[str, object]]]] = {}
+    loaded_schedules: dict[
+        tuple[Path, str | None], tuple[LoadedEpisodes, list[dict[str, object]]]
+    ] = {}
     actor_cache: dict[tuple[str, int, int], EntryActorCritic] = {}
 
     def actor(policy: str, fold: int, seed: int) -> EntryActorCritic:
@@ -2892,17 +2973,28 @@ def _production_evaluation_runner(config: RlConfig, plan: Mapping[str, object]) 
             cast(Mapping[str, object], plan["stress_definitions"])[request.stress],
         )
         stress_identity_sha256 = hashlib.sha256(_canonical_bytes(stress_definition)).hexdigest()
-        if request.test_manifest_path not in loaded_schedules:
-            loaded = load_test_episode_manifest(config, request.test_manifest_path)
+        coverage = "overlapping_starts" if request.stress == "overlapping_starts" else None
+        schedule_key = (request.test_manifest_path, coverage)
+        if schedule_key not in loaded_schedules:
+            loaded = load_test_episode_manifest(
+                config, request.test_manifest_path, coverage=coverage
+            )
             raw = _load_object(request.test_manifest_path, "test schedule")
-            identities = raw.get("episodes")
+            if coverage is None:
+                identities = raw.get("episodes")
+            else:
+                stress_coverage = raw.get("stress_coverage")
+                selected = (
+                    stress_coverage.get(coverage) if isinstance(stress_coverage, dict) else None
+                )
+                identities = selected.get("episodes") if isinstance(selected, dict) else None
             if not isinstance(identities, list) or len(identities) != len(loaded.episodes):
                 raise EvaluationContractError("test episode identities are invalid")
-            loaded_schedules[request.test_manifest_path] = (
+            loaded_schedules[schedule_key] = (
                 loaded,
                 cast(list[dict[str, object]], identities),
             )
-        loaded, identities = loaded_schedules[request.test_manifest_path]
+        loaded, identities = loaded_schedules[schedule_key]
         episodes: Sequence[EnvironmentEpisode] = loaded.episodes
         fold_baseline = baseline_folds[request.fold]
         historical: HistoricalLogisticPolicy | None = None
@@ -3369,7 +3461,10 @@ def run_topstep_evaluation(
                 )
             if not attempt_rows:
                 raise EvaluationContractError("evaluation runner returned no attempts")
-            _validated_attempts([_attempt_slice(row) for row in attempt_rows])
+            _validated_attempts(
+                [_attempt_slice(row) for row in attempt_rows],
+                allow_overlap=request.stress == "overlapping_starts",
+            )
         except Exception as exc:
             _terminal_failure(output, plan_sha256, request, expected, exc)
             raise EvaluationContractError(
@@ -3411,7 +3506,10 @@ def run_topstep_evaluation(
         "test_schedules": plan["test_schedules"],
         "mechanics_sha256": mechanics_sha256,
         "market_uncertainty": "synchronized_calendar_block_bootstrap",
-        "overlapping_starts": False,
+        "overlapping_start_coverage": {
+            "replayed": True,
+            "promotion_denominator": False,
+        },
         "attempt_ledger": [
             {"path": str(path), "sha256": _sha256(path)}
             for path in sorted(ledger.glob("attempt-*.json"))
@@ -3453,7 +3551,8 @@ def _validated_replay(
         or replay.get("serving_freeze_sha256") != serving_sha256
         or replay.get("test_accessed") is not True
         or replay.get("sealed_holdout_accessed") is not False
-        or replay.get("overlapping_starts") is not False
+        or replay.get("overlapping_start_coverage")
+        != {"replayed": True, "promotion_denominator": False}
         or replay.get("market_uncertainty") != "synchronized_calendar_block_bootstrap"
     ):
         raise EvaluationContractError("test replay provenance mismatch")
@@ -3464,6 +3563,7 @@ def _validated_replay(
         raise EvaluationContractError("test replay schedules differ from frozen plan")
     schedule_digests: set[str] = set()
     scheduled_attempts: dict[tuple[str, int, str, str], tuple[str, str]] = {}
+    overlapping_attempts: dict[tuple[str, int, str, str], tuple[str, str]] = {}
     for reference in schedules:
         if not isinstance(reference, dict) or not isinstance(reference.get("path"), str):
             raise EvaluationContractError("test schedule reference is invalid")
@@ -3489,6 +3589,21 @@ def _validated_replay(
                 cast(str, episode["profile"]),
             )
             scheduled_attempts[key] = (
+                cast(str, episode["decision_start"]),
+                cast(str, episode["terminal_end"]),
+            )
+        overlap = cast(
+            dict[str, object],
+            cast(dict[str, object], schedule["stress_coverage"])["overlapping_starts"],
+        )
+        for episode in cast(list[dict[str, object]], overlap["episodes"]):
+            key = (
+                digest,
+                cast(int, episode["number"]),
+                cast(str, episode["ticker"]),
+                cast(str, episode["profile"]),
+            )
+            overlapping_attempts[key] = (
                 cast(str, episode["decision_start"]),
                 cast(str, episode["terminal_end"]),
             )
@@ -3521,7 +3636,10 @@ def _validated_replay(
             cast(str, row["ticker"]),
             cast(str, row["profile"]),
         )
-        if scheduled_attempts.get(schedule_key) != (row["start_ts"], row["end_ts"]):
+        expected_attempts = (
+            overlapping_attempts if row["stress"] == "overlapping_starts" else scheduled_attempts
+        )
+        if expected_attempts.get(schedule_key) != (row["start_ts"], row["end_ts"]):
             raise EvaluationContractError("test replay row differs from frozen schedule")
         mechanics.add(row["mechanics_sha256"])
     if len(mechanics) != 1 or replay.get("mechanics_sha256") not in mechanics:
@@ -3531,17 +3649,21 @@ def _validated_replay(
         (policy, stress) for policy in _POLICIES for stress in {_HEADLINE, *_REQUIRED_STRESSES}
     }:
         raise EvaluationContractError("policy and stress replay matrix is incomplete")
-    expected_keys: set[tuple[object, ...]] | None = None
+    expected_keys: dict[str, set[tuple[object, ...]]] = {}
     for policy, stress in sorted(combinations):
         subset = [row for row in rows if row["policy"] == policy and row["stress"] == stress]
-        _validated_attempts([_attempt_slice(row) for row in subset])
+        _validated_attempts(
+            [_attempt_slice(row) for row in subset],
+            allow_overlap=stress == "overlapping_starts",
+        )
         keys: set[tuple[object, ...]] = {
             (row["fold"], row["seed"], row["ticker"], row["profile"], row["episode_id"])
             for row in subset
         }
-        if expected_keys is None:
-            expected_keys = keys
-        elif keys != expected_keys:
+        coverage_class = "overlap" if stress == "overlapping_starts" else "headline"
+        if coverage_class not in expected_keys:
+            expected_keys[coverage_class] = keys
+        elif keys != expected_keys[coverage_class]:
             raise EvaluationContractError("policies and stresses must replay identical attempts")
     if {cast(int, row["seed"]) for row in rows} != set(config.training.confirmation_seeds):
         raise EvaluationContractError("test replay confirmation seeds are incomplete")
@@ -3602,6 +3724,93 @@ def _complete_calendar_blocks(
     return blocks
 
 
+def _baseline_result_differences(
+    rows: Sequence[Mapping[str, object]], stress: str
+) -> list[dict[str, object]]:
+    """Report matched candidate-minus-baseline outcomes for every required view."""
+    pair_fields = ("fold", "seed", "ticker", "profile", "episode_id")
+    dimensions = {
+        "pooled": (),
+        "fold": ("fold",),
+        "ticker": ("ticker",),
+        "profile": ("profile",),
+        "regime_block": ("regime_block",),
+        "seed": ("seed",),
+        "cell": ("fold", "ticker", "profile", "regime_block", "seed"),
+    }
+    candidate = [
+        row for row in rows if row.get("policy") == "candidate" and row.get("stress") == stress
+    ]
+    candidate_by_key = {tuple(row[field] for field in pair_fields): row for row in candidate}
+    if not candidate or len(candidate_by_key) != len(candidate):
+        raise EvaluationContractError("candidate result differences are not uniquely paired")
+    reports: list[dict[str, object]] = []
+    for baseline in sorted(_POLICIES - {"candidate"}):
+        baseline_rows = [
+            row for row in rows if row.get("policy") == baseline and row.get("stress") == stress
+        ]
+        baseline_by_key = {tuple(row[field] for field in pair_fields): row for row in baseline_rows}
+        if len(baseline_by_key) != len(baseline_rows) or set(baseline_by_key) != set(
+            candidate_by_key
+        ):
+            raise EvaluationContractError(f"{baseline} result differences are not paired")
+        views: dict[str, list[dict[str, object]]] = {}
+        for name, fields in dimensions.items():
+            grouped: dict[
+                tuple[object, ...], list[tuple[Mapping[str, object], Mapping[str, object]]]
+            ] = defaultdict(list)
+            for key, candidate_row in candidate_by_key.items():
+                group = tuple(candidate_row[field] for field in fields)
+                grouped[group].append((candidate_row, baseline_by_key[key]))
+            views[name] = []
+            for group in sorted(grouped, key=lambda value: tuple(map(str, value))):
+                pairs = grouped[group]
+
+                def mean_difference(
+                    field: str,
+                    selected_pairs: list[tuple[Mapping[str, object], Mapping[str, object]]] = pairs,
+                ) -> float:
+                    return float(
+                        np.mean(
+                            [
+                                _finite_float(left[field], field)
+                                - _finite_float(right[field], field)
+                                for left, right in selected_pairs
+                            ]
+                        )
+                    )
+
+                views[name].append(
+                    {
+                        **{field: group[index] for index, field in enumerate(fields)},
+                        "attempts": len(pairs),
+                        "pass_rate_difference": float(
+                            np.mean(
+                                [
+                                    float(left["status"] == "PASS")
+                                    - float(right["status"] == "PASS")
+                                    for left, right in pairs
+                                ]
+                            )
+                        ),
+                        "blow_rate_difference": float(
+                            np.mean(
+                                [
+                                    float(left["status"] == "BLOW")
+                                    - float(right["status"] == "BLOW")
+                                    for left, right in pairs
+                                ]
+                            )
+                        ),
+                        "mean_net_pnl_difference": mean_difference("net_pnl"),
+                        "mean_cost_difference": mean_difference("costs"),
+                        "mean_maximum_drawdown_difference": mean_difference("maximum_drawdown"),
+                    }
+                )
+        reports.append({"baseline": baseline, "views": views})
+    return reports
+
+
 def evaluate_topstep_promotion(
     config: RlConfig, serving_freeze_path: Path, replay_path: Path, output: Path
 ) -> dict[str, object]:
@@ -3633,12 +3842,15 @@ def evaluate_topstep_promotion(
     sensitivity_evidence: dict[str, dict[str, object]] = {}
     bootstrap_hashes: set[str] = set()
     for stress in sorted(_REQUIRED_STRESSES):
-        stress_metrics[stress] = {
+        stress_report: dict[str, object] = {
             policy: _group_summaries(
-                [row for row in rows if row["policy"] == policy and row["stress"] == stress]
+                [row for row in rows if row["policy"] == policy and row["stress"] == stress],
+                allow_overlap=stress == "overlapping_starts",
             )
             for policy in sorted(_POLICIES)
         }
+        stress_report["result_differences"] = _baseline_result_differences(rows, stress)
+        stress_metrics[stress] = stress_report
         candidate_rows = [
             row for row in rows if row["policy"] == "candidate" and row["stress"] == stress
         ]
@@ -3675,7 +3887,6 @@ def evaluate_topstep_promotion(
                 for seed in expected_seeds
             }
         baseline_effects: dict[str, dict[str, object]] = {}
-        descriptive_baseline_effects: dict[str, dict[str, object]] = {}
         for scope, profile in (
             ("pooled", None),
             ("one_mini", "one_mini"),
@@ -3685,7 +3896,6 @@ def evaluate_topstep_promotion(
                 rows if profile is None else [row for row in rows if row["profile"] == profile]
             )
             baseline_effects[scope] = {}
-            descriptive_baseline_effects[scope] = {}
             for baseline in ("take_all", "matched_random_take"):
                 effect = _point_and_lcb(
                     selected,
@@ -3698,22 +3908,6 @@ def evaluate_topstep_promotion(
                     bootstrap_indices,
                 )
                 baseline_effects[scope][baseline] = effect
-                bootstrap_hashes.add(cast(str, effect["index_matrix_sha256"]))
-            for baseline in (
-                "historical_rejected_logistic_head",
-                "hist_gradient_boosting",
-            ):
-                effect = _point_and_lcb(
-                    selected,
-                    "candidate",
-                    baseline,
-                    stress,
-                    plan_sha256,
-                    expected_seeds,
-                    global_blocks,
-                    bootstrap_indices,
-                )
-                descriptive_baseline_effects[scope][baseline] = effect
                 bootstrap_hashes.add(cast(str, effect["index_matrix_sha256"]))
         transfer_effects: dict[tuple[str, str], Mapping[str, object]] = {}
         pooled_transfer = _point_and_lcb(
@@ -3750,7 +3944,6 @@ def evaluate_topstep_promotion(
             "seed_pass_rates": seed_pass_rates,
             "seed_blow_counts": seed_blow_counts,
             "baseline_effects": baseline_effects,
-            "descriptive_baseline_effects": descriptive_baseline_effects,
             "transfer_effects": transfer_effects,
         }
     if len(bootstrap_hashes) != 1:
