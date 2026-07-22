@@ -57,6 +57,48 @@ runpod-plan platform local experiment intent inventory ledger evaluated_at outpu
 runpod-plan-authorized platform local experiment intent inventory ledger authorization evaluated_at output:
     uv run mantis-v2 runpod-plan --platform {{quote(platform)}} --local {{quote(local)}} --experiment {{quote(experiment)}} --intent {{quote(intent)}} --inventory {{quote(inventory)}} --ledger {{quote(ledger)}} --authorization {{quote(authorization)}} --evaluated-at {{quote(evaluated_at)}} --output {{quote(output)}}
 
+runpod-terraform-fmt:
+    tofu -chdir=infra/runpod/terraform fmt -check
+
+runpod-terraform-validate:
+    tofu -chdir=infra/runpod/terraform init -backend=false -lockfile=readonly
+    tofu -chdir=infra/runpod/terraform validate
+
+runpod-terraform-adoption desired inventory state output:
+    uv run python infra/runpod/scripts/stable_resources.py adoption --desired {{quote(desired)}} --inventory {{quote(inventory)}} --state {{quote(state)}} --output {{quote(output)}}
+
+runpod-terraform-plan vars desired inventory state plan plan_json adoption policy:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    test -n "${RUNPOD_API_KEY:-}" || { echo "RUNPOD_API_KEY is required" >&2; exit 2; }
+    plan_path=infra/runpod/terraform/{{quote(plan)}}
+    test ! -e "$plan_path" && test ! -e {{quote(plan_json)}} && test ! -e {{quote(adoption)}} && test ! -e {{quote(policy)}}
+    uv run python infra/runpod/scripts/stable_resources.py adoption --desired {{quote(desired)}} --inventory {{quote(inventory)}} --state {{quote(state)}} --output {{quote(adoption)}}
+    TF_VAR_runpod_api_key="$RUNPOD_API_KEY" tofu -chdir=infra/runpod/terraform plan -input=false -var-file={{quote(vars)}} -out={{quote(plan)}}
+    tofu -chdir=infra/runpod/terraform show -json {{quote(plan)}} > {{quote(plan_json)}}
+    uv run python infra/runpod/scripts/stable_resources.py policy --desired {{quote(desired)}} --plan {{quote(plan_json)}} --plan-binary "$plan_path" --adoption {{quote(adoption)}} --output {{quote(policy)}}
+
+runpod-terraform-import-human address import_id:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    test -n "${RUNPOD_API_KEY:-}" || { echo "RUNPOD_API_KEY is required" >&2; exit 2; }
+    address={{quote(address)}}
+    import_id={{quote(import_id)}}
+    case "$address" in
+      restapi_object.network_volume) [[ "$import_id" == /networkvolumes/* ]] ;;
+      restapi_object.pod_template) [[ "$import_id" == /templates/* ]] ;;
+      *) echo "only stable RunPod resources may be imported" >&2; exit 2 ;;
+    esac
+    TF_VAR_runpod_api_key="$RUNPOD_API_KEY" tofu -chdir=infra/runpod/terraform import -input=false "$address" "$import_id"
+
+runpod-terraform-apply-human plan policy authorization evaluated_at decision:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    test -n "${RUNPOD_API_KEY:-}" || { echo "RUNPOD_API_KEY is required" >&2; exit 2; }
+    plan_path=infra/runpod/terraform/{{quote(plan)}}
+    uv run python infra/runpod/scripts/stable_resources.py apply-authorization --policy {{quote(policy)}} --plan-binary "$plan_path" --authorization {{quote(authorization)}} --evaluated-at {{quote(evaluated_at)}} --output {{quote(decision)}}
+    TF_VAR_runpod_api_key="$RUNPOD_API_KEY" tofu -chdir=infra/runpod/terraform apply -input=false {{quote(plan)}}
+
 train config:
     uv run mantis-v2 train --config {{config}}
 

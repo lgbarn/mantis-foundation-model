@@ -59,6 +59,15 @@ the decision. Issue #31 will own consumption, reservation mutation, provider
 inventory collection, and Pod lifecycle; this planner owns none of those side
 effects.
 
+## Stable Terraform resources
+
+The stable-resource workflow is documented in
+[`terraform/README.md`](terraform/README.md). It pins OpenTofu and the REST
+provider, inspects explicit inventory before planning, requires deliberate
+imports for unmanaged matches, validates saved-plan JSON, and keeps apply behind
+an exact short-lived human authorization. It owns only the 150 GB network volume
+and private Pod template; it cannot own a Pod.
+
 ## Ownership
 
 - Terraform owns stable non-secret resources such as the network volume and
@@ -76,8 +85,10 @@ effects.
 - Planning and validation must not create billable resources.
 - Provisioning requires an explicit approved spend envelope.
 - Read the account provisioning credential only from local
-  `RUNPOD_API_KEY`; never put it in Terraform variables, state, `.tfvars`,
-  container images, committed `.env` files, or Pod environment variables.
+  `RUNPOD_API_KEY`; stable-resource recipes pass it through one ephemeral,
+  sensitive OpenTofu input that cannot enter state or saved plans. Never put it
+  in persisted Terraform variables, state, `.tfvars`, container images,
+  committed `.env` files, or Pod environment variables.
   RunPod automatically supplies a distinct Pod-scoped key; never persist, log,
   export, or treat it as account provisioning authority.
 - Use the RunPod account SSH public key for interactive Pod access. Never copy
