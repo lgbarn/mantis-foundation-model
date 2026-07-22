@@ -263,12 +263,20 @@ def _pod_receipt(
         "imageName": decision.get("image_ref"),
         "templateId": decision.get("template_id"),
         "networkVolumeId": decision.get("volume_id"),
-        "vcpuCount": decision.get("vcpu"),
-        "memoryInGb": decision.get("ram_gb"),
     }
     for field, expected in expected_fields.items():
         if provider_pod.get(field) != expected:
             raise LifecycleError(f"incomplete_provider_response:create.{field}")
+    minimum_resources = {
+        "vcpuCount": _required_int(decision.get("vcpu"), "vcpu"),
+        "memoryInGb": _required_int(decision.get("ram_gb"), "ram_gb"),
+    }
+    observed_resources: dict[str, int] = {}
+    for field, minimum in minimum_resources.items():
+        observed = provider_pod.get(field)
+        if isinstance(observed, bool) or not isinstance(observed, int) or observed < minimum:
+            raise LifecycleError(f"incomplete_provider_response:create.{field}")
+        observed_resources[field] = observed
     if provider_pod.get("desiredStatus") != "RUNNING":
         raise LifecycleError("incomplete_provider_response:create.desiredStatus")
     try:
@@ -292,6 +300,8 @@ def _pod_receipt(
         "volume_id": decision["volume_id"],
         "vcpu": decision["vcpu"],
         "ram_gb": decision["ram_gb"],
+        "provider_vcpu": observed_resources["vcpuCount"],
+        "provider_ram_gb": observed_resources["memoryInGb"],
         "stage": decision["stage"],
         "authorization_digest": decision["authorization_digest"],
         "reserved_spend_usd": str(
@@ -478,14 +488,18 @@ def reconcile_launch(
 ) -> dict[str, object]:
     """Bind an uncertain create outcome to fresh inventory without retrying create."""
     decision_digest = _validate_decision_digest(decision)
-    quarantine = _quarantine_for_decision(state_root, decision_digest)
-    if quarantine is not None:
-        raise LifecycleError(
-            "provider_create_requires_termination", {"pod_id": quarantine["pod_id"]}
-        )
     existing = _receipt_for_decision(state_root, decision_digest)
     if existing is not None:
         return existing
+    quarantine = _quarantine_for_decision(state_root, decision_digest)
+    recoverable_failures = {
+        "incomplete_provider_response:create.vcpuCount",
+        "incomplete_provider_response:create.memoryInGb",
+    }
+    if quarantine is not None and quarantine.get("validation_failure") not in recoverable_failures:
+        raise LifecycleError(
+            "provider_create_requires_termination", {"pod_id": quarantine["pod_id"]}
+        )
 
     descriptor, lock_path = _acquire_lock(state_root)
     try:
@@ -493,7 +507,10 @@ def reconcile_launch(
         if existing is not None:
             return existing
         quarantine = _quarantine_for_decision(state_root, decision_digest)
-        if quarantine is not None:
+        if (
+            quarantine is not None
+            and quarantine.get("validation_failure") not in recoverable_failures
+        ):
             raise LifecycleError(
                 "provider_create_requires_termination", {"pod_id": quarantine["pod_id"]}
             )
@@ -511,14 +528,28 @@ def reconcile_launch(
             raise LifecycleError("invalid_launch_attempt") from exc
 
         expected_name = _required_string(decision.get("run_name"), "run_name")
-        matches = [pod for pod in adapter.inventory() if pod.get("name") == expected_name]
+        inventory = adapter.inventory()
+        matches = [pod for pod in inventory if pod.get("name") == expected_name]
         if not matches:
             raise LifecycleError("provider_create_outcome_unresolved")
         if len(matches) != 1:
             raise LifecycleError("live_pod_conflict")
+        if quarantine is not None:
+            quarantined_pod_id = _pod_identity(
+                _required_string(quarantine.get("pod_id"), "quarantine.pod_id")
+            )
+            if matches[0].get("id") != quarantined_pod_id:
+                raise LifecycleError("provider_create_outcome_unresolved")
         try:
             receipt = _pod_receipt(decision, matches[0], started_at=started_at, deadline=deadline)
         except LifecycleError as exc:
+            if quarantine is not None:
+                if str(exc) in recoverable_failures:
+                    raise LifecycleError("provider_create_outcome_unresolved") from exc
+                raise LifecycleError(
+                    "provider_create_requires_termination",
+                    {"pod_id": quarantine["pod_id"], "validation_failure": str(exc)},
+                ) from exc
             _publish_quarantine_receipt(
                 state_root,
                 decision,

@@ -241,6 +241,7 @@ def test_image_contract_is_digest_pinned_frozen_and_localhost_only() -> None:
     dockerignore = (ROOT / ".dockerignore").read_text()
 
     assert dockerfile.count("@sha256:") == 2
+    assert "RUN --mount=type=cache,target=/root/.cache/uv" in dockerfile
     assert "uv sync --frozen --no-dev --all-packages" in dockerfile
     assert "python3.12=" in dockerfile
     assert "EXPOSE 22" in dockerfile
@@ -253,6 +254,16 @@ def test_image_contract_is_digest_pinned_frozen_and_localhost_only() -> None:
     assert "git status --porcelain --untracked-files=all" in build_script
     for suffix in ("*.dbn", "*.parquet", "*.pt", "*.safetensors"):
         assert suffix not in dockerfile
+
+
+def test_entrypoint_installs_only_the_runtime_public_key() -> None:
+    entrypoint = (ROOT / "infra" / "runpod" / "scripts" / "container-entrypoint.sh").read_text()
+
+    assert "rm -f /root/.ssh/authorized_keys" in entrypoint
+    assert 'if [ -n "${PUBLIC_KEY:-}" ]; then' in entrypoint
+    assert "printf '%s\\n' \"$PUBLIC_KEY\" > /root/.ssh/authorized_keys" in entrypoint
+    assert "chmod 0600 /root/.ssh/authorized_keys" in entrypoint
+    assert "ssh-keygen -l -f /root/.ssh/authorized_keys" in entrypoint
 
 
 @pytest.mark.parametrize(

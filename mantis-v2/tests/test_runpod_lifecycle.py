@@ -339,6 +339,221 @@ def test_partial_create_reconciles_from_inventory_without_retry(tmp_path: Path) 
     assert first["decision_digest"] == decision["decision_digest"]
 
 
+def test_provider_resources_may_exceed_requested_minimum(tmp_path: Path) -> None:
+    decision = _approved_decision()
+
+    class LargerHostAdapter:
+        def inventory(self) -> list[dict[str, object]]:
+            return []
+
+        def create(self, submitted: dict[str, object], deadline: datetime) -> dict[str, object]:
+            return {
+                "id": "pod-larger-host",
+                "name": decision["run_name"],
+                "desiredStatus": "RUNNING",
+                "imageName": decision["image_ref"],
+                "templateId": decision["template_id"],
+                "networkVolumeId": decision["volume_id"],
+                "costPerHr": 0.44,
+                "vcpuCount": 26,
+                "memoryInGb": 251,
+            }
+
+    receipt = launch_pod(
+        decision=decision,
+        state_root=tmp_path / "state",
+        adapter=LargerHostAdapter(),
+        now=lambda: datetime(2026, 7, 21, 12, 0, tzinfo=UTC),
+    )
+
+    assert receipt["vcpu"] == 8
+    assert receipt["ram_gb"] == 32
+    assert receipt["provider_vcpu"] == 26
+    assert receipt["provider_ram_gb"] == 251
+
+
+def test_resource_minimum_quarantine_can_be_revalidated_without_second_create(
+    tmp_path: Path,
+) -> None:
+    decision = _approved_decision()
+
+    class ResourceCorrectionAdapter:
+        def __init__(self) -> None:
+            self.create_calls = 0
+            self.created = False
+
+        def inventory(self) -> list[dict[str, object]]:
+            if not self.created:
+                return []
+            return [
+                {
+                    "id": "pod-resource-correction",
+                    "name": decision["run_name"],
+                    "desiredStatus": "RUNNING",
+                    "imageName": decision["image_ref"],
+                    "templateId": decision["template_id"],
+                    "networkVolumeId": decision["volume_id"],
+                    "costPerHr": 0.44,
+                    "vcpuCount": 26,
+                    "memoryInGb": 251,
+                }
+            ]
+
+        def create(self, submitted: dict[str, object], deadline: datetime) -> dict[str, object]:
+            self.create_calls += 1
+            self.created = True
+            pod = dict(self.inventory()[0])
+            pod["vcpuCount"] = 7
+            return pod
+
+    adapter = ResourceCorrectionAdapter()
+    state_root = tmp_path / "state"
+    with pytest.raises(LifecycleError, match="^incomplete_provider_response:create.vcpuCount$"):
+        launch_pod(
+            decision=decision,
+            state_root=state_root,
+            adapter=adapter,
+            now=lambda: datetime(2026, 7, 21, 12, 0, tzinfo=UTC),
+        )
+
+    receipt = reconcile_launch(
+        decision=decision,
+        state_root=state_root,
+        adapter=adapter,
+        now=lambda: datetime(2026, 7, 21, 12, 1, tzinfo=UTC),
+    )
+
+    assert adapter.create_calls == 1
+    assert receipt["pod_id"] == "pod-resource-correction"
+    assert receipt["provider_vcpu"] == 26
+    assert receipt["provider_ram_gb"] == 251
+    assert (state_root / "receipts" / "quarantine" / "pod-resource-correction.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("inventory_ids", "expected_error"),
+    (
+        (["replacement-pod"], "provider_create_outcome_unresolved"),
+        (["quarantined-pod", "replacement-pod"], "live_pod_conflict"),
+    ),
+)
+def test_resource_quarantine_cannot_bind_same_name_conflicts(
+    tmp_path: Path, inventory_ids: list[str], expected_error: str
+) -> None:
+    decision = _approved_decision()
+
+    class ReplacementAdapter:
+        def __init__(self) -> None:
+            self.created = False
+
+        def inventory(self) -> list[dict[str, object]]:
+            if not self.created:
+                return []
+            return [self._pod(pod_id, 26) for pod_id in inventory_ids]
+
+        def create(self, submitted: dict[str, object], deadline: datetime) -> dict[str, object]:
+            self.created = True
+            return self._pod("quarantined-pod", 7)
+
+        def _pod(self, pod_id: str, vcpu: int) -> dict[str, object]:
+            return {
+                "id": pod_id,
+                "name": decision["run_name"],
+                "desiredStatus": "RUNNING",
+                "imageName": decision["image_ref"],
+                "templateId": decision["template_id"],
+                "networkVolumeId": decision["volume_id"],
+                "costPerHr": 0.44,
+                "vcpuCount": vcpu,
+                "memoryInGb": 251,
+            }
+
+    adapter = ReplacementAdapter()
+    state_root = tmp_path / "state"
+    with pytest.raises(LifecycleError, match="^incomplete_provider_response:create.vcpuCount$"):
+        launch_pod(
+            decision=decision,
+            state_root=state_root,
+            adapter=adapter,
+            now=lambda: datetime(2026, 7, 21, 12, 0, tzinfo=UTC),
+        )
+
+    with pytest.raises(LifecycleError, match=f"^{expected_error}$"):
+        reconcile_launch(
+            decision=decision,
+            state_root=state_root,
+            adapter=adapter,
+            now=lambda: datetime(2026, 7, 21, 12, 1, tzinfo=UTC),
+        )
+
+    assert not (state_root / "receipts" / "pods").exists()
+
+
+@pytest.mark.parametrize(
+    ("revalidated_vcpu", "revalidated_price", "expected_error"),
+    (
+        (7, 0.44, "provider_create_outcome_unresolved"),
+        (26, 0.45, "provider_create_requires_termination"),
+    ),
+)
+def test_resource_quarantine_revalidation_preserves_original_receipt(
+    tmp_path: Path,
+    revalidated_vcpu: int,
+    revalidated_price: float,
+    expected_error: str,
+) -> None:
+    decision = _approved_decision()
+
+    class RevalidationAdapter:
+        def __init__(self) -> None:
+            self.created = False
+
+        def inventory(self) -> list[dict[str, object]]:
+            if not self.created:
+                return []
+            return [self._pod(revalidated_vcpu, revalidated_price)]
+
+        def create(self, submitted: dict[str, object], deadline: datetime) -> dict[str, object]:
+            self.created = True
+            return self._pod(7, 0.44)
+
+        def _pod(self, vcpu: int, price: float) -> dict[str, object]:
+            return {
+                "id": "pod-revalidation",
+                "name": decision["run_name"],
+                "desiredStatus": "RUNNING",
+                "imageName": decision["image_ref"],
+                "templateId": decision["template_id"],
+                "networkVolumeId": decision["volume_id"],
+                "costPerHr": price,
+                "vcpuCount": vcpu,
+                "memoryInGb": 251,
+            }
+
+    adapter = RevalidationAdapter()
+    state_root = tmp_path / "state"
+    with pytest.raises(LifecycleError, match="^incomplete_provider_response:create.vcpuCount$"):
+        launch_pod(
+            decision=decision,
+            state_root=state_root,
+            adapter=adapter,
+            now=lambda: datetime(2026, 7, 21, 12, 0, tzinfo=UTC),
+        )
+    quarantine_path = state_root / "receipts" / "quarantine" / "pod-revalidation.json"
+    original_quarantine = quarantine_path.read_bytes()
+
+    with pytest.raises(LifecycleError, match=f"^{expected_error}$"):
+        reconcile_launch(
+            decision=decision,
+            state_root=state_root,
+            adapter=adapter,
+            now=lambda: datetime(2026, 7, 21, 12, 1, tzinfo=UTC),
+        )
+
+    assert quarantine_path.read_bytes() == original_quarantine
+    assert not (state_root / "receipts" / "pods").exists()
+
+
 def test_reconcile_rejects_unvalidated_digest_before_path_or_provider_access(
     tmp_path: Path,
 ) -> None:

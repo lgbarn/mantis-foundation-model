@@ -8,7 +8,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from http.client import HTTPMessage
 from typing import IO, Protocol
@@ -103,12 +103,52 @@ def _required(raw: Mapping[str, object], field: str, expected: type[object]) -> 
     return value
 
 
+def _required_alias(
+    raw: Mapping[str, object], primary: str, alias: str, expected: type[object]
+) -> object:
+    """Read one provider field while rejecting conflicting response aliases."""
+    present = [(field, raw[field]) for field in (primary, alias) if field in raw]
+    if not present:
+        raise RunpodAdapterError(f"provider_invalid_field:{primary}")
+    values = [value for _, value in present]
+    if any(isinstance(value, bool) or not isinstance(value, expected) for value in values):
+        raise RunpodAdapterError(f"provider_invalid_field:{primary}")
+    if len(values) == 2 and values[0] != values[1]:
+        raise RunpodAdapterError(f"provider_conflicting_fields:{primary}:{alias}")
+    return values[0]
+
+
+def _provider_timestamp(raw: Mapping[str, object], field: str) -> str:
+    value = _required(raw, field, str)
+    assert isinstance(value, str)
+    candidate = value.removesuffix(" UTC")
+    candidate = re.sub(r"\s+([+-]\d{2})(\d{2})$", r"\1:\2", candidate)
+    try:
+        parsed = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise RunpodAdapterError(f"provider_invalid_field:{field}") from exc
+    if parsed.tzinfo is None:
+        raise RunpodAdapterError(f"provider_invalid_field:{field}")
+    return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
 def _normalize_pod(value: object) -> dict[str, object]:
     if not isinstance(value, Mapping):
         raise RunpodAdapterError("provider_invalid_pod")
     raw = value
     network_volume = raw.get("networkVolume")
-    if not isinstance(network_volume, Mapping):
+    nested_volume_id = network_volume.get("id") if isinstance(network_volume, Mapping) else None
+    direct_volume_id = raw.get("networkVolumeId")
+    if nested_volume_id is None and direct_volume_id is None:
+        raise RunpodAdapterError("provider_invalid_field:networkVolume")
+    if (
+        nested_volume_id is not None
+        and direct_volume_id is not None
+        and nested_volume_id != direct_volume_id
+    ):
+        raise RunpodAdapterError("provider_conflicting_fields:networkVolume:networkVolumeId")
+    volume_id = direct_volume_id if direct_volume_id is not None else nested_volume_id
+    if not isinstance(volume_id, str):
         raise RunpodAdapterError("provider_invalid_field:networkVolume")
     cost = raw.get("costPerHr")
     try:
@@ -121,18 +161,19 @@ def _normalize_pod(value: object) -> dict[str, object]:
         "id": _pod_id(raw.get("id")),
         "name": _required(raw, "name", str),
         "desiredStatus": _required(raw, "desiredStatus", str),
-        "imageName": _required(raw, "image", str),
+        "imageName": _required_alias(raw, "image", "imageName", str),
         "templateId": _required(raw, "templateId", str),
-        "networkVolumeId": _required(network_volume, "id", str),
+        "networkVolumeId": volume_id,
         "costPerHr": str(parsed_cost),
         "vcpuCount": _required(raw, "vcpuCount", int),
         "memoryInGb": _required(raw, "memoryInGb", int),
     }
     if "uptimeSeconds" in raw:
         normalized["uptimeSeconds"] = _required(raw, "uptimeSeconds", int)
-    for field in ("lastStartedAt", "lastStatusChange"):
-        if field in raw and raw[field] is not None:
-            normalized[field] = _required(raw, field, str)
+    if "lastStartedAt" in raw and raw["lastStartedAt"] is not None:
+        normalized["lastStartedAt"] = _provider_timestamp(raw, "lastStartedAt")
+    if "lastStatusChange" in raw and raw["lastStatusChange"] is not None:
+        normalized["lastStatusChange"] = _required(raw, "lastStatusChange", str)
     return normalized
 
 
@@ -142,14 +183,25 @@ def _normalize_inventory_pod(value: object) -> dict[str, object]:
     normalized: dict[str, object] = {
         "id": _pod_id(value.get("id")),
         "name": _required(value, "name", str),
-        "imageName": _required(value, "image", str),
+        "imageName": _required_alias(value, "image", "imageName", str),
     }
     for field in ("desiredStatus", "templateId", "costPerHr", "vcpuCount", "memoryInGb"):
         if field in value:
             normalized[field] = value[field]
     network_volume = value.get("networkVolume")
-    if isinstance(network_volume, Mapping) and isinstance(network_volume.get("id"), str):
-        normalized["networkVolumeId"] = network_volume["id"]
+    nested_volume_id = network_volume.get("id") if isinstance(network_volume, Mapping) else None
+    direct_volume_id = value.get("networkVolumeId")
+    if (
+        nested_volume_id is not None
+        and direct_volume_id is not None
+        and nested_volume_id != direct_volume_id
+    ):
+        raise RunpodAdapterError("provider_conflicting_fields:networkVolume:networkVolumeId")
+    volume_id = direct_volume_id if direct_volume_id is not None else nested_volume_id
+    if volume_id is not None:
+        if not isinstance(volume_id, str):
+            raise RunpodAdapterError("provider_invalid_field:networkVolume")
+        normalized["networkVolumeId"] = volume_id
     return normalized
 
 

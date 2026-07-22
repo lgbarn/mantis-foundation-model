@@ -86,6 +86,15 @@ recorded separately as `QUARANTINED`: it blocks another launch and remains
 eligible for exact deadline enforcement and termination, but is never presented
 as an approved Pod Receipt.
 
+The REST adapter accepts the provider response spellings observed for image and
+network-volume identity (`image`/`imageName` and nested
+`networkVolume.id`/`networkVolumeId`), but rejects conflicting aliases. Requested
+vCPU and RAM are provider minima; a larger allocation is valid and both requested
+and observed resources are recorded. Provider timestamps are normalized to UTC
+before lifecycle code consumes them. A resource-only quarantine may be
+reconciled from fresh inventory after full identity, price, and minimum-resource
+validation; every other quarantine still requires termination.
+
 ## Stable Terraform resources
 
 The stable-resource workflow is documented in
@@ -133,6 +142,11 @@ packages, then materializes the committed workspace exclusively with
 `uv sync --frozen`. The build refuses a dirty worktree so uncommitted source
 cannot enter the declared source identity.
 
+The dependency install uses a BuildKit cache mount for `/root/.cache/uv`; the
+cache accelerates rebuilds but is not part of the final image. Do not replace it
+with a normal image-layer cache directory, which duplicates several gigabytes
+of locked CUDA wheels and materially delays paid Pod startup.
+
 From a clean committed checkout, build and record the two zero-cost contracts:
 
 ```bash
@@ -163,6 +177,11 @@ The image exposes SSH port 22 only. Run TensorBoard inside the Pod on
 just tensorboard /network/volume/runs/RUN_ID
 ssh -N -L 6006:127.0.0.1:6006 root@POD_HOST -p POD_SSH_PORT
 ```
+
+At container start, the entrypoint removes any baked `authorized_keys`, installs
+only the runtime `PUBLIC_KEY`, validates it with `ssh-keygen`, and uses mode
+`0600`. An absent key leaves SSH unavailable without blocking a noninteractive
+workload. The public key may enter the Pod environment; private keys never do.
 
 Open `http://127.0.0.1:6006` locally. The command rejects `0.0.0.0`, `::`,
 `localhost`, wildcard, and public-interface binds; do not add a public HTTP port.
@@ -388,6 +407,11 @@ heartbeat within 600 seconds, terminates after four missed 30-second polls or
 the hard deadline, captures diagnostics and an emergency checkpoint, verifies
 provider absence, reconciles billing, and copies completed artifacts to both
 declared backup roots. TensorBoard is reached only through an SSH tunnel.
+Image pulling and extraction are part of the 600-second startup allowance. A
+provider state such as `RUNNING` does not prove workload execution: require a
+nonnegative runtime plus the signed heartbeat. If either is absent at the limit,
+terminate the Pod and preserve the network volume rather than extending paid
+idle time ad hoc.
 
 ## Accuracy-first training contract
 

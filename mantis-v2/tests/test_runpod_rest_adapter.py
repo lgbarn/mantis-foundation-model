@@ -65,6 +65,16 @@ def _pod_response() -> dict[str, object]:
     }
 
 
+def _live_pod_response() -> dict[str, object]:
+    response = _pod_response()
+    response["imageName"] = response.pop("image")
+    network_volume = response.pop("networkVolume")
+    assert isinstance(network_volume, dict)
+    response["networkVolumeId"] = network_volume["id"]
+    response["lastStartedAt"] = "2026-07-22 23:11:14.191 +0000 UTC"
+    return response
+
+
 def test_create_uses_exact_pinned_rest_v1_exchange_and_normalizes_response() -> None:
     transport = RecordingTransport(
         [HttpResponse(status=201, body=json.dumps(_pod_response()).encode())]
@@ -141,6 +151,44 @@ def test_inventory_status_delete_and_billing_use_exact_resource_identities() -> 
         ("DELETE", "https://rest.runpod.io/v1/pods/pod-001"),
         ("GET", "https://rest.runpod.io/v1/billing/pods?grouping=podId&podId=pod-001"),
     ]
+
+
+def test_live_rest_response_aliases_are_normalized() -> None:
+    pod = _live_pod_response()
+    transport = RecordingTransport(
+        [
+            HttpResponse(status=200, body=json.dumps([pod]).encode()),
+            HttpResponse(status=200, body=json.dumps(pod).encode()),
+        ]
+    )
+    adapter = RunpodRestV1Adapter(api_key="secret-sentinel", transport=transport)
+
+    inventory_pod = adapter.inventory()[0]
+    assert inventory_pod["imageName"] == pod["imageName"]
+    assert inventory_pod["networkVolumeId"] == "volume-fixture"
+    status_pod = adapter.status("pod-001")
+    assert status_pod["imageName"] == pod["imageName"]
+    assert status_pod["networkVolumeId"] == "volume-fixture"
+    assert status_pod["lastStartedAt"] == "2026-07-22T23:11:14.191000Z"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    (
+        ("imageName", "ghcr.io/lgbarn/other@sha256:" + "b" * 64),
+        ("networkVolumeId", "other-volume"),
+    ),
+)
+def test_conflicting_provider_aliases_are_rejected(field: str, value: str) -> None:
+    pod = _pod_response()
+    pod[field] = value
+    adapter = RunpodRestV1Adapter(
+        api_key="secret-sentinel",
+        transport=RecordingTransport([HttpResponse(status=200, body=json.dumps(pod).encode())]),
+    )
+
+    with pytest.raises(RunpodAdapterError, match="^provider_conflicting_fields:"):
+        adapter.status("pod-001")
 
 
 @pytest.mark.parametrize(

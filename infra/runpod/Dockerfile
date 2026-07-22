@@ -57,7 +57,8 @@ WORKDIR /opt/mantis
 COPY pyproject.toml uv.lock ./
 COPY mantis-v2/pyproject.toml mantis-v2/pyproject.toml
 COPY mantis-v2/src mantis-v2/src
-RUN test "$(sha256sum uv.lock | cut -d ' ' -f 1)" = "${LOCK_SHA256}" \
+RUN --mount=type=cache,target=/root/.cache/uv \
+    test "$(sha256sum uv.lock | cut -d ' ' -f 1)" = "${LOCK_SHA256}" \
     && uv sync --frozen --no-dev --all-packages --python /usr/bin/python3.12 \
     && uv --version \
     && python --version \
