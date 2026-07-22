@@ -596,18 +596,25 @@ def _load_trial_ledger(path: Path) -> dict[str, object]:
     return cast(dict[str, object], raw)
 
 
-def _tell_from_ledger(study: optuna.Study, trial_number: int, ledger: Mapping[str, object]) -> None:
+def _tell_from_ledger(
+    study: optuna.Study, trial: optuna.Trial, ledger: Mapping[str, object]
+) -> None:
     if ledger.get("state") == "complete":
         evaluation_raw = ledger.get("evaluation")
         if not isinstance(evaluation_raw, dict):
             raise OptunaSearchError("complete trial ledger lacks validation evidence")
         evaluation = _load_evaluation(evaluation_raw)
         value = evaluation.pass_rate_lcb_95 if evaluation.feasible else -1.0
-        study.tell(trial_number, values=value)
+        median_days = evaluation.median_pass_days
+        trial.set_user_attr("validation_blow_count", evaluation.aggregate_blows)
+        trial.set_user_attr(
+            "validation_median_pass_days", None if math.isinf(median_days) else median_days
+        )
+        study.tell(trial, values=value)
     elif ledger.get("state") == "failed":
-        study.tell(trial_number, state=TrialState.FAIL)
+        study.tell(trial, state=TrialState.FAIL)
     elif ledger.get("state") == "pruned":
-        study.tell(trial_number, state=TrialState.PRUNED)
+        study.tell(trial, state=TrialState.PRUNED)
     else:
         raise OptunaSearchError("running trial ledger state is invalid")
 
@@ -648,11 +655,14 @@ def _completed_evaluations(
         loaded_evaluation = _load_evaluation(evaluation)
         expected_seeds = derive_trial_identity(config, study_name, trial_number).seeds
         expected_value = loaded_evaluation.pass_rate_lcb_95 if loaded_evaluation.feasible else -1.0
+        median_days = loaded_evaluation.median_pass_days
+        expected_median_days = None if math.isinf(median_days) else median_days
         if (
             loaded_evaluation.trial_number != trial_number
             or tuple(outcome.seed for outcome in loaded_evaluation.outcomes) != expected_seeds
             or frozen.value != expected_value
             or frozen.user_attrs.get("validation_blow_count") != loaded_evaluation.aggregate_blows
+            or frozen.user_attrs.get("validation_median_pass_days") != expected_median_days
         ):
             raise OptunaSearchError("trial evaluation does not match persistent Optuna state")
         evaluations.append(loaded_evaluation)
@@ -931,7 +941,7 @@ def _finish_running_trial(
         _atomic_json_no_overwrite(plan_path, plan)
     ledger_path = output / "ledger" / f"trial-{trial.number:04d}.json"
     if ledger_path.exists():
-        _tell_from_ledger(study, trial.number, _load_trial_ledger(ledger_path))
+        _tell_from_ledger(study, trial, _load_trial_ledger(ledger_path))
         return
     reported_validation = list(_load_validation_intermediates(output, identity, contract))
 
@@ -991,7 +1001,7 @@ def _finish_running_trial(
             "evaluation": _evaluation_payload(evaluation),
         }
         _atomic_json_no_overwrite(ledger_path, ledger)
-        _tell_from_ledger(study, trial.number, ledger)
+        _tell_from_ledger(study, trial, ledger)
     except PrunedTrial as exc:
         if (
             tuple(outcome.seed for outcome in exc.partial_validation)
