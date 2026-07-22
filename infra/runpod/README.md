@@ -197,7 +197,8 @@ fleet:
 - at least 8 vCPU and 32 GiB host RAM
 - 50 GB container disk
 - 150 GB network volume
-- two-hour automatic termination for the smoke benchmark
+- 7,200-second smoke workload plus 600 seconds of startup allowance and 120
+  seconds of shutdown grace, capped at 7,920 wall-clock seconds
 - no automatic retry that can create a second Pod
 
 This is a benchmark envelope, not a final production size or authorization to
@@ -474,12 +475,13 @@ parity mismatch, resume mismatch, export mismatch, or precision-record mismatch
 selects FP32 with no retry and no tolerance change. CPU fake evidence tests do
 not promote BF16; promotion requires reviewed real-CUDA evidence.
 
-Run the H100 SXM alone first with a two-hour hard deadline. At the observed
-$2.99/hour Secure Cloud price, its maximum qualification compute charge is
-$5.98. L40S and A40 are explicit sequential fallbacks only, each requiring a
-fresh inventory, price, and launch decision after a failed allocation. Total
-qualification compute and container-disk overhead must remain below the $10
-allocation. Never launch a fallback automatically.
+Run the H100 SXM alone first with a 7,200-second workload, 600-second startup
+allowance, and 120-second shutdown grace. The wall-clock cap is 7,920 seconds.
+At the observed $2.99/hour Secure Cloud price, its maximum projected
+qualification spend is $6.60. L40S and A40 are explicit sequential fallbacks
+only, each requiring a fresh inventory, price, and launch decision after a
+failed allocation. Total qualification compute and container-disk overhead must
+remain below the $10 allocation. Never launch a fallback automatically.
 
 The matrix covers environment and network-volume I/O; FP32 batch doubling;
 CPU/CUDA output, loss, gradient, and update parity; BF16 qualification;
