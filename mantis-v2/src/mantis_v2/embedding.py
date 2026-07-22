@@ -123,6 +123,8 @@ def load_foundation(
     actual_sha = sha256_file(weights_path)
     if actual_sha != config.foundation.weights_sha256:
         raise EmbeddingContractError("foundation safetensors digest does not match config")
+    if manifest.get("export_role") != config.foundation.export_role:
+        raise EmbeddingContractError("foundation export role does not match config")
     recorded_sha = manifest.get("weights_sha256")
     if recorded_sha is not None and recorded_sha != actual_sha:
         raise EmbeddingContractError("foundation safetensors digest does not match manifest")

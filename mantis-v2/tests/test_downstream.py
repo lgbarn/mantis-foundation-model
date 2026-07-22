@@ -55,7 +55,7 @@ TREND_MAGIC_TUNED_CONFIG = ROOT / "configs" / "trend-magic-topstep-100k-head-c00
 
 def test_downstream_config_is_strict_and_supports_recorded_overrides() -> None:
     config = load_downstream_config(CONFIG, ("strategy.cooldown_bars=7",))
-    assert config.data.timeframes == ("1min", "3min", "15min")
+    assert config.data.timeframes == ("1min", "3min", "5min", "15min")
     assert config.topstep.starting_balance == 100_000
     assert config.strategy.cooldown_bars == 7
     unlocked = replace(
@@ -83,7 +83,7 @@ def test_trend_magic_config_is_strict_and_has_distinct_embedding_identity(
     assert trend_magic.strategy.trend_magic_atr_period == 5
     assert trend_magic.strategy_contract == {
         "version": "trend_magic_fixed_3r_v1",
-        "input_timeframes": ["1min", "3min", "15min"],
+        "input_timeframes": ["1min", "3min", "5min", "15min"],
         "decision_timeframe": "3min",
         "candidate_rule": "every_eligible_closed_3min_state_bar",
         "direction_owner": "trend_magic",
@@ -217,7 +217,9 @@ def test_tuned_production_config_pins_reusable_embeddings_and_head_settings() ->
     assert config.walk_forward.embed_producer_config_sha256 == sha256_file(CONFIG)
 
 
-def test_tuned_trend_magic_config_reuses_exact_production_embeddings() -> None:
+def test_rejected_three_timeframe_trend_magic_config_cannot_reuse_four_timeframe_embeddings() -> (
+    None
+):
     config = load_downstream_config(TREND_MAGIC_TUNED_CONFIG)
     assert config.run.name == "mantisv2-trend-magic-topstep-100k-head-c0001-v2"
     assert config.strategy.kind == "trend_magic"
@@ -231,7 +233,11 @@ def test_tuned_trend_magic_config_reuses_exact_production_embeddings() -> None:
     assert config.walk_forward.embed_producer_config_path == TREND_MAGIC_CONFIG
     assert config.walk_forward.embed_producer_config_sha256 == sha256_file(TREND_MAGIC_CONFIG)
     producer = load_downstream_config(TREND_MAGIC_CONFIG)
-    assert config.embedding_contract_digest == producer.embedding_contract_digest
+    assert config.data.timeframes == ("1min", "3min", "15min")
+    assert producer.data.timeframes == ("1min", "3min", "5min", "15min")
+    assert config.embedding_contract_digest != producer.embedding_contract_digest
+    with pytest.raises(DownstreamPipelineError, match="ordered 1min, 3min, 5min, 15min"):
+        _embedding_manifest_input(config)
 
 
 def test_head_config_digest_changes_without_changing_embed_identity() -> None:
@@ -265,7 +271,7 @@ def test_reusable_embed_manifest_requires_its_exact_digest(
                 "workflow_digest": workflow_digest,
                 "foundation_weights_sha256": config.foundation.weights_sha256,
                 "embedding_dim_per_channel": 256,
-                "feature_width": 3840,
+                "feature_width": 5120,
                 "rows": 1,
                 "outputs": [{"rows": 1}],
             }
@@ -304,7 +310,7 @@ def test_reusable_embed_manifest_rejects_declared_strategy_contract_drift(
                 "strategy_contract": {"version": "tampered"},
                 "foundation_weights_sha256": producer.foundation.weights_sha256,
                 "embedding_dim_per_channel": 256,
-                "feature_width": 3840,
+                "feature_width": 5120,
                 "rows": 1,
                 "outputs": [{"rows": 1}],
             }
@@ -338,7 +344,7 @@ def test_reusable_embed_manifest_rejects_same_width_semantic_changes(
                 "workflow_digest": producer.legacy_workflow_digest,
                 "foundation_weights_sha256": producer.foundation.weights_sha256,
                 "embedding_dim_per_channel": 256,
-                "feature_width": 3840,
+                "feature_width": 5120,
                 "rows": 1,
                 "outputs": [{"rows": 1}],
             }

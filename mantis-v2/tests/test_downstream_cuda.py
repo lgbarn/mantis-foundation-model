@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 from mantis_v2 import downstream_pipeline
+from mantis_v2.cli import _parser
 from mantis_v2.config import ConfigError
 from mantis_v2.downstream_config import load_downstream_config
 from mantis_v2.embedding import EmbeddingContractError, resolve_embedding_device
@@ -18,6 +21,8 @@ from mantis_v2.embedding_artifacts import (
     scan_embedding_pairs,
     validate_embedding_identity,
 )
+from mantis_v2.embedding_qualification import qualify_embedding_files
+from mantis_v2.model import sha256_file
 
 ROOT = Path(__file__).resolve().parents[1]
 FOUR_TIMEFRAMES = ("1min", "3min", "5min", "15min")
@@ -181,3 +186,108 @@ def test_performance_manifest_records_measured_and_projected_four_timeframe_cost
     assert performance.disk_bytes_per_row == 8.0
     assert performance.projected_four_timeframe_disk_bytes == 6400
     assert performance.checkpoint_free_restart is True
+
+
+def test_cpu_fixture_qualifies_diagnostic_candidate_with_pinned_source_and_receipts(
+    tmp_path: Path,
+) -> None:
+    foundation_manifest = tmp_path / "foundation.json"
+    foundation_manifest.write_text(
+        json.dumps(
+            {
+                "export_role": "diagnostic_candidate",
+                "config": {
+                    "model": {
+                        "source_repository": "vfeofanov/mantis",
+                        "source_revision": "0c94f8ceb9f1d1421dd292ed917090df8c31605b",
+                        "hub_model": "paris-noah/MantisV2",
+                        "hub_revision": "99fe0f548960e272fbfa4b82fd9b5b5956779dfd",
+                        "weights_sha256": (
+                            "49d46d9a49cccdc87c46f4e0088fa52c0a6ef7eb4c13de5cc9815426b7b17ab1"
+                        ),
+                    }
+                },
+            }
+        )
+    )
+    identity = EmbeddingIdentity(
+        **{
+            **_identity(role="diagnostic_candidate").__dict__,
+            "foundation_export_sha256": sha256_file(foundation_manifest),
+        }
+    )
+    identity_path = tmp_path / "identity.json"
+    identity_path.write_text(json.dumps(asdict(identity)))
+    features = np.arange(24, dtype=np.float32).reshape(3, 8)
+    cuda = features + 0.001
+    metadata = pd.DataFrame({"symbol": ["NQ"] * 3, "row": [0, 1, 2]})
+    cpu_features = tmp_path / "cpu.npy"
+    cuda_features = tmp_path / "cuda.npy"
+    cpu_metadata = tmp_path / "cpu.parquet"
+    cuda_metadata = tmp_path / "cuda.parquet"
+    np.save(cpu_features, features)
+    np.save(cuda_features, cuda)
+    metadata.to_parquet(cpu_metadata, index=False)
+    metadata.to_parquet(cuda_metadata, index=False)
+    shard_directory = tmp_path / "shards"
+    publish_embedding_pair(shard_directory, 0, 0, features, metadata, identity)
+    performance = EmbeddingPerformance.build(
+        rows=3,
+        duration_seconds=1.0,
+        data_wait_seconds=0.1,
+        peak_vram_bytes=100,
+        peak_rss_bytes=200,
+        disk_bytes=300,
+        checkpoint_free_restart=True,
+        measured_timeframes=4,
+        projected_timeframes=4,
+    )
+    performance_path = tmp_path / "performance.json"
+    performance_path.write_text(json.dumps(asdict(performance)))
+
+    result = qualify_embedding_files(
+        config_path=ROOT / "configs" / "cuda-embedding-qualification.toml",
+        identity_path=identity_path,
+        foundation_manifest_path=foundation_manifest,
+        cpu_features_path=cpu_features,
+        cuda_features_path=cuda_features,
+        cpu_metadata_path=cpu_metadata,
+        cuda_metadata_path=cuda_metadata,
+        shard_directory=shard_directory,
+        performance_path=performance_path,
+        output_path=tmp_path / "qualified.json",
+    )
+
+    assert result["qualified"] is True
+    assert result["purpose"] == "matrix_scoring"
+    assert result["committed_pairs"] == 1
+
+
+def test_embedding_qualification_cli_is_discoverable() -> None:
+    args = _parser().parse_args(
+        [
+            "cuda-embedding-qualify",
+            "--qualification-config",
+            "qualification.toml",
+            "--identity",
+            "identity.json",
+            "--foundation-manifest",
+            "foundation.json",
+            "--cpu-features",
+            "cpu.npy",
+            "--cuda-features",
+            "cuda.npy",
+            "--cpu-metadata",
+            "cpu.parquet",
+            "--cuda-metadata",
+            "cuda.parquet",
+            "--shard-directory",
+            "shards",
+            "--performance",
+            "performance.json",
+            "--output",
+            "qualified.json",
+        ]
+    )
+    assert args.command == "cuda-embedding-qualify"
+    assert args.output == Path("qualified.json")

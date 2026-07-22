@@ -284,8 +284,25 @@ just reject-cuda-bf16 fp32.json 'CUDA out of memory' qualification.json
 Both commands write a new no-overwrite decision. A failed comparison selects
 FP32 after exactly one attempt without reducing registered tolerances. CPU tests
 exercise the policy and fake failures, but only reviewed real-CUDA evidence can
-promote BF16. Until that evidence passes, FP32 remains selected. Downstream
-embedding still does not support CUDA.
+promote BF16. Until that evidence passes, FP32 remains selected.
+
+Downstream embedding accepts only explicit `cpu`, `mps`, or `cuda`; there is no
+Linux auto-fallback. The production embed command requires an explicitly
+promoted foundation manifest and the ordered `1min, 3min, 5min, 15min`
+contract before reading prepared market inputs. It commits each feature/metadata
+pair with a final atomic receipt. Restart rehashes every complete pair, resumes
+an incomplete matching pair without deleting it, and rejects any export,
+producer config, corpus, source, lock, width, row-span, or byte drift.
+
+Pre-promotion matrix scoring uses `export_role="diagnostic_candidate"`; it must
+never be relabeled as promoted. After CPU and CUDA fixture files, pair receipts,
+and performance evidence have been captured on the authorized host, apply the
+zero-cost evidence gate with `just qualify-cuda-embedding ...`. The preregistered
+policy is `mantis-v2/configs/cuda-embedding-qualification.toml`; it pins the
+official MantisV2 source and weights, requires maximum absolute difference at
+most 0.01, per-row cosine at least 0.999, exact metadata order, finite values,
+checkpoint-free restart, and a measured four-timeframe footprint. CPU fixtures
+exercise this gate in CI; only reviewed real-CUDA evidence qualifies throughput.
 
 ## Phase 8: train or resume NextLeg
 
@@ -518,10 +535,13 @@ Verify:
 Verify:
 
 - Foundation manifest and weights digest match.
+- The foundation export role is `promoted`; diagnostic candidates are rejected.
 - Preprocessing matches the exported foundation contract.
-- Shard metadata is complete.
+- Timeframes are ordered exactly as `1min, 3min, 5min, 15min`.
+- Shard feature/metadata pairs have complete atomic receipts.
 - Expected float16 `.npy` shards and Parquet metadata exist.
-- The manifest binds source rows to shard outputs.
+- The manifest binds source rows, producer, corpus, source, lock, export, width,
+  row spans, performance, and shard bytes to the outputs.
 
 ### Walk forward
 

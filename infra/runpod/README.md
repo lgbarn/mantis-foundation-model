@@ -369,9 +369,10 @@ re-query immediately before launch.
 
 The repository now has a pinned CUDA image, real-data FP32 probe contract,
 TensorBoard event writing, fixed cross-device and interrupted-resume oracles,
-resource evidence schemas, a fail-closed BF16 candidate and evidence gate, and
-transfer verification. CUDA embedding, real-CUDA BF16 promotion evidence, and
-the independent shutdown watchdog remain separate gates. The first paid
+resource evidence schemas, a fail-closed BF16 candidate and evidence gate,
+explicit CUDA downstream embedding with atomic resume and a CPU-testable parity
+gate, and transfer verification. Real-CUDA embedding and BF16 evidence plus the
+independent shutdown watchdog remain separate gates. The first paid
 benchmark is still a post-implementation human acceptance gate, not evidence
 that CUDA is already qualified.
 
@@ -422,3 +423,11 @@ resource use; CPU/CUDA embedding parity and throughput; CPU RL validation; and
 TensorBoard/JSON/checkpoint verification. Keep GPU and host peak memory below
 80%, require the existing RL 5,000 steps/second and 100x mmap-latency gates,
 and reject any production projection that exceeds the $100 production pool.
+
+For downstream embedding, use only an explicit CUDA config and an ordered
+four-timeframe identity. The bounded run must record rows/second, data wait,
+peak VRAM and RSS, disk bytes/row, checkpoint-free restart, and the projected
+four-timeframe footprint. Apply `just qualify-cuda-embedding ...` only after the
+authorized run has produced immutable CPU/CUDA fixtures, exact metadata, shard
+receipts, and performance JSON. The command itself is a local evidence check and
+does not create a Pod or authorize spend.

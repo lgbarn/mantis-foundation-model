@@ -9,7 +9,7 @@ allow_overwrite = false
 root = "/Volumes/Storage/trading-research/data/FFM_NEXTLEG"
 symbols = ["ES", "NQ", "RTY", "YM", "GC", "CL", "ZB"]
 contract_multipliers = [50.0, 20.0, 50.0, 5.0, 100.0, 1000.0, 1000.0]
-timeframes = ["1min", "3min", "15min"]
+timeframes = ["1min", "3min", "5min", "15min"]
 decision_timeframe = "3min"
 timestamp_column = "datetime"
 timestamp_semantics = "bar_open"
@@ -20,6 +20,7 @@ holdout_start = "2026-01-01T00:00:00+00:00"
 [foundation]
 manifest_path = "/Volumes/Storage/trading-research/artifacts/mantis-foundation-model/mantisv2-nextleg-mps-target-clamp-v2/export/manifest.json"
 weights_sha256 = "e375cfdb9df0bfd86281468855150a6f95754f4b2b6ed7db42219ec6d309a675"
+export_role = "promoted"
 return_transf_layer = -1
 output_token = "cls_token"
 preprocessing = "nextleg_standardized"
@@ -57,7 +58,7 @@ convergence_policy = "fail"
 embed_manifest_path = "/Volumes/Storage/trading-research/artifacts/mantis-foundation-model/mantisv2-supertrend-topstep-100k/embed/manifest.json"
 embed_manifest_sha256 = "0b489575db78173d8cfb9f3ae30d661f656d6a701b3e8c2b4d4ca11bd5d4d4df"
 embed_producer_config_path = "supertrend-topstep-100k.toml"
-embed_producer_config_sha256 = "7b3308ab08aebddc6c69bc04a99ff229dd614e5ab5f0f569d1b41100670e1afb"
+embed_producer_config_sha256 = "342dc0d2aa0383ed65b07cc9e61c9222dc532115ad053900a5051f091456b786"
 
 [topstep]
 starting_balance = 100000.0

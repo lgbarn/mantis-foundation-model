@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import resource
+import sys
 import time
 from dataclasses import asdict
 from datetime import timedelta
@@ -23,6 +25,14 @@ from mantis_v2.embedding import (
     iter_symbol_embeddings,
     load_foundation,
     resolve_embedding_device,
+)
+from mantis_v2.embedding_artifacts import (
+    FOUR_TIMEFRAME_CONTRACT,
+    EmbeddingIdentity,
+    EmbeddingPerformance,
+    publish_embedding_pair,
+    scan_embedding_pairs,
+    validate_embedding_identity,
 )
 from mantis_v2.instrumentation import (
     RunInstrumentation,
@@ -195,6 +205,10 @@ def _manifest(path: Path, config: DownstreamConfig, expected_stage: str) -> dict
 def _embedding_manifest_input(
     config: DownstreamConfig,
 ) -> tuple[dict[str, Any], Path, str]:
+    if config.data.timeframes != FOUR_TIMEFRAME_CONTRACT:
+        raise DownstreamPipelineError(
+            "reusable embedding requires the ordered 1min, 3min, 5min, 15min contract"
+        )
     configured = config.walk_forward.embed_manifest_path
     if configured is None:
         path = artifact_root(config) / "embed" / "manifest.json"
@@ -311,44 +325,92 @@ def prepare(config: DownstreamConfig) -> dict[str, Any]:
 def embed(config: DownstreamConfig) -> dict[str, Any]:
     """Extract bounded MantisV2 embedding shards from prepared candidates."""
     device = resolve_embedding_device(config.run.device)
+    if config.data.timeframes != FOUR_TIMEFRAME_CONTRACT:
+        raise DownstreamPipelineError(
+            "embedding requires the ordered 1min, 3min, 5min, 15min contract"
+        )
+    if config.foundation.export_role != "promoted":
+        raise DownstreamPipelineError("production embedding requires a promoted export")
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
     root = artifact_root(config)
     started = time.perf_counter()
     prepared = _manifest(root / "prepare" / "manifest.json", config, "prepare")
     stage_root = root / "embed"
     manifest_path = stage_root / "manifest.json"
-    _require_new(stage_root, config)
+    if manifest_path.exists():
+        _require_new(stage_root, config)
     foundation = load_foundation(config, device=device)
     synchronize_device(foundation.device)
-    outputs: list[dict[str, Any]] = []
-    shard_number = 0
+    feature_width = (
+        foundation.embedding_dim * len(config.data.feature_columns) * len(config.data.timeframes)
+    )
+    base = _manifest_base(config, "embed")
+    identity = EmbeddingIdentity(
+        export_role=config.foundation.export_role,
+        foundation_export_sha256=sha256_file(config.foundation.manifest_path),
+        producer_config_sha256=config.embedding_contract_digest,
+        corpus_sha256=sha256_file(root / "prepare" / "manifest.json"),
+        source_digest=str(base["source_digest"]),
+        lock_digest=str(base["lock_digest"]),
+        timeframes=config.data.timeframes,
+        feature_width=feature_width,
+    )
+    validate_embedding_identity(identity, purpose="production")
+    outputs = list(scan_embedding_pairs(stage_root / "shards", identity))
+    completed_rows = sum(int(output["rows"]) for output in outputs)
+    shard_number = len(outputs)
+    published_rows = completed_rows
+    visited_rows = 0
+    data_wait_seconds = 0.0
     for candidate_identity in prepared["outputs"]:
         candidate_path = Path(candidate_identity["path"])
         if sha256_file(candidate_path) != candidate_identity["sha256"]:
             raise DownstreamPipelineError(f"prepared candidate changed: {candidate_path}")
         symbol = str(candidate_identity["symbol"])
+        data_wait_started = time.perf_counter()
         candidates = pd.read_parquet(candidate_path)
+        data_wait_seconds += time.perf_counter() - data_wait_started
         feature_parts: list[np.ndarray] = []
         metadata_parts: list[pd.DataFrame] = []
         buffered = 0
 
         for start, stop, features in iter_symbol_embeddings(candidates, symbol, config, foundation):
+            absolute_start = visited_rows + start
+            absolute_stop = visited_rows + stop
+            if absolute_stop <= completed_rows:
+                continue
+            resume_offset = max(completed_rows - absolute_start, 0)
+            features = features[resume_offset:]
+            metadata_start = start + resume_offset
             feature_parts.append(features)
-            metadata_parts.append(candidates.iloc[start:stop].reset_index(drop=True))
+            metadata_parts.append(candidates.iloc[metadata_start:stop].reset_index(drop=True))
             buffered += len(features)
             if buffered >= config.foundation.shard_rows:
-                shard_number = _flush_embedding_shard(
+                shard_number, published = _flush_embedding_shard(
                     stage_root,
                     shard_number,
+                    published_rows,
                     feature_parts,
                     metadata_parts,
                     outputs,
+                    identity,
                 )
+                published_rows += published
                 buffered = 0
-        shard_number = _flush_embedding_shard(
-            stage_root, shard_number, feature_parts, metadata_parts, outputs
+        visited_rows += len(candidates)
+        shard_number, published = _flush_embedding_shard(
+            stage_root,
+            shard_number,
+            published_rows,
+            feature_parts,
+            metadata_parts,
+            outputs,
+            identity,
         )
+        published_rows += published
     manifest = {
-        **_manifest_base(config, "embed"),
+        **base,
         "prepare_manifest_sha256": sha256_file(root / "prepare" / "manifest.json"),
         "foundation_manifest": str(config.foundation.manifest_path.resolve()),
         "foundation_manifest_sha256": sha256_file(config.foundation.manifest_path),
@@ -357,9 +419,8 @@ def embed(config: DownstreamConfig) -> dict[str, Any]:
         "foundation_validation_evidence": str(foundation.validation_evidence_path.resolve()),
         "foundation_validation_evidence_sha256": foundation.validation_evidence_sha256,
         "embedding_dim_per_channel": foundation.embedding_dim,
-        "feature_width": foundation.embedding_dim
-        * len(config.data.feature_columns)
-        * len(config.data.timeframes),
+        "feature_width": feature_width,
+        "embedding_identity": asdict(identity),
         "outputs": outputs,
         "rows": sum(int(output["rows"]) for output in outputs),
     }
@@ -370,6 +431,27 @@ def embed(config: DownstreamConfig) -> dict[str, Any]:
         {"step": len(outputs), "rows": manifest["rows"], "shards": len(outputs)},
         foundation.device,
     )
+    disk_bytes = sum(
+        int(output["features"]["size"]) + int(output["metadata"]["size"]) for output in outputs
+    )
+    telemetry = manifest["instrumentation"]
+    maximum_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    peak_rss_bytes = int(maximum_rss if sys.platform == "darwin" else maximum_rss * 1024)
+    manifest["performance"] = asdict(
+        EmbeddingPerformance.build(
+            rows=int(manifest["rows"]),
+            duration_seconds=float(telemetry["duration_seconds"]),
+            data_wait_seconds=data_wait_seconds,
+            peak_vram_bytes=(
+                int(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else 0
+            ),
+            peak_rss_bytes=peak_rss_bytes,
+            disk_bytes=disk_bytes,
+            checkpoint_free_restart=True,
+            measured_timeframes=len(config.data.timeframes),
+            projected_timeframes=4,
+        )
+    )
     _atomic_json(manifest_path, manifest)
     return manifest
 
@@ -377,29 +459,29 @@ def embed(config: DownstreamConfig) -> dict[str, Any]:
 def _flush_embedding_shard(
     stage_root: Path,
     shard_number: int,
+    row_start: int,
     feature_parts: list[np.ndarray],
     metadata_parts: list[pd.DataFrame],
     outputs: list[dict[str, Any]],
-) -> int:
+    identity: EmbeddingIdentity,
+) -> tuple[int, int]:
     if not feature_parts:
-        return shard_number
+        return shard_number, 0
     features = np.concatenate(feature_parts)
     metadata = pd.concat(metadata_parts, ignore_index=True)
-    feature_path = stage_root / "shards" / f"features-{shard_number:05d}.npy"
-    metadata_path = stage_root / "shards" / f"metadata-{shard_number:05d}.parquet"
-    _atomic_npy(features, feature_path)
-    _atomic_parquet(metadata, metadata_path)
     outputs.append(
-        {
-            "number": shard_number,
-            "rows": len(metadata),
-            "features": _file_identity(feature_path),
-            "metadata": _file_identity(metadata_path),
-        }
+        publish_embedding_pair(
+            stage_root / "shards",
+            shard_number,
+            row_start,
+            features,
+            metadata,
+            identity,
+        )
     )
     feature_parts.clear()
     metadata_parts.clear()
-    return shard_number + 1
+    return shard_number + 1, len(metadata)
 
 
 def _load_embedding_metadata(manifest: dict[str, Any]) -> pd.DataFrame:

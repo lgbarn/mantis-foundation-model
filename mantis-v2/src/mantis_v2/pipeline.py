@@ -824,6 +824,7 @@ def _export_loaded(config: PipelineConfig, loaded: _LoadedTrained) -> dict[str, 
     manifest = {
         "format": config.export.format,
         "precision": config.training.precision,
+        "export_role": "diagnostic_candidate",
         "weights": str(weights_path),
         "weights_sha256": sha256_file(weights_path),
         "config": asdict(config),

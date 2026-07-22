@@ -1,0 +1,18 @@
+schema_version = 1
+purpose = "matrix_scoring"
+timeframes = ["1min", "3min", "5min", "15min"]
+
+[source]
+repository = "vfeofanov/mantis"
+revision = "0c94f8ceb9f1d1421dd292ed917090df8c31605b"
+hub_model = "paris-noah/MantisV2"
+hub_revision = "99fe0f548960e272fbfa4b82fd9b5b5956779dfd"
+weights_sha256 = "49d46d9a49cccdc87c46f4e0088fa52c0a6ef7eb4c13de5cc9815426b7b17ab1"
+
+[parity]
+max_abs = 0.01
+minimum_row_cosine = 0.999
+
+[performance]
+projected_timeframes = 4
+checkpoint_free_restart = true
