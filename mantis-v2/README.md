@@ -71,6 +71,8 @@ just rl-validate-environment training.json validation.json environment-validatio
 just rl-smoke artifacts/rl-entry-smoke-v1 mantis-v2/configs/rl-entry-smoke.toml
 just rl-train training.json artifacts/rl-entry-training \
   mantis-v2/configs/rl-entry-topstep-100k.toml shared_ticker_value
+just rl-optuna-search training.json validation.json artifacts/rl-optuna \
+  mantis-v2-topstep-100k-shared-ticker-value-v1
 just runpod-image-build ghcr.io/lgbarn/mantis-v2-cuda:SOURCE_SHA
 just runpod-image-scan ghcr.io/lgbarn/mantis-v2-cuda:SOURCE_SHA reports/image-scan.json
 just runpod-image-self-check \
@@ -145,6 +147,16 @@ policy, dependencies, seed, schedule, Python/NumPy/Torch/Gym RNG state, and
 checkpoint hashes to agree. Completed or changed run identities are never
 overwritten. This smoke does not read production data or the sealed holdout and
 does not qualify MPS for policy training.
+
+`rl-optuna-search` is the validation-owned Stage 2 search. It uses the immutable
+`configs/rl-optuna-v1.toml` contract, Optuna 4.9.0 persistent SQLite storage,
+fresh deterministically seeded TPE proposals, and at most 30 sequential trials.
+Each trial trains exactly three derived seeds to the first complete 14-, 28-, or
+56-episode rollout reaching at least 500,000 policy decisions. Any validation
+blow is infeasible; feasible COMPLETE trials rank by pass-rate LCB, median pass
+days, then trial number. The command accepts only same-fold training and
+validation manifests before the sealed holdout. It cannot receive a test or
+holdout path and never exports a winner when no feasible trial exists.
 
 The approved CPU RL supply chain resolves from hash-locked `uv.lock` entries:
 

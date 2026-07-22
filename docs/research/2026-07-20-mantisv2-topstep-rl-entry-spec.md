@@ -499,6 +499,18 @@ horizon, ticker sampling, holdout, and promotion thresholds are locked outside
 Optuna. Architecture and reward ablations use separate named studies so trial
 counts and multiple-testing debt remain visible.
 
+The accepted Optuna v1 domains and orchestration settings are versioned in
+`mantis-v2/configs/rl-optuna-v1.toml`. A rollout is 14, 28, or 56 complete
+episodes built from one, two, or four balanced ticker/profile supercycles. GAE
+resets at episode boundaries. The 500,000-step budget counts actual policy
+decisions and is a lower bound: training stops after the first complete rollout
+that reaches it and records the exact overshoot. All 90 training seeds and each
+per-trial TPE proposal seed use the SHA256-U31 namespaces pinned by that config.
+The sequential persistent study holds one exclusive lock, resumes one RUNNING
+trial before proposing another, counts every trial state toward the ceiling,
+and refuses a 31st attempt without mutation. Median pruning uses validation
+evidence only and cannot run before two validation seeds complete.
+
 ## 7. Evaluation and experiment discipline
 
 ### 7.1 Existing temporal structure

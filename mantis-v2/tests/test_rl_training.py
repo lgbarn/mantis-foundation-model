@@ -20,10 +20,11 @@ from mantis_v2.rl_environment import (
     EnvironmentContractError,
     EnvironmentEpisode,
 )
-from mantis_v2.rl_policy import EntryActorCritic, ReturnNormalizers
+from mantis_v2.rl_policy import PROFILES, EntryActorCritic, ReturnNormalizers
 from mantis_v2.rl_training import (
     ConstraintController,
     PolicyVariant,
+    PpoHyperparameters,
     ProductionTrainingError,
     TrainingControl,
     TrainingEpisodes,
@@ -37,11 +38,13 @@ from mantis_v2.rl_training import (
     _ppo_update,
     _reward_returns,
     _reward_targets_and_advantages,
+    _search_rollout_episodes,
     _terminal_signal,
     _train_loaded_policy,
     _train_policy_seeds_loaded,
     _Transition,
     _validate_contract,
+    derive_search_training_seed,
     load_training_episodes,
     train_entry_policy,
 )
@@ -567,7 +570,7 @@ def test_balanced_rollouts_finite_gradients_and_policy_diagnostics(tmp_path: Pat
     )
 
     assert result["finite_gradients"] is True
-    assert result["completed_timesteps"] == result["rollouts"]["bars_replayed"]
+    assert result["completed_timesteps"] == result["rollouts"]["policy_decisions"]
     assert result["rollouts"]["ticker_max_minus_min"] <= 1
     assert result["rollouts"]["profile_counts"]["one_mini"] == 7
     assert result["rollouts"]["profile_counts"]["ten_micros"] == 6
@@ -582,6 +585,119 @@ def test_balanced_rollouts_finite_gradients_and_policy_diagnostics(tmp_path: Pat
     actor_totals = result["metrics"][-1]["actor_weight_totals"]
     assert set(actor_totals) == set(TICKERS)
     assert max(actor_totals.values()) - min(actor_totals.values()) < 1e-7
+
+
+def test_search_training_uses_complete_rollout_and_explicit_generated_seed_authority(
+    tmp_path: Path,
+) -> None:
+    config = _config()
+    config = replace(
+        config,
+        training=replace(
+            config.training,
+            search_timesteps_per_seed=500_000,
+            search_seeds=3,
+            maximum_search_trials=30,
+        ),
+    )
+    base = _training_episodes()
+    episodes = replace(
+        base,
+        episodes=(*base.episodes, replace(base.episodes[-1])),
+        config_sha256=config.digest,
+    )
+    parameters = PpoHyperparameters.from_search(
+        {
+            "learning_rate": 1e-4,
+            "rollout_length": 14,
+            "batch_size": 256,
+            "gae_lambda": 0.90,
+            "clip_range": 0.1,
+            "entropy_coefficient": 1e-4,
+            "value_loss_coefficient": 0.25,
+            "max_grad_norm": 0.3,
+            "hidden_width": 64,
+        }
+    )
+    seed = derive_search_training_seed(0, 0)
+
+    result = _train_loaded_policy(
+        config,
+        episodes,
+        tmp_path / "search",
+        seed=seed,
+        target_timesteps=500_000,
+        maximum_updates_this_run=1,
+        hyperparameters=parameters,
+        search_trial_number=0,
+        search_seed_index=0,
+    )
+
+    assert result["status"] == "incomplete"
+    assert len(result["rollouts"]["episodes"]) == 14
+    assert result["completed_timesteps"] == result["rollouts"]["policy_decisions"]
+    assert result["minimum_target_timesteps"] == 500_000
+    assert result["identities"]["search_trial_number"] == 0
+    assert result["identities"]["search_seed_index"] == 0
+
+
+@pytest.mark.parametrize("rollout_length", (14, 28, 56))
+def test_search_rollout_is_complete_balanced_supercycles(rollout_length: int) -> None:
+    base = _training_episodes().episodes
+    reservoir = tuple(replace(episode) for _copy in range(8) for episode in base)
+
+    rollout = _search_rollout_episodes(reservoir, rollout_length, seed=123, update=0)
+
+    supercycles = rollout_length // 14
+    assert len(rollout) == rollout_length
+    assert Counter(episode.ticker for episode in rollout) == {
+        ticker: 2 * supercycles for ticker in TICKERS
+    }
+    assert Counter(episode.profile for episode in rollout) == {
+        "one_mini": 8 * supercycles,
+        "ten_micros": 6 * supercycles,
+    }
+    for offset in range(0, rollout_length, 14):
+        cycle = rollout[offset : offset + 14]
+        for ticker in TICKERS:
+            owned = [episode.profile for episode in cycle if episode.ticker == ticker]
+            assert len(owned) == 2
+            assert Counter(owned) == ({"one_mini": 2} if ticker == "ZB" else Counter(PROFILES))
+
+
+def test_timestep_lower_bound_overshoot_is_identical_after_resume(tmp_path: Path) -> None:
+    config = _config()
+    episodes = _training_episodes()
+    uninterrupted = _train_loaded_policy(
+        config,
+        episodes,
+        tmp_path / "uninterrupted-timesteps",
+        seed=42,
+        target_timesteps=25,
+    )
+    partial = _train_loaded_policy(
+        config,
+        episodes,
+        tmp_path / "resumed-timesteps",
+        seed=42,
+        target_timesteps=25,
+        maximum_updates_this_run=1,
+    )
+    assert partial["status"] == "incomplete"
+    resumed = _train_loaded_policy(
+        config,
+        episodes,
+        tmp_path / "resumed-timesteps",
+        seed=42,
+        target_timesteps=25,
+        resume=True,
+    )
+
+    assert resumed["completed_timesteps"] >= 25
+    assert resumed["timestep_overshoot"] < resumed["rollouts"]["policy_decisions"]
+    assert resumed["completed_timesteps"] == uninterrupted["completed_timesteps"]
+    assert resumed["timestep_overshoot"] == uninterrupted["timestep_overshoot"]
+    assert resumed["policy_sha256"] == uninterrupted["policy_sha256"]
 
 
 @pytest.mark.parametrize("variant", tuple(PolicyVariant))
@@ -606,7 +722,7 @@ def test_checkpoint_reload_and_interruption_resume_are_exact(
     )
     assert partial["status"] == "incomplete"
     partial_state = json.loads((resumed / "state.json").read_text())
-    assert partial_state["completed_timesteps"] == partial["rollouts"]["bars_replayed"]
+    assert partial_state["completed_timesteps"] == partial["rollouts"]["policy_decisions"]
     final = _train_loaded_policy(
         config,
         episodes,
@@ -672,15 +788,15 @@ def test_resume_rejects_checkpoint_requiring_unsafe_deserialization(tmp_path: Pa
         _train_loaded_policy(config, episodes, output, seed=42, target_updates=2, resume=True)
 
 
-def test_actual_replayed_steps_not_nominal_episode_lengths_drive_completion() -> None:
+def test_actual_policy_decisions_not_nominal_episode_lengths_drive_completion() -> None:
     metrics = [
-        {"rollouts": {"bars_replayed": 4906, "nominal_episode_bars": 64096}},
-        {"rollouts": {"bars_replayed": 17, "nominal_episode_bars": 64096}},
+        {"rollouts": {"policy_decisions": 4906, "nominal_episode_bars": 64096}},
+        {"rollouts": {"policy_decisions": 17, "nominal_episode_bars": 64096}},
     ]
 
     assert _completed_timesteps(metrics) == 4923
     with pytest.raises(ProductionTrainingError, match="timestep metrics"):
-        _completed_timesteps([{"rollouts": {"bars_replayed": 0}}])
+        _completed_timesteps([{"rollouts": {"policy_decisions": 0}}])
 
 
 def test_resume_rejects_provenance_and_all_seed_reporting_has_worst_seed(

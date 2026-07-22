@@ -44,6 +44,13 @@ class ReturnNormalizers:
         variance = squared / max(count, 1)
         return (values - mean) / max(float(np.sqrt(variance)), 1e-6)
 
+    def reward_signal(self, ticker: str, reward: float, *, terminal: bool) -> float:
+        """Transform a reward into the frozen normalized critic-return basis."""
+        count, mean, squared = self._state[ticker]
+        variance = squared / max(count, 1)
+        scale = max(float(np.sqrt(variance)), 1e-6)
+        return (reward - (mean if terminal else 0.0)) / scale
+
     def count(self, ticker: str) -> int:
         return int(self._state[ticker][0])
 

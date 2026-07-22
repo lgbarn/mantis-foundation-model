@@ -44,6 +44,82 @@ _ENTROPY_COEFFICIENT = 0.01
 _MAX_GRAD_NORM = 0.5
 
 
+@dataclass(frozen=True)
+class PpoHyperparameters:
+    """Optimizer/model knobs accepted by the immutable Optuna v1 contract."""
+
+    learning_rate: float = _LEARNING_RATE
+    rollout_length: int | None = None
+    batch_size: int = 512
+    gae_lambda: float = 1.0
+    clip_range: float = _CLIP_RANGE
+    entropy_coefficient: float = _ENTROPY_COEFFICIENT
+    value_loss_coefficient: float = _VALUE_COEFFICIENT
+    max_grad_norm: float = _MAX_GRAD_NORM
+    hidden_width: int = 64
+
+    def __post_init__(self) -> None:
+        if self.rollout_length is None:
+            if (
+                self.learning_rate <= 0.0
+                or self.batch_size < 1
+                or not 0.0 <= self.gae_lambda <= 1.0
+                or self.clip_range <= 0.0
+                or self.entropy_coefficient < 0.0
+                or self.value_loss_coefficient <= 0.0
+                or self.max_grad_norm <= 0.0
+                or self.hidden_width < 1
+            ):
+                raise ProductionTrainingError("PPO hyperparameters are invalid")
+            return
+        accepted = (
+            1e-4 <= self.learning_rate <= 1e-3
+            and self.rollout_length in {14, 28, 56}
+            and self.batch_size in {256, 512, 1024}
+            and 0.90 <= self.gae_lambda <= 0.99
+            and self.clip_range in {0.1, 0.2, 0.3}
+            and 1e-4 <= self.entropy_coefficient <= 0.03
+            and self.value_loss_coefficient in {0.25, 0.5, 1.0}
+            and self.max_grad_norm in {0.3, 0.5, 1.0}
+            and self.hidden_width in {64, 128, 256}
+        )
+        if not accepted:
+            raise ProductionTrainingError("PPO search parameter values are outside v1")
+
+    @classmethod
+    def from_search(cls, raw: Mapping[str, object]) -> PpoHyperparameters:
+        expected = {
+            "learning_rate",
+            "rollout_length",
+            "batch_size",
+            "gae_lambda",
+            "clip_range",
+            "entropy_coefficient",
+            "value_loss_coefficient",
+            "max_grad_norm",
+            "hidden_width",
+        }
+        if set(raw) != expected:
+            raise ProductionTrainingError("PPO search parameter keys are invalid")
+        if any(type(value) is bool for value in raw.values()):
+            raise ProductionTrainingError("PPO search parameter values are invalid")
+        try:
+            result = cls(
+                learning_rate=float(cast(float, raw["learning_rate"])),
+                rollout_length=int(cast(int, raw["rollout_length"])),
+                batch_size=int(cast(int, raw["batch_size"])),
+                gae_lambda=float(cast(float, raw["gae_lambda"])),
+                clip_range=float(cast(float, raw["clip_range"])),
+                entropy_coefficient=float(cast(float, raw["entropy_coefficient"])),
+                value_loss_coefficient=float(cast(float, raw["value_loss_coefficient"])),
+                max_grad_norm=float(cast(float, raw["max_grad_norm"])),
+                hidden_width=int(cast(int, raw["hidden_width"])),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ProductionTrainingError("PPO search parameter values are invalid") from exc
+        return result
+
+
 class ProductionTrainingError(RuntimeError):
     """Raised when production entry training cannot prove its contract."""
 
@@ -261,9 +337,22 @@ def _validate_contract(config: RlConfig, episodes: TrainingEpisodes) -> None:
         for profile in (("one_mini",) if ticker == "ZB" else PROFILES)
     }
     cell_counts = Counter((episode.ticker, episode.profile) for episode in episodes.episodes)
+    ticker_counts = Counter(episode.ticker for episode in episodes.episodes)
+    cells_balanced = (
+        bool(cell_counts) and max(cell_counts.values()) - min(cell_counts.values()) <= 1
+    )
+    tickers_balanced = (
+        bool(ticker_counts) and max(ticker_counts.values()) - min(ticker_counts.values()) <= 1
+    )
+    profiles_balanced = all(
+        abs(cell_counts[(ticker, "one_mini")] - cell_counts[(ticker, "ten_micros")]) <= 1
+        for ticker in TICKERS
+        if ticker != "ZB"
+    )
     if (
         set(cell_counts) != expected_cells
-        or max(cell_counts.values()) - min(cell_counts.values()) > 1
+        or not profiles_balanced
+        or not (cells_balanced or tickers_balanced)
     ):
         raise ProductionTrainingError("training schedule ticker/profile matrix is incomplete")
 
@@ -275,18 +364,28 @@ def _identities(
     variant: PolicyVariant,
     target_updates: int | None,
     training_control: TrainingControl,
+    *,
+    hyperparameters: PpoHyperparameters | None = None,
+    target_timesteps: int | None = None,
+    search_trial_number: int | None = None,
+    search_seed_index: int | None = None,
 ) -> dict[str, object]:
     source = episodes.runtime_identities.get("source", {})
     lock = episodes.runtime_identities.get("lock", {})
     if not isinstance(source, Mapping) or not isinstance(lock, Mapping):
         raise ProductionTrainingError("runtime source or lock identity is invalid")
+    selected_hyperparameters = hyperparameters or PpoHyperparameters(
+        batch_size=config.training.minibatch_size
+    )
+    minimum_timesteps = target_timesteps or config.training.development_timesteps_per_seed
     return {
         "policy_schema": _POLICY_SCHEMA,
         "completion_mode": "production_timesteps" if target_updates is None else "bounded_updates",
         "target_updates": target_updates,
-        "target_timesteps": (
-            config.training.development_timesteps_per_seed if target_updates is None else None
-        ),
+        "target_timesteps": minimum_timesteps if target_updates is None else None,
+        "search_trial_number": search_trial_number,
+        "search_seed_index": search_seed_index,
+        "ppo_hyperparameters": asdict(selected_hyperparameters),
         "training_control": training_control.value,
         "variant": variant.value,
         "fold": episodes.fold,
@@ -315,6 +414,15 @@ def _identities(
         "rule_sha256": config.rule_digest,
         "fee_sha256": config.fee_digest,
     }
+
+
+def derive_search_training_seed(trial_number: int, seed_index: int) -> int:
+    """Return the accepted SHA256-U31 Optuna training seed."""
+    if not 0 <= trial_number < 30 or seed_index not in {0, 1, 2}:
+        raise ProductionTrainingError("search trial or seed index is invalid")
+    message = f"mantis-v2-topstep-100k-optuna-v1:{trial_number}:{seed_index}".encode()
+    value = int.from_bytes(hashlib.sha256(message).digest()[:8], "big")
+    return 1 + value % 2_147_483_646
 
 
 def _masked_distribution(logits: torch.Tensor, masks: torch.Tensor) -> Categorical:
@@ -471,6 +579,118 @@ def _cost_returns(transitions: Sequence[_Transition]) -> np.ndarray:
     return values
 
 
+def _generalized_advantages(
+    transitions: Sequence[_Transition],
+    *,
+    signal: str,
+    old_value: str,
+    gae_lambda: float,
+) -> np.ndarray:
+    """Compute gamma-one GAE while resetting recursion at every complete episode."""
+    if signal not in {"reward", "cost"} or old_value not in {
+        "old_value",
+        "old_cost_value",
+    }:
+        raise ProductionTrainingError("GAE signal or value field is invalid")
+    if not 0.0 <= gae_lambda <= 1.0:
+        raise ProductionTrainingError("GAE lambda must be between zero and one")
+    advantages = np.zeros(len(transitions), dtype=np.float32)
+    next_advantage = 0.0
+    next_value = 0.0
+    for index in range(len(transitions) - 1, -1, -1):
+        transition = transitions[index]
+        terminal = transition.terminal
+        continuation = 0.0 if terminal else 1.0
+        current_value = float(getattr(transition, old_value))
+        delta = float(getattr(transition, signal)) + continuation * next_value - current_value
+        next_advantage = delta + continuation * gae_lambda * next_advantage
+        advantages[index] = next_advantage
+        next_value = current_value
+        if terminal:
+            next_advantage = delta
+            next_value = current_value
+    return advantages
+
+
+def _normalized_reward_advantages(
+    transitions: Sequence[_Transition],
+    normalizers: ReturnNormalizers,
+    gae_lambda: float,
+) -> np.ndarray:
+    """Compute reward GAE wholly in each ticker's frozen normalized-return basis."""
+    if not 0.0 <= gae_lambda <= 1.0:
+        raise ProductionTrainingError("GAE lambda must be between zero and one")
+    advantages = np.zeros(len(transitions), dtype=np.float32)
+    next_advantage = 0.0
+    next_value = 0.0
+    for index in range(len(transitions) - 1, -1, -1):
+        transition = transitions[index]
+        continuation = 0.0 if transition.terminal else 1.0
+        reward = normalizers.reward_signal(
+            TICKERS[transition.ticker], transition.reward, terminal=transition.terminal
+        )
+        delta = reward + continuation * next_value - transition.old_value
+        next_advantage = delta + continuation * gae_lambda * next_advantage
+        advantages[index] = next_advantage
+        next_value = transition.old_value
+        if transition.terminal:
+            next_advantage = delta
+            next_value = transition.old_value
+    return advantages
+
+
+def _search_rollout_episodes(
+    episodes: Sequence[EnvironmentEpisode],
+    rollout_length: int,
+    *,
+    seed: int,
+    update: int,
+) -> tuple[EnvironmentEpisode, ...]:
+    """Build complete canonical 14-episode ticker/profile supercycles."""
+    if rollout_length not in {14, 28, 56} or update < 0:
+        raise ProductionTrainingError("search rollout length or update is invalid")
+    grouped: dict[tuple[str, str], list[EnvironmentEpisode]] = {}
+    for episode in episodes:
+        grouped.setdefault((episode.ticker, episode.profile), []).append(episode)
+    supercycles = rollout_length // 14
+    required = {
+        (ticker, profile): supercycles
+        for ticker in TICKERS
+        if ticker != "ZB"
+        for profile in PROFILES
+    }
+    required[("ZB", "one_mini")] = 2 * supercycles
+    selected: dict[tuple[str, str], list[EnvironmentEpisode]] = {}
+    for key, count in required.items():
+        available = grouped.get(key, [])
+        if len(available) < count:
+            raise ProductionTrainingError(
+                "search rollout lacks complete ticker/profile supercycles"
+            )
+        start = (update * count) % len(available)
+        selected[key] = [available[(start + index) % len(available)] for index in range(count)]
+        if len({id(episode) for episode in selected[key]}) != count:
+            raise ProductionTrainingError("search rollout repeats an episode")
+    cursors = {key: 0 for key in selected}
+    generator = random.Random((seed << 16) ^ update)
+    rollout: list[EnvironmentEpisode] = []
+    for _supercycle in range(supercycles):
+        assignments = {}
+        for ticker in TICKERS:
+            if ticker == "ZB":
+                continue
+            profiles = list(PROFILES)
+            generator.shuffle(profiles)
+            assignments[ticker] = profiles
+        for wave in range(2):
+            for ticker in TICKERS:
+                profile = "one_mini" if ticker == "ZB" else assignments[ticker][wave]
+                key = (ticker, profile)
+                rollout.append(selected[key][cursors[key]])
+                cursors[key] += 1
+    return tuple(rollout)
+
+
 def _actor_weights(tickers: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
     weights = torch.zeros(len(tickers), dtype=torch.float32)
     totals: dict[str, float] = {}
@@ -520,6 +740,7 @@ def _reward_targets_and_advantages(
     tickers: torch.Tensor,
     raw_returns: np.ndarray,
     old_values: torch.Tensor,
+    raw_actor_advantages: np.ndarray | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Keep rollout values and actor returns in one frozen normalization basis."""
     critic_targets = torch.empty(len(raw_returns), dtype=torch.float32)
@@ -532,7 +753,11 @@ def _reward_targets_and_advantages(
         owned_tensor = torch.from_numpy(owned)
         owned_returns = torch.as_tensor(raw_returns[owned], dtype=torch.float32)
         rollout_basis_returns = normalizers.normalize(ticker, owned_returns)
-        owned_advantages = rollout_basis_returns - old_values[owned_tensor]
+        owned_advantages = (
+            rollout_basis_returns - old_values[owned_tensor]
+            if raw_actor_advantages is None
+            else torch.as_tensor(raw_actor_advantages[owned], dtype=torch.float32)
+        )
         owned_advantages = owned_advantages - owned_advantages.mean()
         reward_std = owned_advantages.std(unbiased=False)
         if len(owned_advantages) > 1 and float(reward_std) > 1e-8:
@@ -553,6 +778,11 @@ def _ppo_update(
     episode_costs: Sequence[float],
     epochs: int,
     minibatch_size: int,
+    gae_lambda: float = 1.0,
+    clip_range: float = _CLIP_RANGE,
+    entropy_coefficient: float = _ENTROPY_COEFFICIENT,
+    value_loss_coefficient: float = _VALUE_COEFFICIENT,
+    max_grad_norm: float = _MAX_GRAD_NORM,
 ) -> dict[str, object]:
     if epochs < 2 or minibatch_size < 1:
         raise ProductionTrainingError("PPO requires at least two epochs and a positive minibatch")
@@ -564,14 +794,15 @@ def _ppo_update(
         [item.old_log_probability for item in transitions], dtype=torch.float32
     )
     old_values = torch.tensor([item.old_value for item in transitions], dtype=torch.float32)
-    old_cost_values = torch.tensor(
-        [item.old_cost_value for item in transitions], dtype=torch.float32
-    )
     masks = torch.from_numpy(np.stack([item.mask for item in transitions]))
     raw_reward_returns = _reward_returns(transitions)
     raw_cost_returns = _cost_returns(transitions)
+    reward_gae = _normalized_reward_advantages(transitions, normalizers, gae_lambda)
+    cost_gae = _generalized_advantages(
+        transitions, signal="cost", old_value="old_cost_value", gae_lambda=gae_lambda
+    )
     normalized_reward_returns, reward_advantages = _reward_targets_and_advantages(
-        normalizers, tickers, raw_reward_returns, old_values
+        normalizers, tickers, raw_reward_returns, old_values, reward_gae
     )
     cost_returns = torch.from_numpy(raw_cost_returns)
     cost_advantages = torch.empty(len(transitions), dtype=torch.float32)
@@ -579,7 +810,7 @@ def _ppo_update(
         owned = np.flatnonzero(np.asarray([item.ticker for item in transitions]) == ticker_index)
         if len(owned):
             owned_tensor = torch.from_numpy(owned)
-            owned_cost_advantages = cost_returns[owned_tensor] - old_cost_values[owned_tensor]
+            owned_cost_advantages = torch.as_tensor(cost_gae[owned], dtype=torch.float32)
             owned_cost_advantages = owned_cost_advantages - owned_cost_advantages.mean()
             cost_std = owned_cost_advantages.std(unbiased=False)
             if len(owned_cost_advantages) > 1 and float(cost_std) > 1e-8:
@@ -607,7 +838,7 @@ def _ppo_update(
             current = distribution.log_prob(actions[index])  # type: ignore[no-untyped-call]
             ratio = torch.exp(current - old_log_probabilities[index])
             unclipped = ratio * advantages[index]
-            clipped_ratio = torch.clamp(ratio, 1.0 - _CLIP_RANGE, 1.0 + _CLIP_RANGE)
+            clipped_ratio = torch.clamp(ratio, 1.0 - clip_range, 1.0 + clip_range)
             surrogate = torch.minimum(unclipped, clipped_ratio * advantages[index])
             actor_loss = -surrogate.mean()
             value_loss = (values - normalized_reward_returns[index]).square().mean()
@@ -615,9 +846,9 @@ def _ppo_update(
             entropy = distribution.entropy().mean()  # type: ignore[no-untyped-call]
             loss = (
                 actor_loss
-                + _VALUE_COEFFICIENT * value_loss
-                + _VALUE_COEFFICIENT * cost_value_loss
-                - _ENTROPY_COEFFICIENT * entropy
+                + value_loss_coefficient * value_loss
+                + value_loss_coefficient * cost_value_loss
+                - entropy_coefficient * entropy
             )
             optimizer.zero_grad()
             loss.backward()
@@ -626,7 +857,7 @@ def _ppo_update(
                 for parameter in model.parameters()
             ):
                 raise ProductionTrainingError("policy update produced non-finite gradients")
-            torch.nn.utils.clip_grad_norm_(model.parameters(), _MAX_GRAD_NORM)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             optimizer.step()
             if not all(bool(torch.isfinite(parameter).all()) for parameter in model.parameters()):
                 raise ProductionTrainingError("policy update produced non-finite parameters")
@@ -636,7 +867,7 @@ def _ppo_update(
             cost_value_losses.append(float(cost_value_loss.detach()))
             entropies.append(float(entropy.detach()))
             ratios.append(ratio.detach())
-            clipped.append(((ratio < 1.0 - _CLIP_RANGE) | (ratio > 1.0 + _CLIP_RANGE)).detach())
+            clipped.append(((ratio < 1.0 - clip_range) | (ratio > 1.0 + clip_range)).detach())
     all_ratios = torch.cat(ratios)
     all_clipped = torch.cat(clipped)
     constraint_metrics = controller.update(episode_costs)
@@ -649,6 +880,11 @@ def _ppo_update(
         "finite_gradients": True,
         "ppo_epochs": epochs,
         "minibatch_size": minibatch_size,
+        "gae_lambda": gae_lambda,
+        "clip_range": clip_range,
+        "entropy_coefficient": entropy_coefficient,
+        "value_loss_coefficient": value_loss_coefficient,
+        "max_grad_norm": max_grad_norm,
         "ratio_non_unit_fraction": float((torch.abs(all_ratios - 1.0) > 1e-6).float().mean()),
         "ratio_max_deviation": float(torch.abs(all_ratios - 1.0).max()),
         "clip_fraction": float(all_clipped.float().mean()),
@@ -904,10 +1140,10 @@ def _completed_timesteps(metrics: Sequence[Mapping[str, object]]) -> int:
     total = 0
     for metric in metrics:
         rollouts = metric.get("rollouts")
-        bars = rollouts.get("bars_replayed") if isinstance(rollouts, dict) else None
-        if type(bars) is not int or bars < 1:
+        decisions = rollouts.get("policy_decisions") if isinstance(rollouts, dict) else None
+        if type(decisions) is not int or decisions < 1:
             raise ProductionTrainingError("checkpoint rollout timestep metrics are invalid")
-        total += bars
+        total += decisions
     return total
 
 
@@ -941,19 +1177,40 @@ def _train_loaded_policy(
     seed: int,
     variant: PolicyVariant | str = PolicyVariant.SHARED_TICKER_VALUE,
     target_updates: int | None = None,
+    target_timesteps: int | None = None,
     maximum_updates_this_run: int | None = None,
     resume: bool = False,
     publish: bool = True,
     training_control: TrainingControl | str = TrainingControl.NORMAL,
+    hyperparameters: PpoHyperparameters | None = None,
+    search_trial_number: int | None = None,
+    search_seed_index: int | None = None,
 ) -> dict[str, object]:
     """Internal seam for an already verified, complete schedule collection."""
     _validate_contract(config, episodes)
     selected_variant = PolicyVariant(variant)
     selected_control = TrainingControl(training_control)
-    if seed not in config.training.development_seeds:
+    selected_hyperparameters = hyperparameters or PpoHyperparameters(
+        batch_size=config.training.minibatch_size
+    )
+    search_authorized = search_trial_number is not None or search_seed_index is not None
+    if search_authorized:
+        if (
+            search_trial_number is None
+            or search_seed_index is None
+            or seed != derive_search_training_seed(search_trial_number, search_seed_index)
+            or target_timesteps != config.training.search_timesteps_per_seed
+            or selected_hyperparameters.rollout_length not in {14, 28, 56}
+        ):
+            raise ProductionTrainingError("search seed or budget authorization mismatch")
+    elif seed not in config.training.development_seeds:
         raise ProductionTrainingError("seed is not declared in development_seeds")
+    if target_updates is not None and target_timesteps is not None:
+        raise ProductionTrainingError("training target must use updates or timesteps, not both")
     if target_updates is not None and target_updates < 1:
         raise ProductionTrainingError("target updates must be positive")
+    if target_timesteps is not None and target_timesteps < 1:
+        raise ProductionTrainingError("target timesteps must be positive")
     if maximum_updates_this_run is not None and maximum_updates_this_run < 1:
         raise ProductionTrainingError("invocation update budget must be positive")
     random.seed(seed)
@@ -962,12 +1219,25 @@ def _train_loaded_policy(
     torch.use_deterministic_algorithms(True)
     first_environment = TopstepEntryEnvironment(config, episodes.episodes[0])
     first_observation, _ = first_environment.reset()
-    model = EntryActorCritic(len(first_observation.vector), selected_variant)
-    optimizer = torch.optim.Adam(model.parameters(), lr=_LEARNING_RATE)
+    model = EntryActorCritic(
+        len(first_observation.vector),
+        selected_variant,
+        hidden_width=selected_hyperparameters.hidden_width,
+    )
+    optimizer = torch.optim.Adam(model.parameters(), lr=selected_hyperparameters.learning_rate)
     normalizers = ReturnNormalizers(TICKERS)
     controller = ConstraintController.from_config(config)
     identities = _identities(
-        config, episodes, seed, selected_variant, target_updates, selected_control
+        config,
+        episodes,
+        seed,
+        selected_variant,
+        target_updates,
+        selected_control,
+        hyperparameters=selected_hyperparameters,
+        target_timesteps=target_timesteps,
+        search_trial_number=search_trial_number,
+        search_seed_index=search_seed_index,
     )
     completed = 0
     metrics: list[dict[str, object]] = []
@@ -992,7 +1262,8 @@ def _train_loaded_policy(
     def is_complete() -> bool:
         if target_updates is not None:
             return completed >= target_updates
-        return completed_timesteps >= config.training.development_timesteps_per_seed
+        minimum = target_timesteps or config.training.development_timesteps_per_seed
+        return completed_timesteps >= minimum
 
     if publish and resume:
         pointer = f"checkpoints/update-{completed:06d}"
@@ -1003,7 +1274,7 @@ def _train_loaded_policy(
                 completed,
                 target_updates,
                 completed_timesteps,
-                config.training.development_timesteps_per_seed,
+                target_timesteps or config.training.development_timesteps_per_seed,
                 pointer,
                 is_complete(),
             ),
@@ -1017,7 +1288,17 @@ def _train_loaded_policy(
         outcomes: Counter[str] = Counter()
         episode_metrics: list[dict[str, object]] = []
         episode_transition_groups: list[list[_Transition]] = []
-        for episode in episodes.episodes:
+        rollout_episodes = (
+            episodes.episodes
+            if selected_hyperparameters.rollout_length is None
+            else _search_rollout_episodes(
+                episodes.episodes,
+                selected_hyperparameters.rollout_length,
+                seed=seed,
+                update=completed,
+            )
+        )
+        for episode in rollout_episodes:
             transitions, episode_rollout = _rollout(config, model, episode, selected_control)
             episode_transition_groups.append(transitions)
             ticker_counts[episode.ticker] += 1
@@ -1033,7 +1314,12 @@ def _train_loaded_policy(
             all_transitions,
             episode_costs=[item.cost for item in all_transitions if item.terminal],
             epochs=config.training.ppo_epochs,
-            minibatch_size=config.training.minibatch_size,
+            minibatch_size=selected_hyperparameters.batch_size,
+            gae_lambda=selected_hyperparameters.gae_lambda,
+            clip_range=selected_hyperparameters.clip_range,
+            entropy_coefficient=selected_hyperparameters.entropy_coefficient,
+            value_loss_coefficient=selected_hyperparameters.value_loss_coefficient,
+            max_grad_norm=selected_hyperparameters.max_grad_norm,
         )
         decision_counts = Counter(TICKERS[item.ticker] for item in all_transitions)
         rollouts: dict[str, object] = {
@@ -1075,7 +1361,7 @@ def _train_loaded_policy(
                     completed,
                     target_updates,
                     completed_timesteps,
-                    config.training.development_timesteps_per_seed,
+                    target_timesteps or config.training.development_timesteps_per_seed,
                     pointer,
                     is_complete(),
                 ),
@@ -1094,7 +1380,18 @@ def _train_loaded_policy(
         "completed_updates": completed,
         "target_updates": target_updates,
         "completed_timesteps": completed_timesteps,
-        "minimum_target_timesteps": config.training.development_timesteps_per_seed,
+        "minimum_target_timesteps": target_timesteps
+        or config.training.development_timesteps_per_seed,
+        "timestep_overshoot": (
+            max(
+                0,
+                completed_timesteps
+                - (target_timesteps or config.training.development_timesteps_per_seed),
+            )
+            if target_updates is None
+            else None
+        ),
+        "ppo_hyperparameters": asdict(selected_hyperparameters),
         "identities": identities,
         "gamma": config.reward.gamma,
         "reward_shaping": config.reward.potential_shaping,
@@ -1109,7 +1406,11 @@ def _train_loaded_policy(
         "metrics": metrics,
     }
     if publish and status == "complete":
-        reloaded = EntryActorCritic(len(first_observation.vector), selected_variant)
+        reloaded = EntryActorCritic(
+            len(first_observation.vector),
+            selected_variant,
+            hidden_width=selected_hyperparameters.hidden_width,
+        )
         checkpoint_payload = _recover_checkpoint(output, identities)
         reloaded.load_state_dict(cast(dict[str, Any], checkpoint_payload["model"]))
         with torch.no_grad():
@@ -1139,11 +1440,15 @@ def train_entry_policy(
     seed: int,
     variant: PolicyVariant | str = PolicyVariant.SHARED_TICKER_VALUE,
     target_updates: int | None = None,
+    target_timesteps: int | None = None,
     maximum_updates_this_run: int | None = None,
     resume: bool = False,
     repository_root: Path | None = None,
     training_control: TrainingControl | str = TrainingControl.NORMAL,
     publish: bool = True,
+    hyperparameters: PpoHyperparameters | None = None,
+    search_trial_number: int | None = None,
+    search_seed_index: int | None = None,
 ) -> dict[str, object]:
     """Load the declared schedule and train one fold/seed through the public seam."""
     episodes = load_training_episodes(config, training_manifest, repository_root)
@@ -1154,10 +1459,14 @@ def train_entry_policy(
         seed=seed,
         variant=variant,
         target_updates=target_updates,
+        target_timesteps=target_timesteps,
         maximum_updates_this_run=maximum_updates_this_run,
         resume=resume,
         publish=publish,
         training_control=training_control,
+        hyperparameters=hyperparameters,
+        search_trial_number=search_trial_number,
+        search_seed_index=search_seed_index,
     )
 
 
@@ -1471,9 +1780,11 @@ def train_policy_seeds(
 
 __all__ = [
     "PolicyVariant",
+    "PpoHyperparameters",
     "ProductionTrainingError",
     "TrainingControl",
     "TrainingEpisodes",
+    "derive_search_training_seed",
     "load_training_episodes",
     "train_entry_policy",
     "train_policy_seeds",

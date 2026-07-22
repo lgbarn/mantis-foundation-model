@@ -71,6 +71,10 @@ from mantis_v2.pipeline import (
 from mantis_v2.rl_account import RlAccountError, write_account_replay_manifest
 from mantis_v2.rl_config import load_rl_config
 from mantis_v2.rl_episodes import EpisodeContractError, build_episode_manifest
+from mantis_v2.rl_optuna import (
+    OptunaSearchError,
+    run_production_optuna_study,
+)
 from mantis_v2.rl_provenance import RlProvenanceError, write_rl_dry_run_manifest
 from mantis_v2.rl_smoke import RlSmokeError, run_maskable_ppo_smoke
 from mantis_v2.rl_training import (
@@ -150,6 +154,7 @@ def _parser() -> argparse.ArgumentParser:
         "rl-validate-environment",
         "rl-smoke",
         "rl-train",
+        "rl-optuna-search",
         "runpod-image-self-check",
         *_CORPUS_COMMANDS,
         *_DOWNSTREAM_COMMANDS,
@@ -189,6 +194,16 @@ def _parser() -> argparse.ArgumentParser:
             child.add_argument("--resume", action="store_true")
             child.add_argument("--target-updates", type=int)
             child.add_argument("--maximum-updates-this-run", type=int)
+        if command == "rl-optuna-search":
+            child.add_argument("--training-manifest", required=True, type=Path)
+            child.add_argument("--validation-manifest", required=True, type=Path)
+            child.add_argument("--output", required=True, type=Path)
+            child.add_argument("--study-name", required=True)
+            child.add_argument(
+                "--variant",
+                choices=tuple(variant.value for variant in PolicyVariant),
+                default=PolicyVariant.SHARED_TICKER_VALUE.value,
+            )
         if command in _DOWNSTREAM_COMMANDS:
             child.add_argument(
                 "--set",
@@ -507,6 +522,15 @@ def main() -> None:
                 maximum_updates_this_run=args.maximum_updates_this_run,
                 resume=args.resume,
             )
+        elif args.command == "rl-optuna-search":
+            result = run_production_optuna_study(
+                load_rl_config(args.config),
+                args.training_manifest,
+                args.validation_manifest,
+                args.output,
+                study_name=args.study_name,
+                variant=PolicyVariant(args.variant),
+            )
         elif args.command == "rl-smoke":
             result = run_maskable_ppo_smoke(
                 load_rl_config(args.config), args.output, resume=args.resume
@@ -576,6 +600,7 @@ def main() -> None:
         RlProvenanceError,
         RlSmokeError,
         ProductionTrainingError,
+        OptunaSearchError,
         EpisodeContractError,
         EnvironmentValidationError,
         DownstreamPipelineError,
