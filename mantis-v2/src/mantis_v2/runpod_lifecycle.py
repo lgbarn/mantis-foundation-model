@@ -13,6 +13,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Protocol
 
+from mantis_v2.runpod_rest_adapter import OPENAPI_IDENTITY, OPENAPI_SHA256, OPENAPI_VERSION
+
 Clock = Callable[[], datetime]
 
 
@@ -67,18 +69,30 @@ def _payload_digest(payload: Mapping[str, object]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _validate_launch_decision(decision: Mapping[str, object]) -> str:
-    if decision.get("schema_version") != 1 or decision.get("allowed") is not True:
-        raise LifecycleError("launch_not_approved")
+def _validate_decision_digest(decision: Mapping[str, object]) -> str:
     decision_digest = _required_string(decision.get("decision_digest"), "decision_digest")
     if not re.fullmatch(r"[0-9a-f]{64}", decision_digest):
         raise LifecycleError("invalid_launch_decision:decision_digest")
+    unsigned = {key: value for key, value in decision.items() if key != "decision_digest"}
+    if _payload_digest(unsigned) != decision_digest:
+        raise LifecycleError("invalid_launch_decision:decision_digest")
+    return decision_digest
+
+
+def _validate_launch_decision(decision: Mapping[str, object], evaluated_at: datetime) -> str:
+    if decision.get("schema_version") != 1 or decision.get("allowed") is not True:
+        raise LifecycleError("launch_not_approved")
+    decision_digest = _validate_decision_digest(decision)
+    local_digest = _required_string(decision.get("local_digest"), "local_digest")
+    if not re.fullmatch(r"[0-9a-f]{64}", local_digest):
+        raise LifecycleError("invalid_launch_decision:local_digest")
     for field in (
         "run_name",
         "gpu_type",
         "datacenter_id",
         "image_ref",
         "template_id",
+        "registry_auth_id",
         "volume_id",
         "volume_mount_path",
     ):
@@ -97,6 +111,20 @@ def _validate_launch_decision(decision: Mapping[str, object]) -> str:
     mount_path = str(decision["volume_mount_path"])
     if not mount_path.startswith("/") or ".." in mount_path.split("/"):
         raise LifecycleError("invalid_launch_decision:volume_mount_path")
+    ports = decision.get("ports")
+    if (
+        not isinstance(ports, list)
+        or ports != ["22/tcp"]
+        or any(not isinstance(port, str) for port in ports)
+    ):
+        raise LifecycleError("invalid_launch_decision:ports")
+    for field, expected in (
+        ("openapi_identity", OPENAPI_IDENTITY),
+        ("openapi_version", OPENAPI_VERSION),
+        ("openapi_sha256", OPENAPI_SHA256),
+    ):
+        if decision.get(field) != expected:
+            raise LifecycleError(f"invalid_launch_decision:{field}")
     _required_decimal(
         decision.get("observed_price_usd_per_gpu_hour"),
         "observed_price_usd_per_gpu_hour",
@@ -110,6 +138,16 @@ def _validate_launch_decision(decision: Mapping[str, object]) -> str:
     )
     if not re.fullmatch(r"[0-9a-f]{64}", authorization_digest):
         raise LifecycleError("invalid_launch_decision:authorization_digest")
+    try:
+        expires_at = datetime.fromisoformat(
+            _required_string(
+                decision.get("authorization_expires_at"), "authorization_expires_at"
+            ).replace("Z", "+00:00")
+        ).astimezone(UTC)
+    except ValueError as exc:
+        raise LifecycleError("invalid_launch_decision:authorization_expires_at") from exc
+    if expires_at <= evaluated_at:
+        raise LifecycleError("authorization_expired")
     return decision_digest
 
 
@@ -151,8 +189,36 @@ def _acquire_lock(state_root: Path, name: str = "launch.lock") -> tuple[int, Pat
 
 
 def _has_open_receipt(state_root: Path) -> bool:
-    receipt_dir = state_root / "receipts" / "pods"
-    return receipt_dir.is_dir() and any(receipt_dir.glob("*.json"))
+    termination_dir = state_root / "receipts" / "terminations"
+    return any(
+        not (termination_dir / receipt.name).exists()
+        for receipt in _pod_control_receipt_paths(state_root)
+    )
+
+
+def _pod_control_receipt_paths(state_root: Path) -> tuple[Path, ...]:
+    receipts = state_root / "receipts"
+    return tuple(
+        path for kind in ("pods", "quarantine") for path in (receipts / kind).glob("*.json")
+    )
+
+
+def _has_unresolved_launch_attempt(state_root: Path) -> bool:
+    attempt_dir = state_root / "attempts"
+    if not attempt_dir.is_dir():
+        return False
+    resolved = {
+        str(_read_receipt(path, path.stem).get("decision_digest"))
+        for path in _pod_control_receipt_paths(state_root)
+    }
+    return any(path.stem not in resolved for path in attempt_dir.glob("*.json"))
+
+
+def _authorization_consumed(state_root: Path, authorization_digest: str) -> bool:
+    return any(
+        _read_receipt(path, path.stem).get("authorization_digest") == authorization_digest
+        for path in _pod_control_receipt_paths(state_root)
+    )
 
 
 def _read_receipt(path: Path, expected_pod_id: str) -> dict[str, object]:
@@ -163,6 +229,14 @@ def _read_receipt(path: Path, expected_pod_id: str) -> dict[str, object]:
     if not isinstance(loaded, dict) or loaded.get("pod_id") != expected_pod_id:
         raise LifecycleError("invalid_receipt")
     return loaded
+
+
+def _read_pod_control_receipt(state_root: Path, pod_id: str) -> dict[str, object]:
+    for kind in ("pods", "quarantine"):
+        path = state_root / "receipts" / kind / f"{pod_id}.json"
+        if path.exists():
+            return _read_receipt(path, pod_id)
+    raise LifecycleError("invalid_receipt")
 
 
 def _pod_identity(pod_id: str) -> str:
@@ -226,8 +300,58 @@ def _pod_receipt(
     }
 
 
+def _publish_quarantine_receipt(
+    state_root: Path,
+    decision: Mapping[str, object],
+    provider_pod: Mapping[str, object],
+    *,
+    started_at: datetime,
+    deadline: datetime,
+    failure: LifecycleError,
+) -> None:
+    if provider_pod.get("name") != decision.get("run_name"):
+        return
+    try:
+        pod_id = _pod_identity(_required_string(provider_pod.get("id"), "provider.id"))
+    except LifecycleError:
+        return
+    receipt: dict[str, object] = {
+        "schema_version": 1,
+        "pod_id": pod_id,
+        "run_name": decision["run_name"],
+        "decision_digest": decision["decision_digest"],
+        "image_ref": decision["image_ref"],
+        "template_id": decision["template_id"],
+        "volume_id": decision["volume_id"],
+        "vcpu": decision["vcpu"],
+        "ram_gb": decision["ram_gb"],
+        "stage": decision["stage"],
+        "authorization_digest": decision["authorization_digest"],
+        "reserved_spend_usd": str(
+            _required_decimal(decision.get("projected_spend_usd"), "projected_spend_usd")
+        ),
+        "spend_state": "reserved",
+        "started_at": started_at.isoformat().replace("+00:00", "Z"),
+        "deadline": deadline.isoformat().replace("+00:00", "Z"),
+        "status": "QUARANTINED",
+        "validation_failure": str(failure),
+    }
+    _publish_json(state_root / "receipts" / "quarantine" / f"{pod_id}.json", receipt)
+
+
 def _receipt_for_decision(state_root: Path, decision_digest: str) -> dict[str, object] | None:
     receipt_dir = state_root / "receipts" / "pods"
+    if not receipt_dir.is_dir():
+        return None
+    for receipt_path in receipt_dir.glob("*.json"):
+        loaded = _read_receipt(receipt_path, receipt_path.stem)
+        if loaded.get("decision_digest") == decision_digest:
+            return loaded
+    return None
+
+
+def _quarantine_for_decision(state_root: Path, decision_digest: str) -> dict[str, object] | None:
+    receipt_dir = state_root / "receipts" / "quarantine"
     if not receipt_dir.is_dir():
         return None
     for receipt_path in receipt_dir.glob("*.json"):
@@ -264,15 +388,21 @@ def launch_pod(
     now: Clock,
 ) -> dict[str, object]:
     """Create at most one Pod from an approved decision and publish its receipt."""
-    decision_digest = _validate_launch_decision(decision)
+    started_at = now().astimezone(UTC)
+    decision_digest = _validate_launch_decision(decision, started_at)
 
     descriptor, lock_path = _acquire_lock(state_root)
     try:
         if _has_open_receipt(state_root):
             raise LifecycleError("live_pod_conflict")
         attempt_dir = state_root / "attempts"
-        if attempt_dir.is_dir() and any(attempt_dir.glob("*.json")):
+        if _has_unresolved_launch_attempt(state_root):
             raise LifecycleError("launch_reconciliation_required")
+        authorization_digest = _required_string(
+            decision.get("authorization_digest"), "authorization_digest"
+        )
+        if _authorization_consumed(state_root, authorization_digest):
+            raise LifecycleError("authorization_replayed")
         inventory = adapter.inventory()
         conflicts = _mantis_conflicts(
             inventory, _required_string(decision.get("run_name"), "run_name")
@@ -280,7 +410,6 @@ def launch_pod(
         if conflicts:
             raise LifecycleError("live_pod_conflict", {"pods": conflicts})
 
-        started_at = now().astimezone(UTC)
         duration = _required_int(
             decision.get("maximum_duration_seconds"), "maximum_duration_seconds"
         )
@@ -291,9 +420,6 @@ def launch_pod(
         stage = _required_string(decision.get("stage"), "stage")
         if stage not in {"qualification", "production", "recovery"}:
             raise LifecycleError("invalid_launch_decision:stage")
-        authorization_digest = _required_string(
-            decision.get("authorization_digest"), "authorization_digest"
-        )
         if not re.fullmatch(r"[0-9a-f]{64}", authorization_digest):
             raise LifecycleError("invalid_launch_decision:authorization_digest")
         attempt_path = attempt_dir / f"{decision_digest}.json"
@@ -318,7 +444,18 @@ def launch_pod(
             raise LifecycleError("provider_create_outcome_unknown") from exc
         if not isinstance(created, Mapping):
             raise LifecycleError("incomplete_provider_response:create")
-        receipt = _pod_receipt(decision, created, started_at=started_at, deadline=deadline)
+        try:
+            receipt = _pod_receipt(decision, created, started_at=started_at, deadline=deadline)
+        except LifecycleError as exc:
+            _publish_quarantine_receipt(
+                state_root,
+                decision,
+                created,
+                started_at=started_at,
+                deadline=deadline,
+                failure=exc,
+            )
+            raise
         pod_id = str(receipt["pod_id"])
         _publish_json(state_root / "receipts" / "pods" / f"{pod_id}.json", receipt)
         return receipt
@@ -335,7 +472,12 @@ def reconcile_launch(
     now: Clock,
 ) -> dict[str, object]:
     """Bind an uncertain create outcome to fresh inventory without retrying create."""
-    decision_digest = _required_string(decision.get("decision_digest"), "decision_digest")
+    decision_digest = _validate_decision_digest(decision)
+    quarantine = _quarantine_for_decision(state_root, decision_digest)
+    if quarantine is not None:
+        raise LifecycleError(
+            "provider_create_requires_termination", {"pod_id": quarantine["pod_id"]}
+        )
     existing = _receipt_for_decision(state_root, decision_digest)
     if existing is not None:
         return existing
@@ -345,6 +487,11 @@ def reconcile_launch(
         existing = _receipt_for_decision(state_root, decision_digest)
         if existing is not None:
             return existing
+        quarantine = _quarantine_for_decision(state_root, decision_digest)
+        if quarantine is not None:
+            raise LifecycleError(
+                "provider_create_requires_termination", {"pod_id": quarantine["pod_id"]}
+            )
         attempt_path = state_root / "attempts" / f"{decision_digest}.json"
         try:
             attempt = json.loads(attempt_path.read_text())
@@ -364,7 +511,18 @@ def reconcile_launch(
             raise LifecycleError("provider_create_outcome_unresolved")
         if len(matches) != 1:
             raise LifecycleError("live_pod_conflict")
-        receipt = _pod_receipt(decision, matches[0], started_at=started_at, deadline=deadline)
+        try:
+            receipt = _pod_receipt(decision, matches[0], started_at=started_at, deadline=deadline)
+        except LifecycleError as exc:
+            _publish_quarantine_receipt(
+                state_root,
+                decision,
+                matches[0],
+                started_at=started_at,
+                deadline=deadline,
+                failure=exc,
+            )
+            raise
         receipt["reconciled_at"] = now().astimezone(UTC).isoformat().replace("+00:00", "Z")
         pod_id = str(receipt["pod_id"])
         _publish_json(state_root / "receipts" / "pods" / f"{pod_id}.json", receipt)
@@ -384,9 +542,7 @@ def pod_status(
 ) -> dict[str, object]:
     """Return an allowlisted status for one receipt-bound Pod and run identity."""
     exact_pod_id = _pod_identity(pod_id)
-    pod_receipt = _read_receipt(
-        state_root / "receipts" / "pods" / f"{exact_pod_id}.json", exact_pod_id
-    )
+    pod_receipt = _read_pod_control_receipt(state_root, exact_pod_id)
     if pod_receipt.get("run_name") != run_name:
         raise LifecycleError("run_identity_mismatch")
     try:
@@ -402,13 +558,14 @@ def pod_status(
         cost_per_hour = Decimal(str(provider_status["costPerHr"]))
     except (KeyError, InvalidOperation, ValueError) as exc:
         raise LifecycleError("incomplete_provider_response:status.costPerHr") from exc
-    uptime_seconds = provider_status.get("uptimeSeconds")
-    if (
-        not isinstance(uptime_seconds, int)
-        or isinstance(uptime_seconds, bool)
-        or uptime_seconds < 0
-    ):
-        raise LifecycleError("incomplete_provider_response:status.uptimeSeconds")
+    observed_at = now().astimezone(UTC)
+    try:
+        started_at = datetime.fromisoformat(
+            str(pod_receipt["started_at"]).replace("Z", "+00:00")
+        ).astimezone(UTC)
+    except (KeyError, ValueError) as exc:
+        raise LifecycleError("invalid_receipt") from exc
+    uptime_seconds = max(0, int((observed_at - started_at).total_seconds()))
     return {
         "schema_version": 1,
         "pod_id": exact_pod_id,
@@ -417,7 +574,7 @@ def pod_status(
         "desired_status": desired_status,
         "cost_per_hour_usd": str(cost_per_hour),
         "uptime_seconds": uptime_seconds,
-        "observed_at": now().astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
     }
 
 
@@ -491,9 +648,7 @@ def terminate_pod(
 ) -> dict[str, object]:
     """Terminate one receipt-bound exact Pod/run pair, idempotently."""
     exact_pod_id = _pod_identity(pod_id)
-    pod_receipt = _read_receipt(
-        state_root / "receipts" / "pods" / f"{exact_pod_id}.json", exact_pod_id
-    )
+    pod_receipt = _read_pod_control_receipt(state_root, exact_pod_id)
     if pod_receipt.get("run_name") != run_name:
         raise LifecycleError("run_identity_mismatch")
     return _terminate_receipted(
@@ -515,9 +670,7 @@ def reconcile_termination(
 ) -> dict[str, object]:
     """Resolve an uncertain termination through fresh provider inventory."""
     exact_pod_id = _pod_identity(pod_id)
-    pod_receipt = _read_receipt(
-        state_root / "receipts" / "pods" / f"{exact_pod_id}.json", exact_pod_id
-    )
+    pod_receipt = _read_pod_control_receipt(state_root, exact_pod_id)
     if pod_receipt.get("run_name") != run_name:
         raise LifecycleError("run_identity_mismatch")
     termination_path = state_root / "receipts" / "terminations" / f"{exact_pod_id}.json"
@@ -575,9 +728,7 @@ def reconcile_spend(
 ) -> dict[str, object]:
     """Move reserved spend to actual only from receipt-backed billing evidence."""
     exact_pod_id = _pod_identity(pod_id)
-    pod_receipt = _read_receipt(
-        state_root / "receipts" / "pods" / f"{exact_pod_id}.json", exact_pod_id
-    )
+    pod_receipt = _read_pod_control_receipt(state_root, exact_pod_id)
     if pod_receipt.get("run_name") != run_name:
         raise LifecycleError("run_identity_mismatch")
     termination_path = state_root / "receipts" / "terminations" / f"{exact_pod_id}.json"
@@ -639,9 +790,7 @@ def enforce_deadline(
 ) -> dict[str, object]:
     """Terminate one exact Pod after its durable deadline, idempotently."""
     exact_pod_id = _pod_identity(pod_id)
-    pod_receipt = _read_receipt(
-        state_root / "receipts" / "pods" / f"{exact_pod_id}.json", exact_pod_id
-    )
+    pod_receipt = _read_pod_control_receipt(state_root, exact_pod_id)
     try:
         deadline = datetime.fromisoformat(str(pod_receipt["deadline"]).replace("Z", "+00:00"))
     except (KeyError, ValueError) as exc:

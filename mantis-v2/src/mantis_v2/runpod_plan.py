@@ -57,6 +57,24 @@ class LaunchDecision:
     maximum_duration_seconds: int
     projected_spend_usd: Decimal | None
     authorization_expires_at: datetime | None
+    run_name: str
+    stage: str
+    gpu_type: str
+    gpu_count: int
+    vcpu: int
+    ram_gb: int
+    datacenter_id: str
+    container_disk_gb: int
+    image_ref: str
+    template_id: str
+    registry_auth_id: str
+    volume_id: str
+    volume_mount_path: str
+    ports: tuple[str, ...]
+    observed_price_usd_per_gpu_hour: Decimal | None
+    openapi_identity: str
+    openapi_version: str
+    openapi_sha256: str
     decision_digest: str = ""
 
     def as_json_data(self) -> dict[str, Any]:
@@ -265,6 +283,24 @@ def plan_launch(
         maximum_duration_seconds=intent.maximum_duration_seconds,
         projected_spend_usd=projected_spend,
         authorization_expires_at=authorization.expires_at if authorization else None,
+        run_name=intent.run_name,
+        stage=intent.stage,
+        gpu_type=intent.gpu_type,
+        gpu_count=intent.gpu_count,
+        vcpu=intent.vcpu,
+        ram_gb=intent.ram_gb,
+        datacenter_id=intent.datacenter_id,
+        container_disk_gb=intent.container_disk_gb,
+        image_ref=intent.image_ref,
+        template_id=intent.template_id,
+        registry_auth_id=intent.registry_auth_id,
+        volume_id=intent.volume_id,
+        volume_mount_path=intent.volume_mount_path,
+        ports=intent.ports,
+        observed_price_usd_per_gpu_hour=price,
+        openapi_identity=platform.adapter.openapi_identity,
+        openapi_version=platform.adapter.openapi_version,
+        openapi_sha256=platform.adapter.openapi_sha256,
     )
     return replace(initial, decision_digest=canonical_digest(initial.as_json_data()))
 

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from mantis_v2 import cli
 from mantis_v2.runpod_lifecycle import (
     LifecycleError,
     enforce_deadline,
@@ -20,10 +23,10 @@ from mantis_v2.runpod_lifecycle import (
 
 
 def _approved_decision() -> dict[str, object]:
-    return {
+    decision: dict[str, object] = {
         "schema_version": 1,
         "allowed": True,
-        "decision_digest": "d" * 64,
+        "local_digest": "e" * 64,
         "run_name": "mantisv2-cuda-qualification-seed42",
         "gpu_type": "NVIDIA A40",
         "gpu_count": 1,
@@ -35,12 +38,107 @@ def _approved_decision() -> dict[str, object]:
         "projected_spend_usd": "0.88",
         "stage": "qualification",
         "authorization_digest": "b" * 64,
+        "authorization_expires_at": "2026-07-21T12:10:00Z",
         "observed_price_usd_per_gpu_hour": "0.44",
         "image_ref": "registry.example/mantis@sha256:" + "a" * 64,
         "template_id": "template-fixture",
+        "registry_auth_id": "registry-auth-fixture",
         "volume_id": "volume-fixture",
         "volume_mount_path": "/workspace",
+        "ports": ["22/tcp"],
+        "openapi_identity": "https://rest.runpod.io/v1/openapi.json",
+        "openapi_version": "v1",
+        "openapi_sha256": "f4be55173a5392150d805d103b1ee3aeff23defec40052dd3188d606ddedddfc",
     }
+    decision["decision_digest"] = hashlib.sha256(
+        json.dumps(decision, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return decision
+
+
+def test_tampered_approved_decision_is_rejected_before_provider_access(tmp_path: Path) -> None:
+    decision = _approved_decision()
+    decision["gpu_count"] = 2
+
+    class UntouchedAdapter:
+        def inventory(self) -> list[dict[str, object]]:
+            raise AssertionError("provider must not be accessed")
+
+    with pytest.raises(LifecycleError, match="^invalid_launch_decision:decision_digest$"):
+        launch_pod(
+            decision=decision,
+            state_root=tmp_path / "state",
+            adapter=UntouchedAdapter(),
+            now=lambda: datetime(2026, 7, 21, 12, 0, tzinfo=UTC),
+        )
+
+
+def test_expired_decision_is_rejected_before_provider_access(tmp_path: Path) -> None:
+    class UntouchedAdapter:
+        def inventory(self) -> list[dict[str, object]]:
+            raise AssertionError("provider must not be accessed")
+
+    with pytest.raises(LifecycleError, match="^authorization_expired$"):
+        launch_pod(
+            decision=_approved_decision(),
+            state_root=tmp_path / "state",
+            adapter=UntouchedAdapter(),
+            now=lambda: datetime(2026, 7, 21, 12, 10, tzinfo=UTC),
+        )
+
+
+def test_launch_cli_wires_approved_decision_to_receipt_without_secret_output(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    decision = _approved_decision()
+    decision["authorization_expires_at"] = "2099-07-21T12:10:00Z"
+    del decision["decision_digest"]
+    decision["decision_digest"] = hashlib.sha256(
+        json.dumps(decision, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    decision_path = tmp_path / "decision.json"
+    decision_path.write_text(json.dumps(decision))
+
+    class FakeAdapter:
+        def inventory(self) -> list[dict[str, object]]:
+            return []
+
+        def create(self, submitted: dict[str, object], deadline: datetime) -> dict[str, object]:
+            return {
+                "id": "pod-cli",
+                "name": submitted["run_name"],
+                "desiredStatus": "RUNNING",
+                "imageName": submitted["image_ref"],
+                "templateId": submitted["template_id"],
+                "networkVolumeId": submitted["volume_id"],
+                "costPerHr": 0.44,
+                "vcpuCount": 8,
+                "memoryInGb": 32,
+            }
+
+    monkeypatch.setattr(
+        cli,
+        "_live_adapter",
+        lambda path, *, expected_local_digest=None: (tmp_path / "state", FakeAdapter()),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "mantis-v2",
+            "runpod-launch",
+            "--decision",
+            str(decision_path),
+            "--local",
+            str(tmp_path / "local.toml"),
+        ],
+    )
+
+    cli.main()
+
+    output = capsys.readouterr().out
+    assert json.loads(output)["pod_id"] == "pod-cli"
+    assert "RUNPOD_API_KEY" not in output
 
 
 def test_concurrent_launches_create_once_and_publish_one_receipt(tmp_path: Path) -> None:
@@ -261,6 +359,64 @@ def test_partial_create_reconciles_from_inventory_without_retry(tmp_path: Path) 
     assert first["decision_digest"] == decision["decision_digest"]
 
 
+def test_reconcile_rejects_unvalidated_digest_before_path_or_provider_access(
+    tmp_path: Path,
+) -> None:
+    decision = _approved_decision()
+    decision["decision_digest"] = "../outside"
+
+    class UntouchedAdapter:
+        def inventory(self) -> list[dict[str, object]]:
+            raise AssertionError("provider must not be accessed")
+
+    with pytest.raises(LifecycleError, match="^invalid_launch_decision:decision_digest$"):
+        reconcile_launch(
+            decision=decision,
+            state_root=tmp_path / "state",
+            adapter=UntouchedAdapter(),
+            now=lambda: datetime(2026, 7, 21, 12, 1, tzinfo=UTC),
+        )
+
+    assert not (tmp_path / "outside.json").exists()
+
+
+def test_reconcile_rejects_decision_altered_after_unknown_create(tmp_path: Path) -> None:
+    class UnknownAdapter:
+        def __init__(self) -> None:
+            self.inventory_calls = 0
+
+        def inventory(self) -> list[dict[str, object]]:
+            self.inventory_calls += 1
+            if self.inventory_calls > 1:
+                raise AssertionError("reconcile provider access must not occur")
+            return []
+
+        def create(self, decision: dict[str, object], deadline: datetime) -> dict[str, object]:
+            raise TimeoutError("unknown outcome")
+
+    adapter = UnknownAdapter()
+    state_root = tmp_path / "state"
+    decision = _approved_decision()
+    with pytest.raises(LifecycleError, match="^provider_create_outcome_unknown$"):
+        launch_pod(
+            decision=decision,
+            state_root=state_root,
+            adapter=adapter,
+            now=lambda: datetime(2026, 7, 21, 12, 0, tzinfo=UTC),
+        )
+    decision["volume_id"] = "altered-volume"
+
+    with pytest.raises(LifecycleError, match="^invalid_launch_decision:decision_digest$"):
+        reconcile_launch(
+            decision=decision,
+            state_root=state_root,
+            adapter=adapter,
+            now=lambda: datetime(2026, 7, 21, 12, 1, tzinfo=UTC),
+        )
+
+    assert adapter.inventory_calls == 1
+
+
 @pytest.mark.parametrize(
     ("pod", "ownership"),
     [
@@ -452,6 +608,73 @@ def test_manual_terminate_requires_exact_run_and_is_idempotent(tmp_path: Path) -
     assert first["reason"] == "operator_requested"
 
 
+def test_terminated_pod_allows_new_authorization_but_rejects_replay(tmp_path: Path) -> None:
+    class SequentialAdapter:
+        def __init__(self) -> None:
+            self.create_calls = 0
+
+        def inventory(self) -> list[dict[str, object]]:
+            return []
+
+        def create(self, decision: dict[str, object], deadline: datetime) -> dict[str, object]:
+            self.create_calls += 1
+            return {
+                "id": f"pod-sequence-{self.create_calls}",
+                "name": decision["run_name"],
+                "desiredStatus": "RUNNING",
+                "imageName": decision["image_ref"],
+                "templateId": decision["template_id"],
+                "networkVolumeId": decision["volume_id"],
+                "costPerHr": 0.44,
+                "vcpuCount": 8,
+                "memoryInGb": 32,
+            }
+
+        def terminate(self, pod_id: str) -> dict[str, object]:
+            return {"deleted": True, "id": pod_id}
+
+    adapter = SequentialAdapter()
+    state_root = tmp_path / "state"
+    decision = _approved_decision()
+    first = launch_pod(
+        decision=decision,
+        state_root=state_root,
+        adapter=adapter,
+        now=lambda: datetime(2026, 7, 21, 12, 0, tzinfo=UTC),
+    )
+    terminate_pod(
+        pod_id=str(first["pod_id"]),
+        run_name=str(decision["run_name"]),
+        state_root=state_root,
+        adapter=adapter,
+        now=lambda: datetime(2026, 7, 21, 12, 5, tzinfo=UTC),
+    )
+
+    with pytest.raises(LifecycleError, match="^authorization_replayed$"):
+        launch_pod(
+            decision=decision,
+            state_root=state_root,
+            adapter=adapter,
+            now=lambda: datetime(2026, 7, 21, 12, 6, tzinfo=UTC),
+        )
+
+    next_decision = dict(decision)
+    next_decision["authorization_digest"] = "c" * 64
+    del next_decision["decision_digest"]
+    next_decision["decision_digest"] = hashlib.sha256(
+        json.dumps(next_decision, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    second = launch_pod(
+        decision=next_decision,
+        state_root=state_root,
+        adapter=adapter,
+        now=lambda: datetime(2026, 7, 21, 12, 7, tzinfo=UTC),
+    )
+
+    assert second["pod_id"] == "pod-sequence-2"
+    assert adapter.create_calls == 2
+
+
 def test_unknown_terminate_reconciles_absence_without_retry(tmp_path: Path) -> None:
     decision = _approved_decision()
 
@@ -635,6 +858,7 @@ def test_create_price_drift_fails_closed_without_second_create(tmp_path: Path) -
     class PriceDriftAdapter:
         def __init__(self) -> None:
             self.create_calls = 0
+            self.terminate_calls: list[str] = []
 
         def inventory(self) -> list[dict[str, object]]:
             return []
@@ -653,6 +877,10 @@ def test_create_price_drift_fails_closed_without_second_create(tmp_path: Path) -
                 "memoryInGb": 32,
             }
 
+        def terminate(self, pod_id: str) -> dict[str, object]:
+            self.terminate_calls.append(pod_id)
+            return {"deleted": True, "id": pod_id}
+
     adapter = PriceDriftAdapter()
     state_root = tmp_path / "state"
     with pytest.raises(LifecycleError, match="^provider_price_mismatch$"):
@@ -662,21 +890,96 @@ def test_create_price_drift_fails_closed_without_second_create(tmp_path: Path) -
             adapter=adapter,
             now=lambda: datetime(2026, 7, 21, 12, 0, tzinfo=UTC),
         )
-    with pytest.raises(LifecycleError, match="^launch_reconciliation_required$"):
+    quarantine_path = state_root / "receipts" / "quarantine" / "pod-price-drift.json"
+    quarantine = json.loads(quarantine_path.read_text())
+    assert quarantine["status"] == "QUARANTINED"
+    assert quarantine["validation_failure"] == "provider_price_mismatch"
+    with pytest.raises(LifecycleError, match="^live_pod_conflict$"):
         launch_pod(
             decision=decision,
             state_root=state_root,
             adapter=adapter,
             now=lambda: datetime(2026, 7, 21, 12, 1, tzinfo=UTC),
         )
+    with pytest.raises(LifecycleError, match="^provider_create_requires_termination$"):
+        reconcile_launch(
+            decision=decision,
+            state_root=state_root,
+            adapter=adapter,
+            now=lambda: datetime(2026, 7, 21, 12, 2, tzinfo=UTC),
+        )
+    termination = terminate_pod(
+        pod_id="pod-price-drift",
+        run_name=str(decision["run_name"]),
+        state_root=state_root,
+        adapter=adapter,
+        now=lambda: datetime(2026, 7, 21, 12, 3, tzinfo=UTC),
+    )
 
     assert adapter.create_calls == 1
+    assert adapter.terminate_calls == ["pod-price-drift"]
+    assert termination["provider_deleted"] is True
     assert not (state_root / "receipts" / "pods").exists()
+
+
+def test_mismatched_provider_name_cannot_authorize_quarantine_termination(
+    tmp_path: Path,
+) -> None:
+    decision = _approved_decision()
+
+    class WrongIdentityAdapter:
+        def __init__(self) -> None:
+            self.terminate_calls = 0
+
+        def inventory(self) -> list[dict[str, object]]:
+            return []
+
+        def create(self, submitted: dict[str, object], deadline: datetime) -> dict[str, object]:
+            return {
+                "id": "pod-unrelated",
+                "name": "someone-elses-pod",
+                "desiredStatus": "RUNNING",
+                "imageName": decision["image_ref"],
+                "templateId": decision["template_id"],
+                "networkVolumeId": decision["volume_id"],
+                "costPerHr": 0.44,
+                "vcpuCount": 8,
+                "memoryInGb": 32,
+            }
+
+        def terminate(self, pod_id: str) -> dict[str, object]:
+            self.terminate_calls += 1
+            return {"deleted": True, "id": pod_id}
+
+    adapter = WrongIdentityAdapter()
+    state_root = tmp_path / "state"
+    with pytest.raises(LifecycleError, match="^incomplete_provider_response:create.name$"):
+        launch_pod(
+            decision=decision,
+            state_root=state_root,
+            adapter=adapter,
+            now=lambda: datetime(2026, 7, 21, 12, 0, tzinfo=UTC),
+        )
+
+    assert not (state_root / "receipts" / "quarantine").exists()
+    with pytest.raises(LifecycleError, match="^invalid_receipt$"):
+        terminate_pod(
+            pod_id="pod-unrelated",
+            run_name=str(decision["run_name"]),
+            state_root=state_root,
+            adapter=adapter,
+            now=lambda: datetime(2026, 7, 21, 12, 1, tzinfo=UTC),
+        )
+    assert adapter.terminate_calls == 0
 
 
 def test_incomplete_decision_is_rejected_before_provider_access(tmp_path: Path) -> None:
     decision = _approved_decision()
     del decision["template_id"]
+    del decision["decision_digest"]
+    decision["decision_digest"] = hashlib.sha256(
+        json.dumps(decision, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
     class UntouchedAdapter:
         def __init__(self) -> None:

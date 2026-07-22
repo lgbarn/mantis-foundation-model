@@ -15,10 +15,14 @@ a provider resource. Inputs are strict and versioned:
 - An Experiment Config binds one portable scientific definition. The example
   file uses a placeholder definition digest and is not production authority.
 - `configs/local.example.toml` documents the ignored machine mapping. Copy it
-  to `infra/runpod/local.toml` and replace the paths; that filename is ignored.
+  to `infra/runpod/local.toml` and replace the controller hostname and paths;
+  that filename is ignored. Live commands reject every other host before
+  reading the API credential.
 - Launch Intent, Inventory Snapshot, Spend Ledger, and optional Launch
-  Authorization are explicit JSON inputs. The files under `examples/` are
-  deterministic synthetic fixtures, not current inventory or authorization.
+  Authorization are explicit JSON inputs. Launch Intent pins the digest image,
+  template, scoped registry-auth object, volume mount, and sole `22/tcp` port.
+  The files under `examples/` are deterministic synthetic fixtures, not current
+  inventory or authorization.
 
 The rejection dry run below is deliberately historical and synthetic. It is
 safe to execute because the Inventory Snapshot is a file, not a live query:
@@ -52,12 +56,34 @@ just runpod-plan-authorized \
   <authorization> <evaluated-at> <new-output>
 ```
 
-Authorization is exact, expiring, and single-use. A changed config, local
+Authorization is exact, expiring, and single-use. The decision binds the
+official REST v1 OpenAPI identity, version, and reviewed SHA-256 recorded in
+`platform-v1.toml`; runtime schema retrieval is forbidden. A changed config, local
 controller mapping, intent, price/inventory observation, ledger/reservation
 state, duration, spend ceiling, expiry, or consumed authorization digest rejects
-the decision. Issue #31 will own consumption, reservation mutation, provider
-inventory collection, and Pod lifecycle; this planner owns none of those side
-effects.
+the decision. The lifecycle commands consume the approved decision, while the
+planner itself remains side-effect free.
+
+## Pod lifecycle
+
+`just runpod-launch <decision> <local>` is the only create path. It validates
+the content digest, approved local-config digest, controller hostname, and
+unexpired authorization before provider access. It takes the approved lock,
+reads fresh Pod inventory, writes a create attempt, and performs exactly one
+`POST /v1/pods`. An unknown outcome requires
+`runpod-reconcile-launch`; never repeat launch.
+
+Use `runpod-status`, `runpod-terminate`, `runpod-reconcile-termination`,
+`runpod-enforce-deadline`, and `runpod-reconcile-spend` with the exact receipt
+identity. Receipts under the configured local state root are authoritative.
+Termination is idempotent, billing lag remains pending, and provider payloads
+are reduced to an allowlist so API keys, registry data, environment variables,
+and SSH material cannot enter command output. These commands make real API
+requests and launch/termination can change paid resources; fixture tests inject
+a no-network transport. A known Pod that fails create-response validation is
+recorded separately as `QUARANTINED`: it blocks another launch and remains
+eligible for exact deadline enforcement and termination, but is never presented
+as an approved Pod Receipt.
 
 ## Stable Terraform resources
 
@@ -74,9 +100,9 @@ and private Pod template; it cannot own a Pod.
   private Pod template.
 - A pinned container image owns CUDA, Python, `uv`, system packages, and the
   repository runtime environment.
-- A small pinned `runpodctl` adapter owns exact Pod launch and termination until
-  the official Terraform provider forwards and verifies the required GPU,
-  CPU/RAM, registry, startup-command, and deadline fields.
+- A pinned official REST v1 adapter owns exact Pod launch, status, billing, and
+  termination. It sends the approved GPU, CPU/RAM, registry, storage, template,
+  and port fields and normalizes only reviewed response fields.
 - Ansible is not part of the baseline. Add it only if a measured requirement
   for mutable, long-lived host configuration emerges.
 

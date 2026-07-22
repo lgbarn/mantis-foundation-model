@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import socket
 import sys
 from collections.abc import Callable
 from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -74,10 +77,21 @@ from mantis_v2.rl_validation import (
     EnvironmentValidationError,
     write_environment_validation,
 )
-from mantis_v2.runpod_config import RunpodConfigError
+from mantis_v2.runpod_config import RunpodConfigError, load_local_config
 from mantis_v2.runpod_image import ImageContractError
 from mantis_v2.runpod_image import self_check as runpod_image_self_check
+from mantis_v2.runpod_lifecycle import (
+    LifecycleError,
+    enforce_deadline,
+    launch_pod,
+    pod_status,
+    reconcile_launch,
+    reconcile_spend,
+    reconcile_termination,
+    terminate_pod,
+)
 from mantis_v2.runpod_plan import LaunchPlanError, write_launch_decision
+from mantis_v2.runpod_rest_adapter import RunpodAdapterError, RunpodRestV1Adapter
 from mantis_v2.runtime import RuntimeContractError
 from mantis_v2.strategy import StrategyContractError
 from mantis_v2.topstep import TopstepContractError
@@ -178,6 +192,23 @@ def _parser() -> argparse.ArgumentParser:
     runpod_plan.add_argument("--authorization", type=Path)
     runpod_plan.add_argument("--evaluated-at", required=True)
     runpod_plan.add_argument("--output", required=True, type=Path)
+    for command in ("runpod-launch", "runpod-reconcile-launch"):
+        lifecycle = subparsers.add_parser(command)
+        lifecycle.add_argument("--decision", required=True, type=Path)
+        lifecycle.add_argument("--local", required=True, type=Path)
+    for command in (
+        "runpod-status",
+        "runpod-terminate",
+        "runpod-reconcile-termination",
+        "runpod-reconcile-spend",
+    ):
+        lifecycle = subparsers.add_parser(command)
+        lifecycle.add_argument("--pod-id", required=True)
+        lifecycle.add_argument("--run-name", required=True)
+        lifecycle.add_argument("--local", required=True, type=Path)
+    deadline = subparsers.add_parser("runpod-enforce-deadline")
+    deadline.add_argument("--pod-id", required=True)
+    deadline.add_argument("--local", required=True, type=Path)
     cuda_probe = subparsers.add_parser("cuda-fp32-probe")
     cuda_probe.add_argument("--config", required=True, type=Path)
     cuda_probe.add_argument("--qualification-config", required=True, type=Path)
@@ -228,6 +259,41 @@ def _inspect(config: PipelineConfig) -> dict[str, Any]:
         "streams": summaries,
         **audit,
     }
+
+
+def _load_json_object(path: Path) -> dict[str, object]:
+    def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate key")
+            result[key] = value
+        return result
+
+    try:
+        loaded = json.loads(path.read_text(), object_pairs_hook=reject_duplicates)
+    except FileNotFoundError as exc:
+        raise LifecycleError("launch_decision_not_found") from exc
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise LifecycleError("invalid_launch_decision:json") from exc
+    if not isinstance(loaded, dict):
+        raise LifecycleError("invalid_launch_decision:json")
+    return loaded
+
+
+def _live_adapter(
+    local_path: Path, *, expected_local_digest: str | None = None
+) -> tuple[Path, RunpodRestV1Adapter]:
+    local = load_local_config(local_path)
+    if socket.gethostname() != local.controller.hostname:
+        raise LifecycleError("controller_host_mismatch")
+    if expected_local_digest is not None and local.digest != expected_local_digest:
+        raise LifecycleError("local_config_mismatch")
+    key_name = local.secrets.runpod_api_key_env
+    api_key = os.environ.get(key_name, "")
+    if not api_key:
+        raise LifecycleError("runpod_api_key_required")
+    return local.paths.state_root, RunpodRestV1Adapter(api_key=api_key)
 
 
 def main() -> None:
@@ -366,6 +432,47 @@ def main() -> None:
                 evaluated_at=args.evaluated_at,
                 output_path=args.output,
             )
+        elif args.command in {"runpod-launch", "runpod-reconcile-launch"}:
+            decision = _load_json_object(args.decision)
+            local_digest = decision.get("local_digest")
+            if not isinstance(local_digest, str):
+                raise LifecycleError("invalid_launch_decision:local_digest")
+            state_root, adapter = _live_adapter(args.local, expected_local_digest=local_digest)
+            operation = launch_pod if args.command == "runpod-launch" else reconcile_launch
+            result = operation(
+                decision=decision,
+                state_root=state_root,
+                adapter=adapter,
+                now=lambda: datetime.now(UTC),
+            )
+        elif args.command in {
+            "runpod-status",
+            "runpod-terminate",
+            "runpod-reconcile-termination",
+            "runpod-reconcile-spend",
+        }:
+            state_root, adapter = _live_adapter(args.local)
+            operations = {
+                "runpod-status": pod_status,
+                "runpod-terminate": terminate_pod,
+                "runpod-reconcile-termination": reconcile_termination,
+                "runpod-reconcile-spend": reconcile_spend,
+            }
+            result = operations[args.command](
+                pod_id=args.pod_id,
+                run_name=args.run_name,
+                state_root=state_root,
+                adapter=adapter,
+                now=lambda: datetime.now(UTC),
+            )
+        elif args.command == "runpod-enforce-deadline":
+            state_root, adapter = _live_adapter(args.local)
+            result = enforce_deadline(
+                pod_id=args.pod_id,
+                state_root=state_root,
+                adapter=adapter,
+                now=lambda: datetime.now(UTC),
+            )
         elif args.command == "tensorboard":
             result = serve_tensorboard(args.run_root, host=args.host, port=args.port)
         elif args.command == "rl-account-replay":
@@ -450,6 +557,8 @@ def main() -> None:
         WalkForwardContractError,
         RunpodConfigError,
         LaunchPlanError,
+        LifecycleError,
+        RunpodAdapterError,
         QualificationError,
         Bf16QualificationError,
         TransferBundleError,
