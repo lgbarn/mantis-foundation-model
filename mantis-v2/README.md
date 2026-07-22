@@ -73,6 +73,7 @@ just runpod-image-build ghcr.io/lgbarn/mantis-v2-cuda:SOURCE_SHA
 just runpod-image-scan ghcr.io/lgbarn/mantis-v2-cuda:SOURCE_SHA reports/image-scan.json
 just runpod-image-self-check \
   ghcr.io/lgbarn/mantis-v2-cuda:SOURCE_SHA reports/runtime-inventory.json
+just qualify-cuda-bf16 fp32.json bf16.json qualification.json
 ```
 
 `gate` includes deterministic synthetic smoke training, evaluation, checkpoint,
@@ -86,6 +87,12 @@ validation batch, with configured validation coverage across all streams.
 validation-selected checkpoint and then exports only if the evaluation gate
 passes. The qualified production path starts from pinned official MantisV2
 weights and runs on Apple MPS.
+
+Foundation precision is a strict experiment identity: `fp32` is the accepted
+default and `bf16` is rejected unless explicit CUDA reports BF16 support. BF16
+uses autocast for forward/loss only, retains FP32 parameters and optimizer
+state, and must pass the registered fixed-fixture, resume, export, and manifest
+gate before promotion. CPU policy tests cannot qualify BF16.
 
 For diagnosis, `just evaluate <config>` and `just export <config>` expose the individual stages. Direct export still enforces the same evaluation gate.
 

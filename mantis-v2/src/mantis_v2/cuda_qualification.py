@@ -842,7 +842,7 @@ def run_probe_and_export(
     if last.get("global_step") != qualification.probe.train_updates:
         raise QualificationError("probe did not complete exactly 32 train updates")
     metadata = _mapping(trained.get("metadata"), "training metadata")
-    if metadata.get("precision") != "float32":
+    if metadata.get("precision") != "fp32":
         raise QualificationError("probe did not execute in FP32")
     validate_trainability(
         TrainabilityEvidence(

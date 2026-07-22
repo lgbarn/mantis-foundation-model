@@ -23,6 +23,7 @@ class FileIdentity:
 @dataclass(frozen=True)
 class Provenance:
     schema_version: int
+    precision: str
     config_digest: str
     dataset_digest: str
     dataset_files: tuple[FileIdentity, ...]
@@ -105,6 +106,7 @@ def build_provenance(
         raise RuntimeError("uv.lock is required for reproducible training")
     return Provenance(
         schema_version=1,
+        precision=config.training.precision,
         config_digest=config.digest,
         dataset_digest=dataset_digest,
         dataset_files=files,

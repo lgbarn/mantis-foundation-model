@@ -272,11 +272,11 @@ The foundation runtime has an explicit CUDA code path:
 
 Important limitations:
 
-- No CUDA config is committed.
-- No CUDA-specific probe is implemented.
 - No batch-size or memory recipe is measured.
 - No multi-GPU or distributed training exists.
-- No mixed precision, autocast, or gradient scaler exists.
+- BF16 autocast exists only as a qualification candidate; no real CUDA BF16
+  evidence has promoted it over FP32.
+- No gradient scaler exists.
 - Downstream embedding does not accept CUDA.
 
 If you qualify CUDA, create a new config and run identity. Start with smoke, verify
@@ -292,10 +292,12 @@ off. Use explicit `device="cuda"` when validating that code path.
 
 The implemented pipeline uses:
 
-- Float32 model and training tensors.
+- Strict `fp32` or `bf16` compute identity in configuration and provenance.
+- Float32 model parameters and optimizer state in both modes.
+- CUDA BF16 autocast for forward and loss computation only after device support
+  is verified.
 - One process and one device.
 - No distributed data parallelism.
-- No mixed-precision training.
 - No `torch.compile`.
 - No remote experiment tracker.
 

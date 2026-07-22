@@ -1,0 +1,17 @@
+schema_version = 1
+precision = "bf16"
+reference_precision = "fp32"
+
+[parity]
+atol = 0.01
+rtol = 0.01
+
+[resume]
+total_updates = 32
+interrupt_after_updates = 16
+atol = 0.01
+rtol = 0.01
+
+[export]
+atol = 0.01
+rtol = 0.01
