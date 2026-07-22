@@ -4,12 +4,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import tomllib
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Literal, cast
+
+from mantis_v2.runpod_rest_adapter import (
+    OPENAPI_IDENTITY,
+    OPENAPI_SHA256,
+    OPENAPI_VERSION,
+    REST_V1_BASE_URL,
+)
 
 
 class RunpodConfigError(ValueError):
@@ -142,6 +150,14 @@ class ProviderConfig:
 
 
 @dataclass(frozen=True)
+class AdapterConfig:
+    base_url: str
+    openapi_identity: str
+    openapi_version: str
+    openapi_sha256: str
+
+
+@dataclass(frozen=True)
 class StorageConfig:
     volume_gb: int
     high_water_bytes: int
@@ -174,6 +190,7 @@ class BudgetConfig:
 class PlatformConfig:
     schema_version: int
     provider: ProviderConfig
+    adapter: AdapterConfig
     storage: StorageConfig
     lifecycle: LifecycleConfig
     billing: BillingConfig
@@ -192,6 +209,11 @@ class LocalPaths:
 
 
 @dataclass(frozen=True)
+class LocalController:
+    hostname: str
+
+
+@dataclass(frozen=True)
 class LocalSecrets:
     runpod_api_key_env: str
     s3_access_key_id_env: str
@@ -201,6 +223,7 @@ class LocalSecrets:
 @dataclass(frozen=True)
 class LocalConfig:
     schema_version: int
+    controller: LocalController
     paths: LocalPaths
     secrets: LocalSecrets
 
@@ -241,8 +264,13 @@ class LaunchIntent:
     vcpu: int
     ram_gb: int
     container_disk_gb: int
+    image_ref: str
+    template_id: str
+    registry_auth_id: str
     volume_id: str
     volume_size_gb: int
+    volume_mount_path: str
+    ports: tuple[str, ...]
     maximum_duration_seconds: int
 
     @property
@@ -320,7 +348,9 @@ def _versioned(raw: dict[str, Any], expected: set[str], context: str) -> dict[st
 
 def load_platform_config(path: str | Path) -> PlatformConfig:
     raw = _versioned(
-        _read_toml(path), {"provider", "storage", "lifecycle", "billing", "budget"}, "platform"
+        _read_toml(path),
+        {"provider", "adapter", "storage", "lifecycle", "billing", "budget"},
+        "platform",
     )
     provider = _exact(
         raw["provider"],
@@ -333,6 +363,11 @@ def load_platform_config(path: str | Path) -> PlatformConfig:
             "container_disk_gb",
         },
         "[provider]",
+    )
+    adapter = _exact(
+        raw["adapter"],
+        {"base_url", "openapi_identity", "openapi_version", "openapi_sha256"},
+        "[adapter]",
     )
     storage = _exact(
         raw["storage"], {"volume_gb", "high_water_bytes", "minimum_free_bytes"}, "[storage]"
@@ -370,6 +405,12 @@ def load_platform_config(path: str | Path) -> PlatformConfig:
             minimum_vcpu=_integer(provider["minimum_vcpu"], "provider.minimum_vcpu"),
             minimum_ram_gb=_integer(provider["minimum_ram_gb"], "provider.minimum_ram_gb"),
             container_disk_gb=_integer(provider["container_disk_gb"], "provider.container_disk_gb"),
+        ),
+        adapter=AdapterConfig(
+            base_url=_text(adapter["base_url"], "adapter.base_url"),
+            openapi_identity=_text(adapter["openapi_identity"], "adapter.openapi_identity"),
+            openapi_version=_text(adapter["openapi_version"], "adapter.openapi_version"),
+            openapi_sha256=_text(adapter["openapi_sha256"], "adapter.openapi_sha256"),
         ),
         storage=StorageConfig(
             volume_gb=_integer(storage["volume_gb"], "storage.volume_gb"),
@@ -412,6 +453,15 @@ def load_platform_config(path: str | Path) -> PlatformConfig:
     )
     if not config.provider.secure_cloud:
         raise RunpodConfigError("provider.secure_cloud must be true")
+    expected_adapter = {
+        "base_url": REST_V1_BASE_URL,
+        "openapi_identity": OPENAPI_IDENTITY,
+        "openapi_version": OPENAPI_VERSION,
+        "openapi_sha256": OPENAPI_SHA256,
+    }
+    for field, expected in expected_adapter.items():
+        if getattr(config.adapter, field) != expected:
+            raise RunpodConfigError(f"adapter.{field} must be {expected}")
     volume_bytes = config.storage.volume_gb * 1_000_000_000
     if config.storage.high_water_bytes + config.storage.minimum_free_bytes > volume_bytes:
         raise RunpodConfigError(
@@ -434,7 +484,8 @@ def load_platform_config(path: str | Path) -> PlatformConfig:
 
 
 def load_local_config(path: str | Path) -> LocalConfig:
-    raw = _versioned(_read_toml(path), {"paths", "secrets"}, "local")
+    raw = _versioned(_read_toml(path), {"controller", "paths", "secrets"}, "local")
+    controller = _exact(raw["controller"], {"hostname"}, "[controller]")
     paths = _exact(raw["paths"], {"workspace_root", "state_root", "output_root"}, "[paths]")
     secrets = _exact(
         raw["secrets"],
@@ -443,6 +494,7 @@ def load_local_config(path: str | Path) -> LocalConfig:
     )
     config = LocalConfig(
         schema_version=1,
+        controller=LocalController(hostname=_text(controller["hostname"], "controller.hostname")),
         paths=LocalPaths(**{key: Path(_text(paths[key], f"paths.{key}")) for key in paths}),
         secrets=LocalSecrets(**{key: _text(secrets[key], f"secrets.{key}") for key in secrets}),
     )
@@ -496,8 +548,13 @@ def load_launch_intent(path: str | Path) -> LaunchIntent:
             "vcpu",
             "ram_gb",
             "container_disk_gb",
+            "image_ref",
+            "template_id",
+            "registry_auth_id",
             "volume_id",
             "volume_size_gb",
+            "volume_mount_path",
+            "ports",
             "maximum_duration_seconds",
         },
         "launch intent",
@@ -505,7 +562,7 @@ def load_launch_intent(path: str | Path) -> LaunchIntent:
     stage = _text(raw["stage"], "intent.stage")
     if stage not in {"qualification", "production", "recovery"}:
         raise RunpodConfigError("intent.stage must be qualification, production, or recovery")
-    return LaunchIntent(
+    intent = LaunchIntent(
         schema_version=1,
         intent_id=_text(raw["intent_id"], "intent.intent_id"),
         stage=stage,  # type: ignore[arg-type]
@@ -516,12 +573,24 @@ def load_launch_intent(path: str | Path) -> LaunchIntent:
         vcpu=_integer(raw["vcpu"], "intent.vcpu"),
         ram_gb=_integer(raw["ram_gb"], "intent.ram_gb"),
         container_disk_gb=_integer(raw["container_disk_gb"], "intent.container_disk_gb"),
+        image_ref=_text(raw["image_ref"], "intent.image_ref"),
+        template_id=_text(raw["template_id"], "intent.template_id"),
+        registry_auth_id=_text(raw["registry_auth_id"], "intent.registry_auth_id"),
         volume_id=_text(raw["volume_id"], "intent.volume_id"),
         volume_size_gb=_integer(raw["volume_size_gb"], "intent.volume_size_gb"),
+        volume_mount_path=_text(raw["volume_mount_path"], "intent.volume_mount_path"),
+        ports=_strings(raw["ports"], "intent.ports"),
         maximum_duration_seconds=_integer(
             raw["maximum_duration_seconds"], "intent.maximum_duration_seconds"
         ),
     )
+    if not re.search(r"@sha256:[0-9a-f]{64}$", intent.image_ref):
+        raise RunpodConfigError("intent.image_ref must use an immutable SHA-256 digest")
+    if not intent.volume_mount_path.startswith("/") or ".." in intent.volume_mount_path.split("/"):
+        raise RunpodConfigError("intent.volume_mount_path must be an absolute safe path")
+    if intent.ports != ("22/tcp",):
+        raise RunpodConfigError("intent.ports must be exactly [22/tcp]")
+    return intent
 
 
 def load_inventory_snapshot(path: str | Path) -> InventorySnapshot:

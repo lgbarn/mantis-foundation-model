@@ -8,6 +8,12 @@ minimum_vcpu = 8
 minimum_ram_gb = 32
 container_disk_gb = 50
 
+[adapter]
+base_url = "https://rest.runpod.io/v1"
+openapi_identity = "https://rest.runpod.io/v1/openapi.json"
+openapi_version = "v1"
+openapi_sha256 = "f4be55173a5392150d805d103b1ee3aeff23defec40052dd3188d606ddedddfc"
+
 [storage]
 volume_gb = 150
 high_water_bytes = 120000000000

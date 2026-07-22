@@ -15,6 +15,7 @@ from mantis_v2.runpod_config import (
     load_local_config,
     load_platform_config,
 )
+from mantis_v2.runpod_lifecycle import LifecycleError
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -32,6 +33,12 @@ allowed_datacenters = ["US-CA-2", "EU-RO-1"]
 minimum_vcpu = 8
 minimum_ram_gb = 32
 container_disk_gb = 50
+
+[adapter]
+base_url = "https://rest.runpod.io/v1"
+openapi_identity = "https://rest.runpod.io/v1/openapi.json"
+openapi_version = "v1"
+openapi_sha256 = "f4be55173a5392150d805d103b1ee3aeff23defec40052dd3188d606ddedddfc"
 
 [storage]
 volume_gb = 150
@@ -59,6 +66,9 @@ ordinary_launch_cutoff_usd = "125.00"
     local.write_text(
         """\
 schema_version = 1
+
+[controller]
+hostname = "controller-fixture"
 
 [paths]
 workspace_root = "/workspace/mantis"
@@ -99,8 +109,13 @@ sealed_holdout = false
                 "vcpu": 8,
                 "ram_gb": 32,
                 "container_disk_gb": 50,
+                "image_ref": "ghcr.io/lgbarn/mantis@sha256:" + "a" * 64,
+                "template_id": "template-fixture",
+                "registry_auth_id": "registry-auth-fixture",
                 "volume_id": "volume-fixture",
                 "volume_size_gb": 150,
+                "volume_mount_path": "/workspace",
+                "ports": ["22/tcp"],
                 "maximum_duration_seconds": 7200,
             }
         )
@@ -384,6 +399,13 @@ def test_plan_command_with_exact_authorization_binds_terms_and_approves(
     assert decision["projected_spend_usd"] == "0.90"
     assert decision["authorization_digest"]
     assert decision["authorization_expires_at"] == "2026-07-21T12:10:00Z"
+    assert decision["openapi_identity"] == "https://rest.runpod.io/v1/openapi.json"
+    assert decision["openapi_version"] == "v1"
+    assert decision["openapi_sha256"] == (
+        "f4be55173a5392150d805d103b1ee3aeff23defec40052dd3188d606ddedddfc"
+    )
+    assert decision["image_ref"].endswith("a" * 64)
+    assert decision["ports"] == ["22/tcp"]
 
 
 @pytest.mark.parametrize(
@@ -773,6 +795,37 @@ def test_local_config_accepts_secret_names_but_rejects_secret_values(tmp_path: P
         load_local_config(paths["local"])
 
 
+def test_live_adapter_rejects_unapproved_controller_before_credential_access(
+    tmp_path: Path, monkeypatch
+) -> None:
+    paths = _write_inputs(tmp_path)
+    monkeypatch.setattr("mantis_v2.cli.socket.gethostname", lambda: "different-host")
+    monkeypatch.delenv("RUNPOD_API_KEY", raising=False)
+
+    with pytest.raises(LifecycleError, match="^controller_host_mismatch$"):
+        cli._live_adapter(paths["local"])
+
+
+def test_live_adapter_rejects_lock_root_not_bound_to_approved_local_digest(
+    tmp_path: Path, monkeypatch
+) -> None:
+    paths = _write_inputs(tmp_path)
+    approved = load_local_config(paths["local"])
+    paths["local"].write_text(
+        paths["local"]
+        .read_text()
+        .replace(
+            'state_root = "/tmp/mantis-runpod"',
+            'state_root = "/tmp/different-lock-root"',
+        )
+    )
+    monkeypatch.setattr("mantis_v2.cli.socket.gethostname", lambda: "controller-fixture")
+    monkeypatch.delenv("RUNPOD_API_KEY", raising=False)
+
+    with pytest.raises(LifecycleError, match="^local_config_mismatch$"):
+        cli._live_adapter(paths["local"], expected_local_digest=approved.digest)
+
+
 def test_decision_is_content_addressed_no_overwrite_and_secret_free(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
@@ -816,6 +869,16 @@ def test_runpod_plan_recipe_requires_explicit_target_paths() -> None:
     )
     assert missing.returncode != 0
     assert "Recipe `runpod-plan` got 0 positional arguments but takes 8" in missing.stderr
+    for recipe in (
+        "runpod-launch decision local",
+        "runpod-reconcile-launch decision local",
+        "runpod-status pod_id run_name local",
+        "runpod-terminate pod_id run_name local",
+        "runpod-reconcile-termination pod_id run_name local",
+        "runpod-reconcile-spend pod_id run_name local",
+        "runpod-enforce-deadline pod_id local",
+    ):
+        assert recipe in listed.stdout
 
 
 def test_runpod_plan_recipe_preserves_paths_with_spaces(tmp_path: Path) -> None:

@@ -63,6 +63,10 @@ them can make a checkpoint intentionally non-resumable.
 | `just runpod-image-build <image>` | Builds the pinned Linux amd64 CUDA image from a clean commit | Local Docker image | Docker CPU/disk/network use; no Pod or registry push |
 | `just runpod-image-scan <image> <output>` | Scans saved image layers and history | Canonical scan JSON | Requires a local Docker daemon |
 | `just runpod-image-self-check <image> <output>` | Verifies CUDA, driver, tools, lock, and runtime inventory | Canonical runtime JSON | Requires Docker plus a compatible NVIDIA GPU |
+| `just runpod-launch <decision> <local>` | Creates one receipt-bound Pod from an approved decision | Durable Pod receipt | Real paid API mutation; exact unexpired authorization required |
+| `just runpod-status <pod-id> <run-name> <local>` | Reads allowlisted status for one receipted Pod | Redacted JSON status | Real provider read |
+| `just runpod-terminate <pod-id> <run-name> <local>` | Terminates one exact receipted Pod idempotently | Durable termination receipt | Real provider mutation |
+| `just runpod-enforce-deadline <pod-id> <local>` | Enforces the durable hard deadline | Durable termination receipt | Real provider mutation after deadline |
 | `just transfer-bundle <config>` | Hashes an immutable source snapshot | Canonical no-overwrite manifest | Full local read; no network access |
 | `just transfer-stage-dry-run <config> <inventory>` | Exercises injected S3 HEAD/PUT policy | JSON plan on stdout | Zero network and zero object writes |
 | `just transfer-promote <config>` | Verifies mounted bytes and atomically renames incoming | Immutable final input directory | Fails closed before promotion |

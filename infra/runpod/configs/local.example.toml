@@ -1,5 +1,8 @@
 schema_version = 1
 
+[controller]
+hostname = "replace-with-controller-hostname"
+
 [paths]
 workspace_root = "/workspace/mantis"
 state_root = "/Users/replace-me/Library/Application Support/mantis-runpod"

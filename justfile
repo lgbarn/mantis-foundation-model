@@ -69,6 +69,27 @@ runpod-plan platform local experiment intent inventory ledger evaluated_at outpu
 runpod-plan-authorized platform local experiment intent inventory ledger authorization evaluated_at output:
     uv run mantis-v2 runpod-plan --platform {{quote(platform)}} --local {{quote(local)}} --experiment {{quote(experiment)}} --intent {{quote(intent)}} --inventory {{quote(inventory)}} --ledger {{quote(ledger)}} --authorization {{quote(authorization)}} --evaluated-at {{quote(evaluated_at)}} --output {{quote(output)}}
 
+runpod-launch decision local:
+    uv run mantis-v2 runpod-launch --decision {{quote(decision)}} --local {{quote(local)}}
+
+runpod-reconcile-launch decision local:
+    uv run mantis-v2 runpod-reconcile-launch --decision {{quote(decision)}} --local {{quote(local)}}
+
+runpod-status pod_id run_name local:
+    uv run mantis-v2 runpod-status --pod-id {{quote(pod_id)}} --run-name {{quote(run_name)}} --local {{quote(local)}}
+
+runpod-terminate pod_id run_name local:
+    uv run mantis-v2 runpod-terminate --pod-id {{quote(pod_id)}} --run-name {{quote(run_name)}} --local {{quote(local)}}
+
+runpod-reconcile-termination pod_id run_name local:
+    uv run mantis-v2 runpod-reconcile-termination --pod-id {{quote(pod_id)}} --run-name {{quote(run_name)}} --local {{quote(local)}}
+
+runpod-reconcile-spend pod_id run_name local:
+    uv run mantis-v2 runpod-reconcile-spend --pod-id {{quote(pod_id)}} --run-name {{quote(run_name)}} --local {{quote(local)}}
+
+runpod-enforce-deadline pod_id local:
+    uv run mantis-v2 runpod-enforce-deadline --pod-id {{quote(pod_id)}} --local {{quote(local)}}
+
 transfer-bundle config:
     uv run mantis-v2 transfer-bundle --config {{quote(config)}}
 

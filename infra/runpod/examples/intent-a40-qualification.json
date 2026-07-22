@@ -1,5 +1,8 @@
 {
   "container_disk_gb": 50,
+  "image_ref": "ghcr.io/lgbarn/mantis-v2-cuda@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "template_id": "replace-with-current-template-id",
+  "registry_auth_id": "replace-with-scoped-registry-auth-id",
   "datacenter_id": "US-CA-2",
   "gpu_count": 1,
   "gpu_type": "NVIDIA A40",
@@ -9,7 +12,9 @@
   "run_name": "mantisv2-cuda-qualification-seed42",
   "schema_version": 1,
   "stage": "qualification",
+  "ports": ["22/tcp"],
   "vcpu": 8,
   "volume_id": "replace-with-current-volume-id",
+  "volume_mount_path": "/workspace",
   "volume_size_gb": 150
 }
