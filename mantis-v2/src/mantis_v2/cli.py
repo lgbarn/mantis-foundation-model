@@ -267,6 +267,8 @@ def _parser() -> argparse.ArgumentParser:
         if command == "rl-freeze-evaluation-access-plan":
             child.add_argument("--serving-freeze", required=True, type=Path)
             child.add_argument("--baseline-freeze", required=True, type=Path)
+            child.add_argument("--deployment-selector", required=True, type=Path)
+            child.add_argument("--risk-shield", required=True, type=Path)
             child.add_argument("--run-identity", required=True)
             child.add_argument("--created-at", required=True)
             child.add_argument("--output", required=True, type=Path)
@@ -992,6 +994,8 @@ def main() -> None:
                 load_rl_config(args.config),
                 args.serving_freeze,
                 args.baseline_freeze,
+                args.deployment_selector,
+                args.risk_shield,
                 args.output,
                 run_identity=args.run_identity,
                 created_at=args.created_at,

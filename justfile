@@ -302,8 +302,8 @@ rl-run-independent-baseline-campaign plan output resume="":
 rl-freeze-evaluation-baselines candidate output +args:
     uv run mantis-v2 rl-freeze-evaluation-baselines --config mantis-v2/configs/rl-entry-topstep-100k.toml --candidate {{quote(candidate)}} --output {{quote(output)}} {{args}}
 
-rl-freeze-evaluation-access-plan serving_freeze baseline_freeze output run_identity created_at:
-    uv run mantis-v2 rl-freeze-evaluation-access-plan --config mantis-v2/configs/rl-entry-topstep-100k.toml --serving-freeze {{quote(serving_freeze)}} --baseline-freeze {{quote(baseline_freeze)}} --output {{quote(output)}} --run-identity {{quote(run_identity)}} --created-at {{quote(created_at)}}
+rl-freeze-evaluation-access-plan serving_freeze baseline_freeze deployment_selector risk_shield output run_identity created_at:
+    uv run mantis-v2 rl-freeze-evaluation-access-plan --config mantis-v2/configs/rl-entry-topstep-100k.toml --serving-freeze {{quote(serving_freeze)}} --baseline-freeze {{quote(baseline_freeze)}} --deployment-selector {{quote(deployment_selector)}} --risk-shield {{quote(risk_shield)}} --output {{quote(output)}} --run-identity {{quote(run_identity)}} --created-at {{quote(created_at)}}
 
 rl-build-evaluation-episodes config access_plan fold:
     uv run mantis-v2 rl-build-evaluation-episodes --config {{quote(config)}} --access-plan {{quote(access_plan)}} --fold {{fold}}

@@ -7,9 +7,11 @@ import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pytest
+import torch
 from mantis_v2 import cli, rl_evaluation
 from mantis_v2.rl_config import load_rl_config
 from mantis_v2.rl_environment import BarData, CandidateData, EnvironmentEpisode
@@ -48,6 +50,9 @@ def _attempt(index: int, *, status: str = "PASS", seed: int = 42) -> dict[str, o
         "eligible_entries": 20,
         "net_pnl": 3_100.0 if status == "PASS" else -200.0,
         "costs": 100.0,
+        "commission_costs": 20.0,
+        "slippage_costs": 75.0,
+        "gap_costs": 5.0,
         "expectancy": 310.0 if status == "PASS" else -20.0,
         "maximum_drawdown": 500.0,
         "minimum_mll_cushion": 1_000.0,
@@ -146,7 +151,7 @@ def test_synchronized_bootstrap_resamples_whole_calendar_blocks() -> None:
     assert result["resampling_unit"] == "synchronized_calendar_block"
     assert result["seed_uncertainty"]["assignments"] == 1024
     assert len(result["index_matrix_sha256"]) == 64
-    with pytest.raises(EvaluationContractError, match="global ordered calendar blocks"):
+    with pytest.raises(EvaluationContractError, match="synchronized calendar block"):
         paired_calendar_block_lcb(
             candidate,
             baseline,
@@ -155,6 +160,30 @@ def test_synchronized_bootstrap_resamples_whole_calendar_blocks() -> None:
             replicates=2_000,
             ordered_block_ids=list(reversed(result["ordered_block_ids"])),
         )
+
+
+def test_calendar_bootstrap_uses_complete_cross_cell_block_intersection() -> None:
+    cells = {("ES", "one_mini"), ("CL", "one_mini")}
+    rows: list[dict[str, object]] = []
+    for ticker, profile in sorted(cells):
+        for seed in range(42, 52):
+            for block in range(21):
+                if ticker == "CL" and block == 20:
+                    continue
+                rows.append(
+                    {
+                        "policy": "candidate",
+                        "stress": "primary",
+                        "ticker": ticker,
+                        "profile": profile,
+                        "seed": seed,
+                        "calendar_block": f"2025-W{block + 1:02d}",
+                    }
+                )
+
+    blocks = rl_evaluation._complete_calendar_blocks(rows, cells, tuple(range(42, 52)))
+
+    assert blocks == [f"2025-W{block + 1:02d}" for block in range(20)]
 
 
 def test_paired_point_and_bootstrap_keep_raw_attempt_denominator() -> None:
@@ -389,8 +418,10 @@ def test_access_plan_exists_before_metadata_and_recursively_validates_parents(
     )
     serving = tmp_path / "serving.json"
     baseline = tmp_path / "baseline.json"
-    serving.write_text("{}")
-    baseline.write_text("{}")
+    selector = tmp_path / "selector.json"
+    shield = tmp_path / "shield.json"
+    for path in (serving, baseline, selector, shield):
+        path.write_text("{}")
     parent_calls: list[Path] = []
 
     def serving_validator(_config: object, path: Path):
@@ -403,10 +434,21 @@ def test_access_plan_exists_before_metadata_and_recursively_validates_parents(
 
     monkeypatch.setattr(rl_evaluation, "_validate_serving_freeze", serving_validator)
     monkeypatch.setattr(rl_evaluation, "_validated_baseline_freeze", baseline_validator)
+    serving_contract = {
+        "deployment_selector": {"path": str(selector.resolve())},
+        "risk_shield": {"path": str(shield.resolve())},
+    }
+    monkeypatch.setattr(
+        rl_evaluation,
+        "_validated_pre_promotion_serving_contract",
+        lambda *_args: serving_contract,
+    )
     result = rl_evaluation.write_evaluation_access_plan(
         config,
         serving,
         baseline,
+        selector,
+        shield,
         tmp_path / "access",
         run_identity="fixed-test-v1",
         created_at="2026-07-22T16:00:00+00:00",
@@ -419,6 +461,7 @@ def test_access_plan_exists_before_metadata_and_recursively_validates_parents(
     )
     assert digest == result["access_plan_sha256"]
     assert validated["status"] == "frozen_before_test_metadata"
+    assert result["pre_promotion_serving"] == serving_contract
     assert parent_calls == [serving, baseline, serving, baseline]
 
 
@@ -476,6 +519,10 @@ def test_plan_is_content_addressed_and_frozen_before_test_access(
                 "serving_freeze_sha256": "a" * 64,
                 "baseline_freeze_path": str(baseline),
                 "baseline_freeze_sha256": baseline_digest,
+                "pre_promotion_serving": {
+                    "deployment_selector": {"path": str(tmp_path / "selector.json")},
+                    "risk_shield": {"path": str(tmp_path / "shield.json")},
+                },
             },
             "f" * 64,
         ),
@@ -581,6 +628,86 @@ def test_plan_is_content_addressed_and_frozen_before_test_access(
         mutated_path.write_bytes(data)
         with pytest.raises(EvaluationContractError, match="preregistered contract mismatch"):
             rl_evaluation._validated_evaluation_plan(config, mutated_path)
+
+
+def test_pre_promotion_contract_binds_selector_and_shared_shield(tmp_path: Path) -> None:
+    config = load_rl_config(ROOT / "configs" / "rl-entry-smoke.toml")
+    serving_sha256 = "a" * 64
+    bundles = [tmp_path / f"bundle-{fold}.json" for fold in (0, 1)]
+    serving = {
+        "seed_artifacts": [
+            {
+                "fold": fold,
+                "seed": config.training.serving_seed,
+                "checkpoint_bundle_path": str(bundles[fold]),
+                "checkpoint_bundle_sha256": str(fold + 1) * 64,
+            }
+            for fold in (0, 1)
+        ]
+    }
+    selector_payload = {
+        "schema_version": 1,
+        "stage": "deployment-checkpoint-selection-v1",
+        "status": "complete",
+        "selector": "deployment-checkpoint-selector-v1",
+        "serving_seed": config.training.serving_seed,
+        "selected_fold": 1,
+        "serving_freeze_sha256": serving_sha256,
+        "checkpoint_bundle_path": str(bundles[1].resolve()),
+        "checkpoint_bundle_sha256": "2" * 64,
+        "config_sha256": config.digest,
+        "source_sha256": config.upstream.source_digest,
+        "dependency_lock_sha256": config.upstream.lock_digest,
+        "test_accessed": False,
+        "sealed_holdout_accessed": False,
+    }
+    selector_data = json.dumps(selector_payload, sort_keys=True, separators=(",", ":")).encode()
+    selector = tmp_path / (
+        f"deployment-checkpoint-selection-{hashlib.sha256(selector_data).hexdigest()}.json"
+    )
+    selector.write_bytes(selector_data)
+    references: dict[str, dict[str, str]] = {}
+    for name in (
+        "mask_source",
+        "observation_schema",
+        "rule_snapshot",
+        "fee_snapshot",
+        "calendar_snapshot",
+    ):
+        path = tmp_path / f"{name}.json"
+        path.write_text(name)
+        references[name] = {
+            "path": str(path.resolve()),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+    shield_payload = {
+        "schema_version": 1,
+        "stage": "risk-shield-contract-v1",
+        "status": "complete",
+        "version": "RiskShieldV1",
+        "config_sha256": config.digest,
+        "source_sha256": config.upstream.source_digest,
+        "dependency_lock_sha256": config.upstream.lock_digest,
+        "consumers": ["training", "evaluation", "serving", "parity", "benchmark"],
+        "test_accessed": False,
+        "sealed_holdout_accessed": False,
+        **references,
+    }
+    shield_data = json.dumps(shield_payload, sort_keys=True, separators=(",", ":")).encode()
+    shield = tmp_path / f"risk-shield-contract-{hashlib.sha256(shield_data).hexdigest()}.json"
+    shield.write_bytes(shield_data)
+
+    result = rl_evaluation._validated_pre_promotion_serving_contract(
+        config, serving, serving_sha256, selector, shield
+    )
+
+    assert result["deployment_selector"]["selected_fold"] == 1
+    assert result["risk_shield"]["version"] == "RiskShieldV1"
+    Path(references["calendar_snapshot"]["path"]).write_text("changed")
+    with pytest.raises(EvaluationContractError, match="calendar_snapshot identity"):
+        rl_evaluation._validated_pre_promotion_serving_contract(
+            config, serving, serving_sha256, selector, shield
+        )
 
 
 def test_test_schedule_validator_requires_content_addressed_filename(tmp_path: Path) -> None:
@@ -1446,19 +1573,19 @@ def test_successful_evaluation_report_serializes_transfer_cell_evidence(
         "same_bar_adverse",
     ):
         for seed in range(42, 52):
-            for block in range(20 if stress == "primary" else len(cells)):
-                ticker, profile = cells[block % len(cells)]
-                rows.append(
-                    {
-                        "policy": "candidate",
-                        "stress": stress,
-                        "seed": seed,
-                        "ticker": ticker,
-                        "profile": profile,
-                        "calendar_block": f"2025-W{block + 1:02d}",
-                        "status": "PASS",
-                    }
-                )
+            for block in range(20):
+                for ticker, profile in cells:
+                    rows.append(
+                        {
+                            "policy": "candidate",
+                            "stress": stress,
+                            "seed": seed,
+                            "ticker": ticker,
+                            "profile": profile,
+                            "calendar_block": f"2025-W{block + 1:02d}",
+                            "status": "PASS",
+                        }
+                    )
     monkeypatch.setattr(
         rl_evaluation,
         "_validate_serving_freeze",
@@ -1517,8 +1644,13 @@ def test_successful_evaluation_report_serializes_transfer_cell_evidence(
 
     payload = json.loads(Path(result["report_path"]).read_text())
     transfer = payload["numeric_gate_evidence"]["primary"]["transfer_effects"]
+    descriptive = payload["numeric_gate_evidence"]["primary"]["descriptive_baseline_effects"]
     assert len(transfer) == len(cells) + 1
     assert {"ticker", "profile", "point_difference", "lcb_95"} <= set(transfer[0])
+    assert set(descriptive["pooled"]) == {
+        "historical_rejected_logistic_head",
+        "hist_gradient_boosting",
+    }
     assert len(bootstrap_matrix_ids) == 1
 
 
@@ -1636,6 +1768,229 @@ def test_default_production_runner_replays_real_environment_path(
     )
     assert latency_rows[0]["latency_cancellations"] == 2
     assert first.isoformat() not in latency_rows[0]["accepted_opportunity_ids"]
+
+
+def test_production_runner_covers_policy_stress_and_cost_orchestration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = load_rl_config(ROOT / "configs" / "rl-entry-smoke.toml")
+    first = datetime(2025, 1, 6, 15, 0, tzinfo=UTC)
+    candidate = CandidateData(
+        embedding=np.array([1.0, -1.0], dtype=np.float32),
+        direction=1,
+        trend_line=99.0,
+        atr=2.0,
+        bars_since_direction_change=2,
+        label=1,
+    )
+    episode = EnvironmentEpisode(
+        "ES",
+        "one_mini",
+        (
+            BarData(first, 100.0, 101.0, 99.0, 100.0, 10.0, candidate),
+            BarData(first + timedelta(minutes=3), 100.5, 102.0, 100.0, 101.5, 11.0),
+            BarData(first + timedelta(minutes=6), 101.5, 102.0, 101.0, 101.75, 12.0),
+        ),
+    )
+    schedule = tmp_path / "schedule.json"
+    serving = tmp_path / "serving.json"
+    baseline = tmp_path / "baseline.json"
+    hgb_path = tmp_path / "hgb.pkl"
+    candidate_attempt = tmp_path / "candidate-attempt.json"
+    checkpoint_bundle = tmp_path / "bundle.json"
+    independent_checkpoint = tmp_path / "independent.pt"
+    for path in (
+        schedule,
+        serving,
+        baseline,
+        checkpoint_bundle,
+        independent_checkpoint,
+    ):
+        path.write_text("{}")
+    hgb_path.write_bytes(b"frozen-hgb")
+    plan_sha256 = "a" * 64
+    objects = {
+        serving: {
+            "seed_artifacts": [
+                {
+                    "fold": 0,
+                    "seed": 42,
+                    "checkpoint_bundle_path": str(checkpoint_bundle),
+                    "artifact_sha256": "1" * 64,
+                }
+            ]
+        },
+        baseline: {
+            "folds": [
+                {
+                    "fold": 0,
+                    "independent_ppo": [
+                        {
+                            "seed": 42,
+                            "path": str(independent_checkpoint),
+                            "sha256": "2" * 64,
+                        }
+                    ],
+                    "hist_gradient_boosting": {
+                        "path": str(hgb_path),
+                        "sha256": hashlib.sha256(hgb_path.read_bytes()).hexdigest(),
+                        "fit_evidence": {"threshold": 0.5},
+                    },
+                }
+            ]
+        },
+        schedule: {"episodes": [{"number": 7}]},
+        candidate_attempt: {
+            "stage": "evaluation-attempt-v1",
+            "status": "complete",
+            "evaluation_plan_sha256": plan_sha256,
+            "rows": [{"episode_id": "7", "accepted_trades": 1}],
+        },
+    }
+    monkeypatch.setattr(rl_evaluation, "_load_object", lambda path, _description: objects[path])
+    monkeypatch.setattr(
+        rl_evaluation,
+        "load_test_episode_manifest",
+        lambda *_args: LoadedEpisodes(
+            episodes=(episode,),
+            feature_refs=(),
+            manifest_sha256="c" * 64,
+            partition="test",
+            fold=0,
+        ),
+    )
+
+    class AlwaysTakeActor:
+        def __call__(self, observation: torch.Tensor, *_args: object):
+            return (
+                torch.tensor([[0.0, 1.0]], dtype=observation.dtype),
+                torch.tensor([0.0], dtype=observation.dtype),
+            )
+
+    class AlwaysTakeHistorical:
+        def action(self, _observation: object, _mask: np.ndarray) -> int:
+            return 1
+
+    class AlwaysTakeHgb:
+        def predict_proba(self, features: np.ndarray) -> np.ndarray:
+            return np.tile(np.array([[0.0, 1.0]]), (len(features), 1))
+
+    monkeypatch.setattr(rl_evaluation, "_loaded_actor", lambda *_args: AlwaysTakeActor())
+    monkeypatch.setattr(
+        rl_evaluation,
+        "historical_logistic_artifact",
+        lambda *_args: (AlwaysTakeHistorical(), tmp_path / "historical.json", "3" * 64),
+    )
+    monkeypatch.setattr(rl_evaluation.pickle, "load", lambda _handle: AlwaysTakeHgb())
+    runner = rl_evaluation._production_evaluation_runner(
+        config,
+        {
+            "serving_freeze_path": str(serving),
+            "baseline_freeze_path": str(baseline),
+            "stress_definitions": {
+                "primary": {
+                    "adverse_slippage_ticks_per_side": 1.0,
+                    "fee": "pinned_product_round_turn_snapshot",
+                },
+                "gap_adverse_tick": {"base": "primary", "historical_adverse_gap_ticks": 1},
+                "missed_fill_10pct": {
+                    "base": "primary",
+                    "cancel_without_carry_every": 10,
+                },
+            },
+        },
+    )
+
+    for ordinal, policy in enumerate(
+        (
+            "take_all",
+            "candidate",
+            "independent_ticker_ppo",
+            "historical_rejected_logistic_head",
+            "hist_gradient_boosting",
+        ),
+        start=1,
+    ):
+        row = runner(
+            EvaluationRequest(
+                ordinal=ordinal,
+                fold=0,
+                seed=42,
+                policy=policy,
+                stress="primary",
+                evaluation_plan_sha256=plan_sha256,
+                test_manifest_path=schedule,
+                test_manifest_sha256="c" * 64,
+                output=tmp_path / policy,
+            )
+        )[0]
+        assert row["accepted_trades"] == 1
+        assert row["commission_costs"] == pytest.approx(config.fees.es)
+        assert row["slippage_costs"] == pytest.approx(25.0)
+        assert row["gap_costs"] == 0.0
+        assert row["costs"] == pytest.approx(
+            cast(float, row["commission_costs"]) + cast(float, row["slippage_costs"])
+        )
+        assert row["accepted_opportunity_ids"] == [first.isoformat()]
+
+    matched = runner(
+        EvaluationRequest(
+            ordinal=20,
+            fold=0,
+            seed=42,
+            policy="matched_random_take",
+            stress="primary",
+            evaluation_plan_sha256=plan_sha256,
+            test_manifest_path=schedule,
+            test_manifest_sha256="c" * 64,
+            output=tmp_path / "matched",
+            candidate_attempt_path=candidate_attempt,
+        )
+    )[0]
+    assert matched["accepted_trades"] == 1
+
+    gap = runner(
+        EvaluationRequest(
+            ordinal=21,
+            fold=0,
+            seed=42,
+            policy="take_all",
+            stress="gap_adverse_tick",
+            evaluation_plan_sha256=plan_sha256,
+            test_manifest_path=schedule,
+            test_manifest_sha256="c" * 64,
+            output=tmp_path / "gap",
+        )
+    )[0]
+    assert gap["gap_adjusted_fills"] == 1
+    assert gap["gap_costs"] == pytest.approx(12.5)
+
+    pair_key = rl_evaluation._canonical_pair_key(0, "2025-W02", "7", "ES", "one_mini", 42)
+    missed_plan = next(
+        f"{value:064x}"
+        for value in range(10_000)
+        if int.from_bytes(
+            hashlib.sha256(f"{value:064x}{pair_key}:missed-fill-v1".encode()).digest()[:8],
+            "big",
+        )
+        % 10
+        == 0
+    )
+    missed = runner(
+        EvaluationRequest(
+            ordinal=22,
+            fold=0,
+            seed=42,
+            policy="take_all",
+            stress="missed_fill_10pct",
+            evaluation_plan_sha256=missed_plan,
+            test_manifest_path=schedule,
+            test_manifest_sha256="c" * 64,
+            output=tmp_path / "missed",
+        )
+    )[0]
+    assert missed["accepted_trades"] == 0
+    assert missed["missed_fill_count"] == 1
 
 
 def test_cli_exposes_frozen_topstep_evaluation(

@@ -95,6 +95,7 @@ just rl-freeze-evaluation-baselines candidate-freeze.json artifacts/rl-baselines
   --training-manifest training.json --validation-manifest validation.json \
   --independent-campaign independent-baseline-campaign.json
 just rl-freeze-evaluation-access-plan serving-freeze.json baseline-freeze.json \
+  deployment-checkpoint-selection.json risk-shield-contract.json \
   artifacts/rl-access-plan fixed-test-v1 2026-07-22T16:00:00+00:00
 just rl-build-evaluation-episodes mantis-v2/configs/rl-entry-topstep-100k.toml \
   evaluation-access-plan.json 0

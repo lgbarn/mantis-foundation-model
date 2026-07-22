@@ -590,6 +590,7 @@ just rl-freeze-evaluation-baselines candidate-freeze.json artifacts/rl-baselines
   --training-manifest training.json --validation-manifest validation.json \
   --independent-campaign independent-baseline-campaign.json
 just rl-freeze-evaluation-access-plan serving-freeze.json baseline-freeze.json \
+  deployment-checkpoint-selection.json risk-shield-contract.json \
   artifacts/rl-access-plan fixed-test-v1 2026-07-22T16:00:00+00:00
 just rl-build-evaluation-episodes mantis-v2/configs/rl-entry-topstep-100k.toml \
   evaluation-access-plan.json 0
@@ -601,13 +602,15 @@ just rl-evaluate-topstep evaluation-plan.json artifacts/rl-evaluation
 
 Repeat training/validation manifest flags for every fold. The independent
 campaign trains every seed fresh at the final serving budget and freezes its
-validation reports before baseline freeze. The access plan must exist before
-the scheduler reads timestamp/session metadata; scheduling never opens feature
+validation reports before baseline freeze. The deployment selection and shared
+RiskShield contract from issue #11 must validate before the access plan can be
+written. The access plan must exist before the scheduler reads timestamp/session metadata; scheduling never opens feature
 shards or label/outcome columns. The evaluator rehashes the plan, source, environment code,
 checkpoint bytes, schedules, and baseline freeze before replay. It requires at
 least 300 unique seed-42 attempts separately for mini and micro profiles, then
 replays the same fixed attempts for seeds 42-51, all policies, and all stresses.
-Market uncertainty uses one 100,000-replicate synchronized weekly block matrix
+Market uncertainty uses the intersection of complete weekly blocks across every
+required ticker/profile/seed cell and one 100,000-replicate synchronized matrix
 shared by every gated view. A stopped run resumes only with `--resume`; a
 terminal replay error writes a durable `not_promoted` verdict and is never
 retried. Neither planning nor evaluation accepts a sealed-holdout path.

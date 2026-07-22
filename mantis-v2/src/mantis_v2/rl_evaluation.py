@@ -78,6 +78,9 @@ _METRICS = (
     "eligible_entries",
     "net_pnl",
     "costs",
+    "commission_costs",
+    "slippage_costs",
+    "gap_costs",
     "expectancy",
     "maximum_drawdown",
     "minimum_mll_cushion",
@@ -128,6 +131,9 @@ _ATTEMPT_FIELDS = {
     "eligible_entries",
     "net_pnl",
     "costs",
+    "commission_costs",
+    "slippage_costs",
+    "gap_costs",
     "expectancy",
     "maximum_drawdown",
     "minimum_mll_cushion",
@@ -143,6 +149,14 @@ _ATTEMPT_FIELDS = {
     "stress_identity_sha256",
     "stress_invariants_valid",
 }
+
+
+def _digest_string(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 def wilson_one_sided(
@@ -398,9 +412,16 @@ def paired_calendar_block_lcb(
         by_seed_block[(seed_value, block)].append(
             float(cast(bool, row["passed"])) - float(cast(bool, baseline_by_key[key]["passed"]))
         )
-    blocks = sorted({key[1] for key in by_seed_block}, key=str)
-    if ordered_block_ids is not None and blocks != list(ordered_block_ids):
-        raise EvaluationContractError("paired view does not match global ordered calendar blocks")
+    available_blocks = sorted({key[1] for key in by_seed_block}, key=str)
+    blocks = available_blocks
+    if ordered_block_ids is not None:
+        blocks = list(ordered_block_ids)
+        if (
+            len(blocks) != len(set(blocks))
+            or blocks != sorted(blocks, key=str)
+            or not set(blocks).issubset(available_blocks)
+        ):
+            raise EvaluationContractError("paired view lacks a synchronized calendar block")
     if len(blocks) < 20:
         raise EvaluationContractError("at least 20 complete calendar blocks are required")
     if any((seed, block) not in by_seed_block for seed in expected_seeds for block in blocks):
@@ -424,8 +445,8 @@ def paired_calendar_block_lcb(
             np.mean(
                 [
                     value
-                    for (owner, _block), values in by_seed_block.items()
-                    if owner == seed
+                    for (owner, block), values in by_seed_block.items()
+                    if owner == seed and block in blocks
                     for value in values
                 ]
             )
@@ -1554,10 +1575,114 @@ def _validated_baseline_freeze(config: RlConfig, path: Path) -> tuple[dict[str, 
     return baseline, digest
 
 
+def _validated_pre_promotion_serving_contract(
+    config: RlConfig,
+    serving: Mapping[str, object],
+    serving_sha256: str,
+    deployment_selector_path: Path,
+    risk_shield_path: Path,
+) -> dict[str, object]:
+    """Validate the #11 selector and shared shield before any test metadata opens."""
+    selector = _load_object(deployment_selector_path, "deployment checkpoint selection")
+    selector_sha256 = _sha256(deployment_selector_path)
+    artifacts = serving.get("seed_artifacts")
+    if not isinstance(artifacts, list) or not all(isinstance(item, dict) for item in artifacts):
+        raise EvaluationContractError("serving artifacts are unavailable for deployment selection")
+    eligible = sorted(
+        (
+            cast(dict[str, object], item)
+            for item in artifacts
+            if cast(dict[str, object], item).get("seed") == config.training.serving_seed
+        ),
+        key=lambda item: cast(int, item["fold"]),
+    )
+    folds = [item.get("fold") for item in eligible]
+    if (
+        not eligible
+        or any(type(fold) is not int for fold in folds)
+        or folds != list(range(cast(int, folds[0]), cast(int, folds[-1]) + 1))
+    ):
+        raise EvaluationContractError("deployment folds are incomplete or nonchronological")
+    selected = eligible[-1]
+    if (
+        deployment_selector_path.name != f"deployment-checkpoint-selection-{selector_sha256}.json"
+        or selector.get("schema_version") != 1
+        or selector.get("stage") != "deployment-checkpoint-selection-v1"
+        or selector.get("status") != "complete"
+        or selector.get("selector") != "deployment-checkpoint-selector-v1"
+        or selector.get("serving_seed") != config.training.serving_seed
+        or selector.get("selected_fold") != selected.get("fold")
+        or selector.get("serving_freeze_sha256") != serving_sha256
+        or selector.get("checkpoint_bundle_path")
+        != str(Path(cast(str, selected["checkpoint_bundle_path"])).resolve())
+        or selector.get("checkpoint_bundle_sha256") != selected.get("checkpoint_bundle_sha256")
+        or selector.get("config_sha256") != config.digest
+        or selector.get("source_sha256") != config.upstream.source_digest
+        or selector.get("dependency_lock_sha256") != config.upstream.lock_digest
+        or selector.get("test_accessed") is not False
+        or selector.get("sealed_holdout_accessed") is not False
+    ):
+        raise EvaluationContractError("deployment checkpoint selection is not authorized")
+
+    shield = _load_object(risk_shield_path, "RiskShield contract")
+    shield_sha256 = _sha256(risk_shield_path)
+    if (
+        risk_shield_path.name != f"risk-shield-contract-{shield_sha256}.json"
+        or shield.get("schema_version") != 1
+        or shield.get("stage") != "risk-shield-contract-v1"
+        or shield.get("status") != "complete"
+        or shield.get("version") != "RiskShieldV1"
+        or shield.get("config_sha256") != config.digest
+        or shield.get("source_sha256") != config.upstream.source_digest
+        or shield.get("dependency_lock_sha256") != config.upstream.lock_digest
+        or shield.get("consumers") != ["training", "evaluation", "serving", "parity", "benchmark"]
+        or shield.get("test_accessed") is not False
+        or shield.get("sealed_holdout_accessed") is not False
+    ):
+        raise EvaluationContractError("RiskShield contract is not authorized")
+    references: dict[str, dict[str, str]] = {}
+    for name in (
+        "mask_source",
+        "observation_schema",
+        "rule_snapshot",
+        "fee_snapshot",
+        "calendar_snapshot",
+    ):
+        reference = shield.get(name)
+        if (
+            not isinstance(reference, dict)
+            or not isinstance(reference.get("path"), str)
+            or not _digest_string(reference.get("sha256"))
+            or _sha256(Path(cast(str, reference["path"]))) != reference["sha256"]
+        ):
+            raise EvaluationContractError(f"RiskShield {name} identity is invalid")
+        references[name] = {
+            "path": str(Path(cast(str, reference["path"])).resolve()),
+            "sha256": cast(str, reference["sha256"]),
+        }
+    return {
+        "deployment_selector": {
+            "path": str(deployment_selector_path.resolve()),
+            "sha256": selector_sha256,
+            "selector": "deployment-checkpoint-selector-v1",
+            "selected_fold": selected["fold"],
+            "checkpoint_bundle_sha256": selected["checkpoint_bundle_sha256"],
+        },
+        "risk_shield": {
+            "path": str(risk_shield_path.resolve()),
+            "sha256": shield_sha256,
+            "version": "RiskShieldV1",
+            **references,
+        },
+    }
+
+
 def write_evaluation_access_plan(
     config: RlConfig,
     serving_freeze_path: Path,
     baseline_freeze_path: Path,
+    deployment_selector_path: Path,
+    risk_shield_path: Path,
     output: Path,
     *,
     run_identity: str,
@@ -1569,6 +1694,13 @@ def write_evaluation_access_plan(
     _timestamp(created_at, "created_at")
     serving, serving_sha256 = _validate_serving_freeze(config, serving_freeze_path)
     _baseline, baseline_sha256 = _validated_baseline_freeze(config, baseline_freeze_path)
+    pre_promotion_serving = _validated_pre_promotion_serving_contract(
+        config,
+        serving,
+        serving_sha256,
+        deployment_selector_path,
+        risk_shield_path,
+    )
     repository = Path(__file__).resolve().parents[3]
     embedding_path = config.upstream.embedding_manifest_path
     corpus_path = config.upstream.corpus_manifest_path
@@ -1600,6 +1732,7 @@ def write_evaluation_access_plan(
         "serving_freeze_sha256": serving_sha256,
         "baseline_freeze_path": str(baseline_freeze_path.resolve()),
         "baseline_freeze_sha256": baseline_sha256,
+        "pre_promotion_serving": pre_promotion_serving,
         "final_timesteps": serving["final_timesteps"],
         "test_descriptors": {
             "embedding_manifest": {
@@ -1696,6 +1829,27 @@ def _validated_evaluation_access_plan(
         or serving.get("final_timesteps") != plan.get("final_timesteps")
     ):
         raise EvaluationContractError("evaluation access parent identity mismatch")
+    pre_promotion = plan.get("pre_promotion_serving")
+    if not isinstance(pre_promotion, dict):
+        raise EvaluationContractError("pre-promotion serving contract is missing")
+    selector = pre_promotion.get("deployment_selector")
+    shield = pre_promotion.get("risk_shield")
+    if (
+        not isinstance(selector, dict)
+        or not isinstance(selector.get("path"), str)
+        or not isinstance(shield, dict)
+        or not isinstance(shield.get("path"), str)
+    ):
+        raise EvaluationContractError("pre-promotion serving references are missing")
+    expected_pre_promotion = _validated_pre_promotion_serving_contract(
+        config,
+        serving,
+        serving_sha256,
+        Path(cast(str, selector["path"])),
+        Path(cast(str, shield["path"])),
+    )
+    if pre_promotion != expected_pre_promotion:
+        raise EvaluationContractError("pre-promotion serving contract changed")
     descriptors = plan.get("test_descriptors")
     if not isinstance(descriptors, dict):
         raise EvaluationContractError("evaluation access descriptors are missing")
@@ -2038,6 +2192,7 @@ def write_evaluation_plan(
         "serving_freeze_sha256": serving_sha256,
         "baseline_freeze_path": str(baseline_freeze_path.resolve()),
         "baseline_freeze_sha256": baseline_sha256,
+        "pre_promotion_serving": access_plan["pre_promotion_serving"],
         "test_schedules": [reference for _schedule, reference in schedules],
         **_evaluation_contract_fields(
             serving_seed=cast(int, serving["serving_seed"]),
@@ -2259,6 +2414,7 @@ def _validated_evaluation_plan(config: RlConfig, path: Path) -> tuple[dict[str, 
         access_sha256 != plan.get("access_plan_sha256")
         or access.get("serving_freeze_sha256") != serving_sha256
         or access.get("baseline_freeze_sha256") != baseline_sha256
+        or access.get("pre_promotion_serving") != plan.get("pre_promotion_serving")
         or serving_sha256 != plan.get("serving_freeze_sha256")
         or baseline_sha256 != plan.get("baseline_freeze_sha256")
     ):
@@ -2616,6 +2772,71 @@ def _latency_one_bar_action(
     return 0, None, None
 
 
+@dataclass
+class _StressTransitionState:
+    stress: str
+    missed_offset: int
+    pending_order: EntryOrder | None = None
+    opportunity_number: int = 0
+    proposed_takes: int = 0
+    missed_fill_count: int = 0
+    latency_cancellations: int = 0
+
+
+def _prepare_stressed_action(
+    environment: TopstepEntryEnvironment,
+    state: _StressTransitionState,
+    action: int,
+    opportunity: str,
+) -> tuple[int, EntryOrder | None, str | None]:
+    """Apply the shared deterministic order stress before one environment step."""
+    if state.stress == "latency_1bar":
+        state.proposed_takes += int(bool(action) and state.pending_order is None)
+        proposed = environment.capture_entry_order(opportunity) if action else None
+        action, state.pending_order, submitted = _latency_one_bar_action(
+            action, proposed, state.pending_order
+        )
+        return (
+            action,
+            submitted,
+            submitted.opportunity_identity if submitted is not None else None,
+        )
+    if not action:
+        return 0, None, None
+    state.proposed_takes += 1
+    if state.stress == "missed_fill_10pct" and state.opportunity_number % 10 == state.missed_offset:
+        action = 0
+        state.missed_fill_count += 1
+    state.opportunity_number += 1
+    return action, None, opportunity if action else None
+
+
+def _finish_stressed_step(
+    environment: TopstepEntryEnvironment,
+    state: _StressTransitionState,
+    prior_session: str,
+    submitted_order: EntryOrder | None,
+    info: Mapping[str, object],
+    terminated: bool,
+    truncated: bool,
+) -> None:
+    """Update shared stress state after one environment transition."""
+    if state.pending_order is not None and (
+        environment._session != prior_session or info.get("event") == "DISCONTINUITY_RESET"
+    ):
+        state.pending_order = None
+        state.latency_cancellations += 1
+    if (
+        state.stress == "latency_1bar"
+        and submitted_order is not None
+        and "booked_round_trip_fee" not in info
+    ):
+        state.latency_cancellations += 1
+    if (terminated or truncated) and state.pending_order is not None:
+        state.pending_order = None
+        state.latency_cancellations += 1
+
+
 def _canonical_pair_key(
     fold: int,
     calendar_block: str,
@@ -2733,18 +2954,14 @@ def _production_evaluation_runner(config: RlConfig, plan: Mapping[str, object]) 
             )
             observation, _ = environment.reset(seed=request.seed)
             eligible = 0
-            proposed_takes = 0
-            missed = 0
-            latency_cancellations = 0
-            latency_pending = False
-            latency_order: EntryOrder | None = None
             accepted_opportunities: list[str] = []
             peak_equity = _finite_float(environment.account_state["equity"], "account equity")
             maximum_drawdown = 0.0
             minimum_cushion = _finite_float(
                 environment.account_state["equity"], "account equity"
             ) - _finite_float(environment.account_state["mll_floor"], "account MLL floor")
-            fees = 0.0
+            commission_costs = 0.0
+            gap_costs = 0.0
             gap_adjusted_fills = 0
             episode_id = str(identity.get("number"))
             episode_start = active_episode.bars[0].timestamp
@@ -2768,6 +2985,7 @@ def _production_evaluation_runner(config: RlConfig, plan: Mapping[str, object]) 
                 )
                 % 10
             )
+            stress_state = _StressTransitionState(request.stress, offset)
             if request.policy == "matched_random_take":
                 target_count = matched_counts.get(str(identity.get("number")))
                 if target_count is None:
@@ -2808,8 +3026,7 @@ def _production_evaluation_runner(config: RlConfig, plan: Mapping[str, object]) 
                         ),
                     )
                     replay.reset(seed=request.seed)
-                    replay_pending: EntryOrder | None = None
-                    opportunity_index = 0
+                    replay_stress = _StressTransitionState(request.stress, missed_offset)
                     while True:
                         replay_mask = replay.action_mask()
                         replay_action = 0
@@ -2825,34 +3042,25 @@ def _production_evaluation_runner(config: RlConfig, plan: Mapping[str, object]) 
                                 "big",
                             )
                             replay_action = int(replay_rank in selected)
-                            if request.stress == "latency_1bar":
-                                proposed_order = (
-                                    replay.capture_entry_order(replay_opportunity)
-                                    if replay_action
-                                    else None
-                                )
-                                replay_action, replay_pending, replay_submitted = (
-                                    _latency_one_bar_action(
-                                        replay_action,
-                                        proposed_order,
-                                        replay_pending,
-                                    )
-                                )
-                            elif replay_action and (
-                                request.stress == "missed_fill_10pct"
-                                and opportunity_index % 10 == missed_offset
-                            ):
-                                replay_action = 0
-                            opportunity_index += 1
+                            replay_action, replay_submitted, _ = _prepare_stressed_action(
+                                replay,
+                                replay_stress,
+                                replay_action,
+                                replay_opportunity,
+                            )
                         prior_replay_session = replay._session
                         _, _, replay_done, replay_truncated, replay_info = replay.step(
                             replay_action, entry_order=replay_submitted
                         )
-                        if replay_pending is not None and (
-                            replay._session != prior_replay_session
-                            or replay_info.get("event") == "DISCONTINUITY_RESET"
-                        ):
-                            replay_pending = None
+                        _finish_stressed_step(
+                            replay,
+                            replay_stress,
+                            prior_replay_session,
+                            replay_submitted,
+                            replay_info,
+                            replay_done,
+                            replay_truncated,
+                        )
                         if replay_done or replay_truncated:
                             break
                     return _integer(
@@ -2862,7 +3070,6 @@ def _production_evaluation_runner(config: RlConfig, plan: Mapping[str, object]) 
                 matched_ranks = set(
                     _sha_ranked_exact_selection(ordered_ranks, target_count, accepted_for)
                 )
-            opportunity_number = 0
             while True:
                 mask = environment.action_mask()
                 action = 0
@@ -2913,54 +3120,31 @@ def _production_evaluation_runner(config: RlConfig, plan: Mapping[str, object]) 
                         )
                         # The cutoff is frozen from all legal opportunities below.
                         action = int(rank in matched_ranks)
-                    if request.stress == "latency_1bar":
-                        proposed_takes += int(bool(action) and latency_order is None)
-                        proposed_order = (
-                            environment.capture_entry_order(opportunity) if action else None
-                        )
-                        action, latency_order, submitted_order = _latency_one_bar_action(
-                            action, proposed_order, latency_order
-                        )
-                        latency_pending = latency_order is not None
-                        submitted_opportunity = (
-                            submitted_order.opportunity_identity
-                            if submitted_order is not None
-                            else None
-                        )
-                    elif action:
-                        proposed_takes += 1
-                        if (
-                            request.stress == "missed_fill_10pct"
-                            and opportunity_number % 10 == offset
-                        ):
-                            action = 0
-                            missed += 1
-                        if action:
-                            submitted_opportunity = opportunity
-                        opportunity_number += 1
+                    action, submitted_order, submitted_opportunity = _prepare_stressed_action(
+                        environment,
+                        stress_state,
+                        action,
+                        opportunity,
+                    )
                 prior_session = environment._session
                 observation, reward, terminated, truncated, info = environment.step(
                     action, entry_order=submitted_order
                 )
-                if latency_pending and (
-                    environment._session != prior_session
-                    or info.get("event") == "DISCONTINUITY_RESET"
-                ):
-                    latency_pending = False
-                    latency_order = None
-                    latency_cancellations += 1
-                if (
-                    request.stress == "latency_1bar"
-                    and submitted_order is not None
-                    and "booked_round_trip_fee" not in info
-                ):
-                    latency_cancellations += 1
+                _finish_stressed_step(
+                    environment,
+                    stress_state,
+                    prior_session,
+                    submitted_order,
+                    info,
+                    terminated,
+                    truncated,
+                )
                 if not np.isfinite(observation.vector).all() or not math.isfinite(float(reward)):
                     raise EvaluationContractError("evaluation transition is non-finite")
                 if "booked_round_trip_fee" in info:
-                    fees += _finite_float(info["booked_round_trip_fee"], "booked fee")
+                    commission_costs += _finite_float(info["booked_round_trip_fee"], "booked fee")
                     gap_adjusted_fills += int(info.get("gap_adjusted_fill") is True)
-                    fees += _finite_float(info.get("gap_extra_cost", 0.0), "gap extra cost")
+                    gap_costs += _finite_float(info.get("gap_extra_cost", 0.0), "gap extra cost")
                     if submitted_opportunity is None:
                         raise EvaluationContractError("fill has no entry opportunity identity")
                     accepted_opportunities.append(submitted_opportunity)
@@ -2973,10 +3157,6 @@ def _production_evaluation_runner(config: RlConfig, plan: Mapping[str, object]) 
                     equity - _finite_float(state["mll_floor"], "account MLL floor"),
                 )
                 if terminated or truncated:
-                    if latency_pending:
-                        latency_cancellations += 1
-                    latency_pending = False
-                    latency_order = None
                     break
             state = environment.account_state
             accepted = _integer(state["accepted_trades"], "accepted trades")
@@ -3012,7 +3192,10 @@ def _production_evaluation_runner(config: RlConfig, plan: Mapping[str, object]) 
                     "accepted_trades": accepted,
                     "eligible_entries": eligible,
                     "net_pnl": net_pnl,
-                    "costs": fees + slippage_cost,
+                    "costs": commission_costs + slippage_cost + gap_costs,
+                    "commission_costs": commission_costs,
+                    "slippage_costs": slippage_cost,
+                    "gap_costs": gap_costs,
                     "expectancy": net_pnl / accepted if accepted else 0.0,
                     "maximum_drawdown": maximum_drawdown,
                     "minimum_mll_cushion": minimum_cushion,
@@ -3020,11 +3203,11 @@ def _production_evaluation_runner(config: RlConfig, plan: Mapping[str, object]) 
                     "consistency_ratio": _finite_float(
                         state["consistency_ratio"], "consistency ratio"
                     ),
-                    "action_entropy": _binary_entropy(proposed_takes, eligible),
+                    "action_entropy": _binary_entropy(stress_state.proposed_takes, eligible),
                     "ambiguity_count": _integer(state["ambiguity_count"], "ambiguity count"),
                     "gap_adjusted_fills": gap_adjusted_fills,
-                    "latency_cancellations": latency_cancellations,
-                    "missed_fill_count": missed,
+                    "latency_cancellations": stress_state.latency_cancellations,
+                    "missed_fill_count": stress_state.missed_fill_count,
                     "finite": True,
                     "accepted_opportunity_ids": accepted_opportunities,
                     "stress_identity_sha256": stress_identity_sha256,
@@ -3385,6 +3568,40 @@ def _validated_replay(
     return replay, rows
 
 
+def _complete_calendar_blocks(
+    rows: Sequence[Mapping[str, object]],
+    required_cells: set[tuple[str, str]],
+    expected_seeds: Sequence[int],
+) -> list[object]:
+    """Return the ordered week intersection shared by every required cell and seed."""
+    blocks_by_owner: dict[tuple[str, str, int], set[object]] = defaultdict(set)
+    for row in rows:
+        if row.get("policy") != "candidate" or row.get("stress") != "primary":
+            continue
+        ticker = row.get("ticker")
+        profile = row.get("profile")
+        seed = row.get("seed")
+        if (
+            isinstance(ticker, str)
+            and isinstance(profile, str)
+            and type(seed) is int
+            and seed in expected_seeds
+        ):
+            blocks_by_owner[(ticker, profile, seed)].add(row.get("calendar_block"))
+    owners = {
+        (ticker, profile, seed) for ticker, profile in required_cells for seed in expected_seeds
+    }
+    if set(blocks_by_owner) != owners or any(not blocks_by_owner[owner] for owner in owners):
+        raise EvaluationContractError("calendar block ownership is incomplete")
+    complete = set.intersection(*(blocks_by_owner[owner] for owner in sorted(owners)))
+    blocks = sorted(complete, key=str)
+    if len(blocks) < 20:
+        raise EvaluationContractError(
+            "global evaluation has fewer than 20 complete calendar blocks"
+        )
+    return blocks
+
+
 def evaluate_topstep_promotion(
     config: RlConfig, serving_freeze_path: Path, replay_path: Path, output: Path
 ) -> dict[str, object]:
@@ -3394,16 +3611,13 @@ def evaluate_topstep_promotion(
     plan_sha256 = replay.get("evaluation_plan_sha256")
     if not isinstance(plan_sha256, str) or len(plan_sha256) != 64:
         raise EvaluationContractError("test replay evaluation plan identity is missing")
-    global_blocks = sorted(
-        {
-            row["calendar_block"]
-            for row in rows
-            if row["policy"] == "candidate" and row["stress"] == "primary"
-        },
-        key=str,
-    )
-    if len(global_blocks) < 20:
-        raise EvaluationContractError("global evaluation has fewer than 20 calendar blocks")
+    expected_seeds = tuple(config.training.confirmation_seeds)
+    required_cells = {
+        (ticker, profile)
+        for ticker in TICKERS
+        for profile in (("one_mini",) if ticker == "ZB" else PROFILES)
+    }
+    global_blocks = _complete_calendar_blocks(rows, required_cells, expected_seeds)
     bootstrap_seed = int.from_bytes(
         hashlib.sha256(f"{plan_sha256}:test-market-bootstrap-v1".encode()).digest()[:8],
         "big",
@@ -3414,12 +3628,6 @@ def evaluate_topstep_promotion(
         size=(100_000, len(global_blocks)),
         dtype=np.uint32,
     )
-    expected_seeds = tuple(config.training.confirmation_seeds)
-    required_cells = {
-        (ticker, profile)
-        for ticker in TICKERS
-        for profile in (("one_mini",) if ticker == "ZB" else PROFILES)
-    }
     stress_metrics: dict[str, object] = {}
     numeric_evidence: dict[str, dict[str, object]] = {}
     sensitivity_evidence: dict[str, dict[str, object]] = {}
@@ -3467,6 +3675,7 @@ def evaluate_topstep_promotion(
                 for seed in expected_seeds
             }
         baseline_effects: dict[str, dict[str, object]] = {}
+        descriptive_baseline_effects: dict[str, dict[str, object]] = {}
         for scope, profile in (
             ("pooled", None),
             ("one_mini", "one_mini"),
@@ -3476,6 +3685,7 @@ def evaluate_topstep_promotion(
                 rows if profile is None else [row for row in rows if row["profile"] == profile]
             )
             baseline_effects[scope] = {}
+            descriptive_baseline_effects[scope] = {}
             for baseline in ("take_all", "matched_random_take"):
                 effect = _point_and_lcb(
                     selected,
@@ -3488,6 +3698,22 @@ def evaluate_topstep_promotion(
                     bootstrap_indices,
                 )
                 baseline_effects[scope][baseline] = effect
+                bootstrap_hashes.add(cast(str, effect["index_matrix_sha256"]))
+            for baseline in (
+                "historical_rejected_logistic_head",
+                "hist_gradient_boosting",
+            ):
+                effect = _point_and_lcb(
+                    selected,
+                    "candidate",
+                    baseline,
+                    stress,
+                    plan_sha256,
+                    expected_seeds,
+                    global_blocks,
+                    bootstrap_indices,
+                )
+                descriptive_baseline_effects[scope][baseline] = effect
                 bootstrap_hashes.add(cast(str, effect["index_matrix_sha256"]))
         transfer_effects: dict[tuple[str, str], Mapping[str, object]] = {}
         pooled_transfer = _point_and_lcb(
@@ -3524,6 +3750,7 @@ def evaluate_topstep_promotion(
             "seed_pass_rates": seed_pass_rates,
             "seed_blow_counts": seed_blow_counts,
             "baseline_effects": baseline_effects,
+            "descriptive_baseline_effects": descriptive_baseline_effects,
             "transfer_effects": transfer_effects,
         }
     if len(bootstrap_hashes) != 1:
