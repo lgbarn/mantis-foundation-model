@@ -44,6 +44,7 @@ them can make a checkpoint intentionally non-resumable.
 | `just verify-upstream` | Fetches/verifies official weights on CPU | Hub cache | Network on first use |
 | `just inspect-data <config>` | Reads every configured stream and builds anchors | Nothing | Full corpus scan |
 | `just probe-mps` | 32 real optimizer updates and one validation batch | Disposable probe artifacts | MPS allocation and weight fetch |
+| `just probe-cuda-fp32 ...` | Strict 32-update CUDA FP32 probe and validated export | Unique no-overwrite evidence | Real CUDA, pinned image, data, and official weights |
 | `just train <config>` | Trains or resumes | Checkpoints, metrics, provenance | Long accelerator run; mutates run state |
 | `just tensorboard <run-root>` | Serves run events on `127.0.0.1:6006` | Nothing | Read-only; use an SSH tunnel remotely |
 | `just evaluate <config>` | Evaluates `best.pt` | `evaluation.json` | Reads data/checkpoint; writes authorization |
@@ -228,10 +229,35 @@ verification establish correctness only. Create a separate config with
 
 ### CUDA
 
-The foundation code path exists, but there is no committed CUDA probe or
-production recipe. Downstream embedding does not support CUDA. A CUDA
-qualification effort is a new implementation and validation scope, not a config
-toggle that makes the whole workflow supported.
+The committed FP32 qualification contract is
+`mantis-v2/configs/cuda-fp32-qualification.toml`. On the pinned CUDA image, use
+a machine-local pipeline config with real pre-holdout paths and a unique absent
+run identity:
+
+```bash
+just probe-cuda-fp32 \
+  mantis-v2/configs/nextleg-parquet-v2-probe.toml \
+  mantis-v2/configs/cuda-fp32-qualification.toml \
+  cuda-fp32-probe-YYYYMMDDTHHMMSSZ-1234abcd \
+  /workspace/artifacts
+```
+
+The command fails closed unless it can use explicit CUDA, pinned memory, the
+official base checkpoint, exactly 32 real optimizer updates, one validation
+batch, no resume or overwrite, and the sealed holdout remains unavailable. It
+then evaluates the selected checkpoint and verifies safetensors reload parity
+at `atol=1e-5`, `rtol=1e-4`. A CPU host emits a canonical skip record without
+opening data or artifact paths.
+
+The same qualification module owns the fixed-input CPU/CUDA output, component
+loss, total loss, gradient, and optimizer-update oracle; fresh-process batch
+doubling through a classified OOM with both 80% memory caps; exact 32 versus
+16+restart equivalence; both fine-tune parameter-count contracts; environment
+identity; and stale evaluation/export refusal. CPU CI validates these schemas,
+errors, tolerances, and skip reasons. Only a reviewed real-CUDA evidence bundle
+can qualify a GPU shape; the committed code and a CPU skip do not.
+
+Downstream embedding still does not support CUDA, and BF16 remains unqualified.
 
 ## Phase 8: train or resume NextLeg
 
