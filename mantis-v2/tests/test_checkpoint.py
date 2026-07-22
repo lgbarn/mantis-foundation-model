@@ -16,6 +16,7 @@ from torch import nn
 def provenance() -> Provenance:
     return Provenance(
         schema_version=1,
+        precision="fp32",
         config_digest="config",
         dataset_digest="dataset",
         dataset_files=(FileIdentity("synthetic", 1, "hash"),),
@@ -73,6 +74,12 @@ def test_checkpoint_restores_training_state_and_rejects_stale_data(tmp_path: Pat
     stale_contamination = replace(provenance(), contamination_digest="changed")
     with pytest.raises(CheckpointError, match="contamination_digest"):
         load_checkpoint(path, model, optimizer, stale_contamination)
+
+    with pytest.raises(
+        CheckpointError,
+        match="checkpoint precision-provenance mismatch: expected bf16, observed fp32",
+    ):
+        load_checkpoint(path, model, optimizer, replace(provenance(), precision="bf16"))
 
 
 class UnsafeCheckpoint:

@@ -16,6 +16,24 @@ def test_smoke_config_is_valid_and_content_addressed() -> None:
     assert config.digest == load_config(ROOT / "configs" / "smoke.toml").digest
 
 
+def test_precision_is_strict_and_part_of_experiment_identity(tmp_path: Path) -> None:
+    source = (ROOT / "configs" / "smoke.toml").read_text()
+    fp32_path = tmp_path / "fp32.toml"
+    fp32_path.write_text(source)
+    bf16_path = tmp_path / "bf16.toml"
+    bf16_path.write_text(source.replace('precision = "fp32"', 'precision = "bf16"'))
+    invalid_path = tmp_path / "invalid.toml"
+    invalid_path.write_text(source.replace('precision = "fp32"', 'precision = "fp16"'))
+
+    fp32 = load_config(fp32_path)
+    bf16 = load_config(bf16_path)
+    assert fp32.training.precision == "fp32"
+    assert bf16.training.precision == "bf16"
+    assert fp32.digest != bf16.digest
+    with pytest.raises(ConfigError, match="training.precision must be one of: bf16, fp32"):
+        load_config(invalid_path)
+
+
 def test_production_config_is_valid() -> None:
     config = load_config(ROOT / "configs" / "nextleg.toml")
     assert config.model.mode == "full_finetune"

@@ -257,7 +257,35 @@ identity; and stale evaluation/export refusal. CPU CI validates these schemas,
 errors, tolerances, and skip reasons. Only a reviewed real-CUDA evidence bundle
 can qualify a GPU shape; the committed code and a CPU skip do not.
 
-Downstream embedding still does not support CUDA, and BF16 remains unqualified.
+BF16 is an explicit, fail-closed candidate rather than a default. Set
+`training.precision="bf16"` only on explicit CUDA after
+`torch.cuda.is_bf16_supported()` succeeds. Forward and loss computation use
+BF16 autocast while parameters and optimizer state remain FP32; no loss scaler
+or automatic retry is used. Config, provenance, checkpoint, evaluation, export,
+TensorBoard, and qualification evidence all record the precision identity.
+
+The preregistered policy is
+`mantis-v2/configs/cuda-bf16-qualification.toml`. A reviewed paid run captures
+the public fixed fixture in FP32 and BF16, 32 uninterrupted versus 16+restart
+BF16 state, native versus reloaded export evidence, and all precision records.
+Apply the immutable evidence gate with:
+
+```bash
+just qualify-cuda-bf16 fp32.json bf16.json qualification.json
+```
+
+For an unsupported operation, OOM, overflow, non-finite value, or other paid
+attempt failure, record the rejection instead:
+
+```bash
+just reject-cuda-bf16 fp32.json 'CUDA out of memory' qualification.json
+```
+
+Both commands write a new no-overwrite decision. A failed comparison selects
+FP32 after exactly one attempt without reducing registered tolerances. CPU tests
+exercise the policy and fake failures, but only reviewed real-CUDA evidence can
+promote BF16. Until that evidence passes, FP32 remains selected. Downstream
+embedding still does not support CUDA.
 
 ## Phase 8: train or resume NextLeg
 

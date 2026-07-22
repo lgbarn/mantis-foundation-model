@@ -28,6 +28,7 @@ channel_strategy = "independent_concat"
 mode = "scratch"
 
 [training]
+precision = "fp32"
 epochs = 1
 batch_size = 4
 learning_rate = 0.001

@@ -369,8 +369,9 @@ re-query immediately before launch.
 
 The repository now has a pinned CUDA image, real-data FP32 probe contract,
 TensorBoard event writing, fixed cross-device and interrupted-resume oracles,
-resource evidence schemas, and transfer verification. CUDA embedding, BF16,
-and the independent shutdown watchdog remain separate gates. The first paid
+resource evidence schemas, a fail-closed BF16 candidate and evidence gate, and
+transfer verification. CUDA embedding, real-CUDA BF16 promotion evidence, and
+the independent shutdown watchdog remain separate gates. The first paid
 benchmark is still a post-implementation human acceptance gate, not evidence
 that CUDA is already qualified.
 
@@ -389,6 +390,22 @@ This command performs exactly 32 optimizer updates and one pre-holdout
 validation batch, then evaluates and verifies the selected safetensors export.
 It cannot resume, overwrite, fall back to scratch weights, or unlock holdout
 data. CPU-only execution emits a skip record and does not qualify the path.
+
+BF16 keeps FP32 parameters and optimizer state and applies autocast only to the
+forward/loss region. It requires explicit supported CUDA and exact precision
+identity across every artifact. After capturing the registered FP32 reference
+and BF16 candidate bundles, run:
+
+```bash
+just qualify-cuda-bf16 fp32.json bf16.json qualification.json
+```
+
+If the single paid candidate attempt fails before producing a bundle, use
+`just reject-cuda-bf16 fp32.json '<failure>' qualification.json`. Both paths are
+no-overwrite. Any unsupported operation, OOM, overflow, non-finite evidence,
+parity mismatch, resume mismatch, export mismatch, or precision-record mismatch
+selects FP32 with no retry and no tolerance change. CPU fake evidence tests do
+not promote BF16; promotion requires reviewed real-CUDA evidence.
 
 Run the A40 alone first with a two-hour hard deadline. A longer qualification
 requires a new explicit approval after reviewing that result. The cumulative

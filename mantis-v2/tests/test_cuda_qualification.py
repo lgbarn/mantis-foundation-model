@@ -422,7 +422,7 @@ def test_probe_and_export_executes_the_public_cuda_contract(tmp_path: Path) -> N
                 "upstream_weights_sha256": qualification.official_base.weights_sha256,
                 "trainable_parameters": 4385494,
                 "frozen_parameters": 1060160,
-                "precision": "float32",
+                "precision": "fp32",
             },
         }
 

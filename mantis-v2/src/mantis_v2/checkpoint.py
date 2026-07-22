@@ -75,7 +75,14 @@ def load_checkpoint(
             raise CheckpointError("unsupported checkpoint schema")
         recorded = payload.get("provenance")
         expected = provenance.to_dict()
+        if not isinstance(recorded, dict) or recorded.get("precision") != expected["precision"]:
+            observed = recorded.get("precision") if isinstance(recorded, dict) else None
+            raise CheckpointError(
+                "checkpoint precision-provenance mismatch: "
+                f"expected {expected['precision']}, observed {observed}"
+            )
         for key in (
+            "precision",
             "config_digest",
             "dataset_digest",
             "source_digest",

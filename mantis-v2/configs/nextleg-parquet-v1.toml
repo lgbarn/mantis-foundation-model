@@ -32,6 +32,7 @@ channel_strategy = "independent_concat"
 mode = "full_finetune"
 
 [training]
+precision = "fp32"
 epochs = 120
 batch_size = 128
 learning_rate = 0.0001188117389055629

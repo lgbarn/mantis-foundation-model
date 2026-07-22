@@ -17,6 +17,7 @@ class ConfigError(ValueError):
 
 
 Device = Literal["auto", "cpu", "mps", "cuda"]
+Precision = Literal["fp32", "bf16"]
 ModelMode = Literal[
     "scratch",
     "head_only",
@@ -67,6 +68,7 @@ class ModelConfig:
 
 @dataclass(frozen=True)
 class TrainingConfig:
+    precision: Precision
     epochs: int
     batch_size: int
     learning_rate: float
@@ -276,6 +278,7 @@ def load_config(path: str | Path) -> PipelineConfig:
         raw,
         "training",
         {
+            "precision",
             "epochs",
             "batch_size",
             "learning_rate",
@@ -371,6 +374,7 @@ def load_config(path: str | Path) -> PipelineConfig:
             mode=mode,  # type: ignore[arg-type]
         ),
         training=TrainingConfig(
+            precision=_choice(training["precision"], "training.precision", {"fp32", "bf16"}),  # type: ignore[arg-type]
             epochs=_positive(training["epochs"], "training.epochs"),
             batch_size=_positive(training["batch_size"], "training.batch_size"),
             learning_rate=_number(

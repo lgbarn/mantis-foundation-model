@@ -24,6 +24,7 @@ from mantis_v2.pipeline import (
     train,
     validated_export,
 )
+from mantis_v2.precision import PrecisionContractError
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 from torch.utils.data import DataLoader, Dataset
 
@@ -200,6 +201,22 @@ def test_terminal_epoch_is_checkpointed_and_collision_is_rejected(tmp_path: Path
         _assert_run_writable(protected, checkpoint.parents[1])
 
 
+def test_bf16_rejects_unsupported_device_before_run_directory_mutation(tmp_path: Path) -> None:
+    base = load_config(ROOT / "configs" / "smoke.toml")
+    config = replace(
+        base,
+        run=replace(base.run, name="bf16-cpu", artifact_root=tmp_path, device="cpu"),
+        training=replace(base.training, precision="bf16"),
+    )
+
+    with pytest.raises(
+        PrecisionContractError, match="BF16 requires an explicitly supported CUDA device"
+    ):
+        train(config)
+
+    assert not (tmp_path / "bf16-cpu").exists()
+
+
 def test_bounded_training_emits_tensorboard_loss_and_progress_events(tmp_path: Path) -> None:
     base = load_config(ROOT / "configs" / "smoke.toml")
     config = replace(
@@ -264,10 +281,13 @@ def test_bounded_training_emits_tensorboard_loss_and_progress_events(tmp_path: P
         "trainable_parameters": 4605639,
         "frozen_parameters": 820800,
         "seed": 7,
-        "precision": "float32",
+        "precision": "fp32",
+        "parameter_precision": "float32",
+        "optimizer_precision": "fp32",
         "resume_source": None,
     }
     assert "run/metadata/text_summary" in events.Tags()["tensors"]
+    assert "run/precision/text_summary" in events.Tags()["tensors"]
 
 
 def test_tensorboard_failure_preserves_authoritative_training_artifacts(

@@ -12,6 +12,7 @@ from typing import Any
 
 import torch
 
+from mantis_v2.bf16_qualification import Bf16QualificationError, qualify_bf16_files
 from mantis_v2.checkpoint import CheckpointError
 from mantis_v2.config import ConfigError, PipelineConfig, load_config
 from mantis_v2.corpus import CorpusRepairError, repair_corpus, validate_corpus
@@ -180,6 +181,13 @@ def _parser() -> argparse.ArgumentParser:
     cuda_probe.add_argument("--qualification-config", required=True, type=Path)
     cuda_probe.add_argument("--run-id", required=True)
     cuda_probe.add_argument("--artifact-root", required=True, type=Path)
+    bf16_qualification = subparsers.add_parser("cuda-bf16-qualify")
+    bf16_qualification.add_argument("--qualification-config", required=True, type=Path)
+    bf16_qualification.add_argument("--reference", required=True, type=Path)
+    candidate_or_failure = bf16_qualification.add_mutually_exclusive_group(required=True)
+    candidate_or_failure.add_argument("--candidate", type=Path)
+    candidate_or_failure.add_argument("--failure")
+    bf16_qualification.add_argument("--output", required=True, type=Path)
     for command in ("transfer-bundle", "transfer-promote", "transfer-backup-verify"):
         transfer = subparsers.add_parser(command)
         transfer.add_argument("--config", required=True, type=Path)
@@ -232,6 +240,14 @@ def main() -> None:
                 run_id=args.run_id,
                 artifact_root=args.artifact_root,
                 cuda_available=torch.cuda.is_available(),
+            )
+        elif args.command == "cuda-bf16-qualify":
+            result = qualify_bf16_files(
+                config_path=args.qualification_config,
+                reference_path=args.reference,
+                candidate_path=args.candidate,
+                failure=args.failure,
+                output_path=args.output,
             )
         elif args.command == "transfer-bundle":
             transfer_config = load_transfer_config(args.config)
@@ -408,6 +424,7 @@ def main() -> None:
         RunpodConfigError,
         LaunchPlanError,
         QualificationError,
+        Bf16QualificationError,
         TransferBundleError,
         TransferConfigError,
     ) as exc:

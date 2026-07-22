@@ -36,6 +36,12 @@ probe-mps:
 probe-cuda-fp32 config qualification run_id artifact_root:
     uv run mantis-v2 cuda-fp32-probe --config {{quote(config)}} --qualification-config {{quote(qualification)}} --run-id {{quote(run_id)}} --artifact-root {{quote(artifact_root)}}
 
+qualify-cuda-bf16 reference candidate output qualification="mantis-v2/configs/cuda-bf16-qualification.toml":
+    uv run mantis-v2 cuda-bf16-qualify --qualification-config {{quote(qualification)}} --reference {{quote(reference)}} --candidate {{quote(candidate)}} --output {{quote(output)}}
+
+reject-cuda-bf16 reference failure output qualification="mantis-v2/configs/cuda-bf16-qualification.toml":
+    uv run mantis-v2 cuda-bf16-qualify --qualification-config {{quote(qualification)}} --reference {{quote(reference)}} --failure {{quote(failure)}} --output {{quote(output)}}
+
 verify-upstream:
     uv run mantis-v2 verify-upstream --config mantis-v2/configs/nextleg.toml
 

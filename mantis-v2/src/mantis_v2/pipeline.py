@@ -33,6 +33,11 @@ from mantis_v2.instrumentation import (
     synchronize_device,
 )
 from mantis_v2.model import MantisV2Adapter, NextLegModel, download_verified_weights, nextleg_loss
+from mantis_v2.precision import (
+    autocast_context,
+    validate_optimizer_state,
+    validate_precision_device,
+)
 from mantis_v2.provenance import Provenance, build_provenance, sha256_file
 from mantis_v2.runtime import seed_everything, select_device
 
@@ -54,6 +59,7 @@ class _LoadedTrained:
 
 
 _PROVENANCE_IDENTITY_KEYS = (
+    "precision",
     "config_digest",
     "dataset_digest",
     "source_digest",
@@ -336,13 +342,14 @@ def _run_epoch(
                 for parameter_group in optimizer.param_groups:
                     parameter_group["lr"] = learning_rate
                 optimizer.zero_grad(set_to_none=True)
-            output = model(moved["context"])
-            losses = nextleg_loss(
-                output,
-                moved["candle_target"],
-                moved["leg_target"],
-                config.target,
-            )
+            with autocast_context(config.training.precision, device):
+                output = model(moved["context"])
+                losses = nextleg_loss(
+                    output,
+                    moved["candle_target"],
+                    moved["leg_target"],
+                    config.target,
+                )
             if not torch.isfinite(losses["total"]):
                 phase = "training" if training else "validation"
                 raise PipelineError(f"non-finite {phase} loss")
@@ -359,6 +366,7 @@ def _run_epoch(
                     )
                 gradient_norm_total += float(gradient_norm.detach().cpu())
                 optimizer.step()
+                validate_optimizer_state(optimizer)
             for key in ("total", "candle", "leg"):
                 totals[key] += float(losses[key].detach().cpu())
             batches += 1
@@ -386,9 +394,10 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
     if process_epoch_limit is not None and process_epoch_limit <= 0:
         raise PipelineError("process_epoch_limit must be positive")
     seed_everything(config.run.seed)
+    device = select_device(config.run)
+    validate_precision_device(config.training.precision, device)
     root = artifact_root(config)
     _assert_run_writable(config, root)
-    device = select_device(config.run)
     train_dataset, validation_dataset, contamination = _datasets(config)
     provenance = build_provenance(config, repository_root(), contamination)
     _write_json(root / "contamination.json", contamination)
@@ -444,7 +453,9 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
         "trainable_parameters": trainable_parameters,
         "frozen_parameters": frozen_parameters,
         "seed": config.run.seed,
-        "precision": str(first_parameter.dtype).removeprefix("torch."),
+        "precision": config.training.precision,
+        "parameter_precision": str(first_parameter.dtype).removeprefix("torch."),
+        "optimizer_precision": "fp32",
         "resume_source": resume_source,
     }
     _write_json(root / "run-metadata.json", metadata)
@@ -458,6 +469,15 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
         last_event_step = -1
     instrumentation = RunInstrumentation(root)
     instrumentation.text("run/metadata", metadata, global_step)
+    instrumentation.text(
+        "run/precision",
+        {
+            "compute": config.training.precision,
+            "parameters": metadata["parameter_precision"],
+            "optimizer": metadata["optimizer_precision"],
+        },
+        global_step,
+    )
     telemetry_path = root / "instrumentation" / "telemetry.json"
     try:
         loaded_telemetry = json.loads(telemetry_path.read_text())
@@ -590,6 +610,7 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
         "last": history[-1] if history else None,
         "telemetry": telemetry_history[-1] if telemetry_history else None,
         "metadata": metadata,
+        "precision": config.training.precision,
     }
     _write_json(root / "train-result.json", result)
     instrumentation.close()
@@ -601,6 +622,7 @@ def _load_trained(
 ) -> _LoadedTrained:
     seed_everything(config.run.seed)
     device = select_device(config.run)
+    validate_precision_device(config.training.precision, device)
     train_dataset, validation_dataset, contamination = _datasets(config)
     del train_dataset
     provenance = build_provenance(config, repository_root(), contamination)
@@ -663,6 +685,7 @@ def _evaluate_loaded(config: PipelineConfig, loaded: _LoadedTrained) -> dict[str
         raise PipelineError("best checkpoint changed during evaluation; run evaluate again")
     result = {
         "schema_version": 1,
+        "precision": config.training.precision,
         "created_at": datetime.now(UTC).isoformat(),
         "passed": True,
         "split": "validation",
@@ -800,6 +823,7 @@ def _export_loaded(config: PipelineConfig, loaded: _LoadedTrained) -> dict[str, 
             raise PipelineError(f"export parity failed for {key}")
     manifest = {
         "format": config.export.format,
+        "precision": config.training.precision,
         "weights": str(weights_path),
         "weights_sha256": sha256_file(weights_path),
         "config": asdict(config),
