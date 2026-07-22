@@ -675,6 +675,37 @@ def test_trend_magic_execution_trail_is_separate_from_the_fixed_3r_label(
     assert candidate["execution_end_ts"] < candidate["label_end_ts"]
 
 
+@pytest.mark.parametrize(
+    ("direction", "bar_open", "bar_high", "bar_low"),
+    [(1, 98.0, 98.5, 97.5), (-1, 102.0, 102.5, 101.5)],
+)
+def test_execution_stop_fills_at_worse_open_when_bar_gaps_through(
+    direction: int, bar_open: float, bar_high: float, bar_low: float
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "open": [100.0, 100.0, bar_open],
+            "high": [100.0, 100.5, bar_high],
+            "low": [100.0, 99.5, bar_low],
+            "close": [100.0, 100.0, bar_open],
+        }
+    )
+
+    reward, exit_price, _exit_index, adverse, reason = strategy_module._execution_trail_chunk(
+        frame,
+        np.asarray([0]),
+        np.asarray([direction]),
+        np.asarray([1.0]),
+        2,
+        np.asarray([2]),
+    )
+
+    assert exit_price[0] == pytest.approx(bar_open)
+    assert reward[0] == pytest.approx(-2.0)
+    assert adverse[0] == pytest.approx(-2.0)
+    assert reason[0] == "initial_stop"
+
+
 def test_candidate_builder_emits_each_eligible_state_bar(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1327,6 +1358,13 @@ def test_topstep_uses_explicit_micro_tick_fee_and_slippage_economics(tmp_path: P
     assert trades.iloc[0]["quantity"] == 10
     assert trades.iloc[0]["pnl_dollars"] == pytest.approx(77.8)
     assert result.ending_balance == pytest.approx(100_077.8)
+
+    drifted = replace(
+        config,
+        topstep=replace(config.topstep, starting_balance=99_999.0),
+    )
+    with pytest.raises(TopstepContractError, match="rule contract mismatch"):
+        simulate_topstep(pd.DataFrame([prediction]), drifted)
 
 
 def test_topstep_rejects_stale_exact_stop_mae_below_the_stop_outcome() -> None:

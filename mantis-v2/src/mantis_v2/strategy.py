@@ -297,6 +297,7 @@ def _execution_trail_chunk(
     """Replay the causal prior-bar 2R/0.75R execution trail in R units."""
     entry_indices = candidate_indices + 1
     entry = frame["open"].to_numpy(dtype=np.float64)[entry_indices]
+    bar_open_values = frame["open"].to_numpy(dtype=np.float64)
     high = frame["high"].to_numpy(dtype=np.float64)
     low = frame["low"].to_numpy(dtype=np.float64)
     close = frame["close"].to_numpy(dtype=np.float64)
@@ -313,17 +314,23 @@ def _execution_trail_chunk(
         if not valid.any():
             break
         indices = entry_indices + offset
+        bar_open = bar_open_values[indices]
         bar_high = high[indices]
         bar_low = low[indices]
         stopped = valid & np.where(direction > 0, bar_low <= stop, bar_high >= stop)
-        exit_price[stopped] = stop[stopped]
+        stop_fill = np.where(
+            direction > 0,
+            np.minimum(bar_open, stop),
+            np.maximum(bar_open, stop),
+        )
+        exit_price[stopped] = stop_fill[stopped]
         exit_index[stopped] = indices[stopped]
         reason[stopped] = np.where(
             np.isclose(stop[stopped], entry[stopped] - direction[stopped] * risk[stopped]),
             "initial_stop",
             "trail_stop",
         )
-        stop_reward = direction * (stop - entry) / risk
+        stop_reward = direction * (stop_fill - entry) / risk
         adverse_r[stopped] = np.minimum(adverse_r[stopped], stop_reward[stopped])
         active[stopped] = False
 

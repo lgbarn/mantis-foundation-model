@@ -71,12 +71,38 @@ def _explicit_execution_economics(
         raise TopstepContractError("Topstep rule contract digest mismatch")
     contracts = rules.get("contracts")
     account = rules.get("account")
-    if not isinstance(contracts, dict) or not isinstance(account, dict):
+    session = rules.get("session")
+    if (
+        not isinstance(contracts, dict)
+        or not isinstance(account, dict)
+        or not isinstance(session, dict)
+    ):
         raise TopstepContractError("Topstep rule contract is incomplete")
-    maximum = min(
-        float(account.get("maximum_position_equivalence", 0)),
-        config.topstep.max_mini_equivalents,
-    )
+    expected_account = {
+        "starting_balance": config.topstep.starting_balance,
+        "initial_mll_floor": config.topstep.starting_balance - config.topstep.mll_distance,
+        "mll_distance": config.topstep.mll_distance,
+        "profit_target": config.topstep.profit_target,
+        "consistency_limit": config.topstep.consistency_limit,
+        "minimum_trading_days": config.topstep.minimum_trading_days,
+        "maximum_position_equivalence": config.topstep.max_mini_equivalents,
+        "mll_lock_balance": config.topstep.mll_lock_balance,
+        "mll_ratchet": "end_of_day_high_water",
+        "mll_enforcement": "continuous_realized_and_unrealized",
+        "overnight_holding": False,
+    }
+    expected_session = {
+        "timezone": config.topstep.session_timezone,
+        "start": f"{config.topstep.session_start_hour:02d}:00",
+        "force_flat": (
+            f"{config.topstep.session_end_hour:02d}:{config.topstep.session_end_minute:02d}"
+        ),
+    }
+    if any(account.get(key) != value for key, value in expected_account.items()) or any(
+        session.get(key) != value for key, value in expected_session.items()
+    ):
+        raise TopstepContractError("Topstep rule contract mismatch")
+    maximum = config.topstep.max_mini_equivalents
     result: dict[str, dict[str, float | int | str]] = {}
     rows = zip(
         config.data.symbols,
