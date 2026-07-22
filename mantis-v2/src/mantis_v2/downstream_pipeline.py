@@ -19,7 +19,11 @@ import torch
 
 from mantis_v2.contamination import report_digest
 from mantis_v2.downstream_config import DownstreamConfig, load_downstream_config
-from mantis_v2.embedding import iter_symbol_embeddings, load_foundation
+from mantis_v2.embedding import (
+    iter_symbol_embeddings,
+    load_foundation,
+    resolve_embedding_device,
+)
 from mantis_v2.instrumentation import (
     RunInstrumentation,
     collect_resource_metrics,
@@ -306,13 +310,14 @@ def prepare(config: DownstreamConfig) -> dict[str, Any]:
 
 def embed(config: DownstreamConfig) -> dict[str, Any]:
     """Extract bounded MantisV2 embedding shards from prepared candidates."""
+    device = resolve_embedding_device(config.run.device)
     root = artifact_root(config)
     started = time.perf_counter()
     prepared = _manifest(root / "prepare" / "manifest.json", config, "prepare")
     stage_root = root / "embed"
     manifest_path = stage_root / "manifest.json"
     _require_new(stage_root, config)
-    foundation = load_foundation(config)
+    foundation = load_foundation(config, device=device)
     synchronize_device(foundation.device)
     outputs: list[dict[str, Any]] = []
     shard_number = 0

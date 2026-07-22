@@ -21,7 +21,7 @@ class DownstreamRunConfig:
     name: str
     seed: int
     artifact_root: Path
-    device: Literal["auto", "cpu", "mps"]
+    device: Literal["cpu", "cuda", "mps"]
     allow_overwrite: bool
 
 
@@ -474,7 +474,7 @@ def load_downstream_config(path: str | Path, overrides: tuple[str, ...] = ()) ->
             name=str(run["name"]),
             seed=_int(run["seed"], "run.seed"),
             artifact_root=Path(str(run["artifact_root"])),
-            device=_choice(run["device"], "run.device", {"auto", "cpu", "mps"}),
+            device=_choice(run["device"], "run.device", {"cpu", "cuda", "mps"}),
             allow_overwrite=_bool(run["allow_overwrite"], "run.allow_overwrite"),
         ),
         data=DownstreamDataConfig(
