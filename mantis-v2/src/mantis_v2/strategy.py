@@ -334,9 +334,7 @@ def _execution_trail_chunk(
                 (bar_low - entry) / risk,
                 (entry - bar_high) / risk,
             )
-            adverse_r[surviving] = np.minimum(
-                adverse_r[surviving], bar_adverse[surviving]
-            )
+            adverse_r[surviving] = np.minimum(adverse_r[surviving], bar_adverse[surviving])
             favorable[surviving] = np.where(
                 direction[surviving] > 0,
                 np.maximum(favorable[surviving], bar_high[surviving]),

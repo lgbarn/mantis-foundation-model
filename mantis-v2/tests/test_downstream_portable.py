@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -16,8 +17,22 @@ TEMPLATE = ROOT / "configs" / "trend-magic-topstep-100k-portable-template.toml"
 
 
 def _write_promoted_foundation(tmp_path: Path) -> Path:
-    root = tmp_path / "promoted"
-    root.mkdir()
+    weights_sha256 = hashlib.sha256(b"promoted-foundation").hexdigest()
+    evaluation_sha256 = hashlib.sha256(b"{}").hexdigest()
+    identity = {
+        "schema_version": 1,
+        "promotion_decision_digest": "b" * 64,
+        "selected_result_digest": "c" * 64,
+        "source_manifest_sha256": "d" * 64,
+        "weights_sha256": weights_sha256,
+        "evaluation_sha256": evaluation_sha256,
+        "adapter_sha256": None,
+    }
+    bundle_digest = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    root = tmp_path / "promoted" / bundle_digest
+    root.mkdir(parents=True)
     weights = root / "model.safetensors"
     weights.write_bytes(b"promoted-foundation")
     evaluation = root / "evaluation.json"
@@ -29,21 +44,59 @@ def _write_promoted_foundation(tmp_path: Path) -> Path:
                 "schema_version": 1,
                 "export_role": "promoted",
                 "weights": str(weights),
-                "weights_sha256": sha256_file(weights),
+                "weights_sha256": weights_sha256,
                 "parity": {"verified": True},
                 "validation_gate": {
                     "verified": True,
                     "evaluation": str(evaluation),
-                    "evaluation_sha256": sha256_file(evaluation),
+                    "evaluation_sha256": evaluation_sha256,
                 },
                 "promotion_decision_digest": "b" * 64,
                 "selected_result_digest": "c" * 64,
                 "source_manifest_sha256": "d" * 64,
-                "bundle_digest": "a" * 64,
+                "bundle_digest": bundle_digest,
             }
         )
     )
     return manifest
+
+
+def test_producer_binding_rejects_corrupt_promoted_evaluation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    promotion = _write_promoted_foundation(tmp_path)
+    promoted = json.loads(promotion.read_text())
+    Path(promoted["validation_gate"]["evaluation"]).write_text("corrupt")
+    data_root, corpus = _write_corpus_manifest(tmp_path)
+    output = tmp_path / "producer.toml"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "mantis-v2",
+            "downstream-bind-producer",
+            "--template",
+            str(TEMPLATE),
+            "--promotion-manifest",
+            str(promotion),
+            "--corpus-manifest",
+            str(corpus),
+            "--data-root",
+            str(data_root),
+            "--artifact-root",
+            str(tmp_path / "artifacts"),
+            "--run-name",
+            "producer",
+            "--device",
+            "cpu",
+            "--output",
+            str(output),
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="2"):
+        cli.main()
+    assert not output.exists()
 
 
 def _write_corpus_manifest(tmp_path: Path) -> tuple[Path, Path]:
@@ -63,6 +116,10 @@ def test_cli_binds_exact_portable_producer_and_consumer_configs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     promotion = _write_promoted_foundation(tmp_path)
+    relocated_root = tmp_path / "relocated" / promotion.parent.name
+    relocated_root.parent.mkdir()
+    promotion.parent.rename(relocated_root)
+    promotion = relocated_root / "manifest.json"
     data_root, corpus = _write_corpus_manifest(tmp_path)
     artifact_root = tmp_path / "artifacts"
     producer_path = tmp_path / "configs" / "producer.toml"
@@ -265,11 +322,52 @@ def test_portable_stage_resumes_only_an_exact_completed_manifest(
         ],
     )
 
+    with pytest.raises(SystemExit, match="2"):
+        cli.main()
+
+    manifest_path.unlink()
+    inputs = []
+    for number in range(len(config.data.symbols) * len(config.data.timeframes)):
+        path = stage_root / f"input-{number}.parquet"
+        path.write_bytes(str(number).encode())
+        inputs.append({"path": str(path), "size": path.stat().st_size, "sha256": sha256_file(path)})
+    outputs = []
+    for symbol in config.data.symbols:
+        path = stage_root / f"{symbol}.parquet"
+        path.write_bytes(symbol.encode())
+        outputs.append(
+            {
+                "path": str(path),
+                "size": path.stat().st_size,
+                "sha256": sha256_file(path),
+                "symbol": symbol,
+                "rows": 1,
+            }
+        )
+    contamination = stage_root / "contamination.json"
+    contamination.write_text("{}")
+    manifest_path.write_text(
+        json.dumps(
+            {
+                **_manifest_base(config, "prepare"),
+                "inputs": inputs,
+                "outputs": outputs,
+                "rows": len(outputs),
+                "holdout_locked": True,
+                "contamination": {
+                    "path": str(contamination),
+                    "size": contamination.stat().st_size,
+                    "sha256": sha256_file(contamination),
+                },
+            }
+        )
+    )
+
     cli.main()
 
     result = json.loads(capsys.readouterr().out)
     assert result["resumed"] is True
-    assert result["manifest"]["rows"] == 17
+    assert result["manifest"]["rows"] == len(outputs)
 
     changed = load_downstream_config(config_path, ('run.name="changed"',))
     changed_root = changed.run.artifact_root / changed.run.name / "prepare"

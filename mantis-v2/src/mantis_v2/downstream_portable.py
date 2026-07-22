@@ -105,6 +105,149 @@ def _publish_binding(config_path: Path, payload: dict[str, Any]) -> Path:
     return binding_path
 
 
+def _validate_promoted_bundle(path: Path, manifest: dict[str, Any]) -> None:
+    validation = manifest.get("validation_gate")
+    parity = manifest.get("parity")
+    lora = manifest.get("lora")
+    if not isinstance(validation, dict) or not isinstance(parity, dict):
+        raise PortableDownstreamError("promoted foundation evidence is incomplete")
+    weights = Path(str(manifest.get("weights", "")))
+    if not weights.is_file():
+        weights = path.parent / "model.safetensors"
+    evaluation = Path(str(validation.get("evaluation", "")))
+    if not evaluation.is_file():
+        evaluation = path.parent / "evaluation.json"
+    weights_sha256 = manifest.get("weights_sha256")
+    evaluation_sha256 = validation.get("evaluation_sha256")
+    adapter_sha256: str | None = None
+    if lora is not None:
+        if not isinstance(lora, dict):
+            raise PortableDownstreamError("promoted LoRA evidence is incomplete")
+        adapter = Path(str(lora.get("adapter", "")))
+        if not adapter.is_file():
+            adapter = path.parent / "adapter.safetensors"
+        adapter_sha256 = lora.get("adapter_sha256")
+        if (
+            not isinstance(adapter_sha256, str)
+            or parity.get("lora_merge_verified") is not True
+            or parity.get("lora_adapter_reload_verified") is not True
+            or not adapter.is_file()
+            or sha256_file(adapter) != adapter_sha256
+        ):
+            raise PortableDownstreamError("promoted LoRA adapter identity mismatch")
+    identity = {
+        "schema_version": 1,
+        "promotion_decision_digest": manifest.get("promotion_decision_digest"),
+        "selected_result_digest": manifest.get("selected_result_digest"),
+        "source_manifest_sha256": manifest.get("source_manifest_sha256"),
+        "weights_sha256": weights_sha256,
+        "evaluation_sha256": evaluation_sha256,
+        "adapter_sha256": adapter_sha256,
+    }
+    required_digests = tuple(
+        identity[key]
+        for key in (
+            "promotion_decision_digest",
+            "selected_result_digest",
+            "source_manifest_sha256",
+            "weights_sha256",
+            "evaluation_sha256",
+        )
+    )
+    bundle_digest = manifest.get("bundle_digest")
+    if (
+        manifest.get("schema_version") != 1
+        or manifest.get("export_role") != "promoted"
+        or parity.get("verified") is not True
+        or validation.get("verified") is not True
+        or any(not isinstance(value, str) or len(value) != 64 for value in required_digests)
+        or not isinstance(bundle_digest, str)
+        or _digest(identity) != bundle_digest
+        or path.parent.name != bundle_digest
+        or not weights.is_file()
+        or sha256_file(weights) != weights_sha256
+        or not evaluation.is_file()
+        or sha256_file(evaluation) != evaluation_sha256
+    ):
+        raise PortableDownstreamError("foundation export is not an intact promoted bundle")
+
+
+def _verify_file_identity(
+    raw: Any, description: str, *, within: Path | None = None
+) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise PortableDownstreamError(f"{description} identity is incomplete")
+    path = Path(str(raw.get("path", "")))
+    if (
+        not path.is_file()
+        or raw.get("size") != path.stat().st_size
+        or raw.get("sha256") != sha256_file(path)
+        or (within is not None and not path.resolve().is_relative_to(within.resolve()))
+    ):
+        raise PortableDownstreamError(f"{description} identity mismatch")
+    return raw
+
+
+def _validate_completed_manifest(
+    manifest: dict[str, Any], config: DownstreamConfig, stage: str, root: Path
+) -> None:
+    if stage == "prepare":
+        inputs = manifest.get("inputs")
+        outputs = manifest.get("outputs")
+        expected_inputs = len(config.data.symbols) * len(config.data.timeframes)
+        if not isinstance(inputs, list) or len(inputs) != expected_inputs:
+            raise PortableDownstreamError("completed prepare manifest has incomplete inputs")
+        for number, identity in enumerate(inputs):
+            _verify_file_identity(identity, f"prepare input {number}")
+        if not isinstance(outputs, list) or {
+            output.get("symbol") for output in outputs if isinstance(output, dict)
+        } != set(config.data.symbols):
+            raise PortableDownstreamError("completed prepare manifest has incomplete outputs")
+        rows = 0
+        for output in outputs:
+            identity = _verify_file_identity(output, "prepare output", within=root)
+            if not isinstance(identity.get("rows"), int) or identity["rows"] <= 0:
+                raise PortableDownstreamError("prepare output row count is invalid")
+            rows += int(identity["rows"])
+        _verify_file_identity(manifest.get("contamination"), "contamination", within=root)
+        if manifest.get("rows") != rows or manifest.get("holdout_locked") is not True:
+            raise PortableDownstreamError("completed prepare manifest summary mismatch")
+        return
+    if stage == "embed":
+        outputs = manifest.get("outputs")
+        if not isinstance(outputs, list) or not outputs:
+            raise PortableDownstreamError("completed embed manifest has no shards")
+        rows = 0
+        for output in outputs:
+            if not isinstance(output, dict) or not isinstance(output.get("rows"), int):
+                raise PortableDownstreamError("embedding shard identity is incomplete")
+            _verify_file_identity(output.get("features"), "embedding features", within=root)
+            _verify_file_identity(output.get("metadata"), "embedding metadata", within=root)
+            rows += int(output["rows"])
+        if manifest.get("rows") != rows or not isinstance(manifest.get("feature_width"), int):
+            raise PortableDownstreamError("completed embed manifest summary mismatch")
+        return
+    if stage == "head":
+        folds = manifest.get("folds")
+        quality = manifest.get("quality_gate")
+        if not isinstance(folds, list) or not folds or not isinstance(quality, dict):
+            raise PortableDownstreamError("completed head manifest is incomplete")
+        for fold in folds:
+            if not isinstance(fold, dict):
+                raise PortableDownstreamError("completed head fold is incomplete")
+            _verify_file_identity(fold.get("head"), "walk-forward head", within=root)
+            _verify_file_identity(fold.get("predictions"), "walk-forward predictions", within=root)
+        if not isinstance(manifest.get("convergence_gate_passed"), bool):
+            raise PortableDownstreamError("completed head gate evidence is incomplete")
+        return
+    if stage == "simulate":
+        _verify_file_identity(manifest.get("trades"), "simulation trades", within=root)
+        if not isinstance(manifest.get("result"), dict):
+            raise PortableDownstreamError("completed simulation result is incomplete")
+        return
+    raise PortableDownstreamError(f"unknown completed manifest stage: {stage}")
+
+
 def bind_producer(
     *,
     template_path: Path,
@@ -128,26 +271,7 @@ def bind_producer(
         raise PortableDownstreamError("producer run name must be unique and explicit")
     promotion_path = promotion_manifest_path.resolve()
     promotion = _read_json(promotion_path, "promoted foundation manifest")
-    weights_path = Path(str(promotion.get("weights", "")))
-    validation = promotion.get("validation_gate")
-    parity = promotion.get("parity")
-    lineage = (
-        promotion.get("promotion_decision_digest"),
-        promotion.get("selected_result_digest"),
-        promotion.get("source_manifest_sha256"),
-        promotion.get("bundle_digest"),
-    )
-    if (
-        promotion.get("export_role") != "promoted"
-        or any(not isinstance(digest, str) or len(digest) != 64 for digest in lineage)
-        or not isinstance(validation, dict)
-        or validation.get("verified") is not True
-        or not isinstance(parity, dict)
-        or parity.get("verified") is not True
-        or not weights_path.is_file()
-        or sha256_file(weights_path) != promotion.get("weights_sha256")
-    ):
-        raise PortableDownstreamError("foundation export is not an intact promoted bundle")
+    _validate_promoted_bundle(promotion_path, promotion)
     corpus_path = corpus_manifest_path.resolve()
     corpus = _read_json(corpus_path, "corpus manifest")
     if corpus.get("validated") is not True or not isinstance(corpus.get("outputs"), list):
@@ -312,6 +436,7 @@ def run_stage(config: DownstreamConfig, stage: str) -> dict[str, Any]:
     manifest_path = root / "manifest.json"
     if manifest_path.is_file():
         manifest = _manifest(manifest_path, config, manifest_stage)
+        _validate_completed_manifest(manifest, config, stage, root)
         return {"stage": stage, "resumed": True, "manifest": manifest}
     if root.exists() and stage != "embed":
         raise PortableDownstreamError(
