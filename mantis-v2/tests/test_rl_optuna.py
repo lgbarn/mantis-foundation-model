@@ -12,6 +12,7 @@ from types import MappingProxyType, SimpleNamespace
 
 import optuna
 import pytest
+import torch
 from mantis_v2 import cli
 from mantis_v2.rl_config import load_rl_config
 from mantis_v2.rl_optuna import (
@@ -28,6 +29,7 @@ from mantis_v2.rl_optuna import (
     _search_space_payload,
     _storage_url,
     _study_contract,
+    _verified_search_checkpoint,
     derive_trial_identity,
     run_optuna_study,
     run_production_optuna_study,
@@ -37,6 +39,7 @@ from mantis_v2.rl_optuna import (
 from mantis_v2.rl_policy import PolicyVariant, ReturnNormalizers
 from mantis_v2.rl_training import (
     PpoHyperparameters,
+    _canonical_digest,
     _completed_timesteps,
     _generalized_advantages,
     _normalized_reward_advantages,
@@ -776,8 +779,10 @@ def test_terminal_ledger_resumes_tell_without_reexecuting_evaluator(
 
 
 def test_full_state_cap_resumes_running_30th_then_refuses_31st_before_mutation(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    import mantis_v2.rl_optuna as search
+
     config = load_rl_config(ROOT / "configs" / "rl-entry-topstep-100k.toml")
     training = tmp_path / "training.json"
     validation = tmp_path / "validation.json"
@@ -808,6 +813,33 @@ def test_full_state_cap_resumes_running_30th_then_refuses_31st_before_mutation(
     running = study.ask()
     assert running.number == 29
 
+    original_select_winner = search.select_winner
+    monkeypatch.setattr(
+        search,
+        "select_winner",
+        lambda *_args: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+    with pytest.raises(KeyboardInterrupt):
+        run_optuna_study(
+            config,
+            training,
+            validation,
+            output,
+            study_name=study_name,
+            variant="shared_ticker_value",
+            evaluator=evaluate,
+        )
+    assert not (output / "winner.json").exists()
+    assert (
+        len(
+            optuna.load_study(
+                study_name=study_name, storage=_storage_url(output / "study.sqlite3")
+            ).trials
+        )
+        == 30
+    )
+
+    monkeypatch.setattr(search, "select_winner", original_select_winner)
     resumed = run_optuna_study(
         config,
         training,
@@ -815,7 +847,7 @@ def test_full_state_cap_resumes_running_30th_then_refuses_31st_before_mutation(
         output,
         study_name=study_name,
         variant="shared_ticker_value",
-        evaluator=evaluate,
+        evaluator=lambda _request: pytest.fail("terminal trials must not rerun"),
     )
     assert resumed["attempted_trials"] == 30
     assert resumed["status"] == "complete"
@@ -833,6 +865,55 @@ def test_full_state_cap_resumes_running_30th_then_refuses_31st_before_mutation(
         )
     after = {path: path.read_bytes() for path in output.rglob("*") if path.is_file()}
     assert after == before
+
+
+def test_search_checkpoint_rejects_coordinated_bundle_and_model_substitution(
+    tmp_path: Path,
+) -> None:
+    run_output = tmp_path / "seed"
+    checkpoint_dir = run_output / "checkpoints" / "update-000001"
+    checkpoint_dir.mkdir(parents=True)
+    identities = {"seed": 101, "search_trial_number": 0, "search_seed_index": 0}
+    model = {"weight": torch.tensor([1.0])}
+    checkpoint = checkpoint_dir / "checkpoint.pt"
+    torch.save(
+        {"schema_version": 3, "identities": identities, "update": 1, "model": model},
+        checkpoint,
+    )
+    bundle = {
+        "schema_version": 3,
+        "identities": identities,
+        "update": 1,
+        "checkpoint_sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+    }
+    (checkpoint_dir / "bundle.json").write_text(json.dumps(bundle))
+    (run_output / "state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "status": "complete",
+                "completed_updates": 1,
+                "checkpoint": "checkpoints/update-000001",
+                "identities": identities,
+            }
+        )
+    )
+    seed_result = {"identities": identities, "policy_sha256": _canonical_digest(model)}
+    assert _verified_search_checkpoint(run_output, seed_result)[0] == checkpoint
+
+    torch.save(
+        {
+            "schema_version": 3,
+            "identities": identities,
+            "update": 1,
+            "model": {"weight": torch.tensor([2.0])},
+        },
+        checkpoint,
+    )
+    bundle["checkpoint_sha256"] = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    (checkpoint_dir / "bundle.json").write_text(json.dumps(bundle))
+    with pytest.raises(Exception, match="checkpoint provenance mismatch"):
+        _verified_search_checkpoint(run_output, seed_result)
 
 
 @pytest.mark.parametrize(

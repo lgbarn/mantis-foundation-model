@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+import pickle
 import statistics
 import tempfile
 import tomllib
@@ -29,6 +30,7 @@ from mantis_v2.rl_policy import PROFILES, TICKERS, EntryActorCritic, PolicyVaria
 from mantis_v2.rl_training import (
     PpoHyperparameters,
     ProductionTrainingError,
+    _canonical_digest,
     load_training_episodes,
     train_entry_policy,
 )
@@ -719,6 +721,61 @@ def _completed_search_seed(
     return cast(dict[str, object], metrics)
 
 
+def _verified_search_checkpoint(
+    run_output: Path, seed_result: Mapping[str, object]
+) -> tuple[Path, dict[str, object]]:
+    try:
+        state = json.loads((run_output / "state.json").read_text())
+        identities = seed_result["identities"]
+        pointer = state["checkpoint"]
+        relative = Path(pointer) if isinstance(pointer, str) else Path()
+        if (
+            not isinstance(state, dict)
+            or not isinstance(identities, dict)
+            or state.get("identities") != identities
+            or relative.is_absolute()
+            or len(relative.parts) != 2
+            or relative.parts[0] != "checkpoints"
+            or not relative.parts[1].startswith("update-")
+        ):
+            raise OptunaSearchError("search checkpoint pointer provenance mismatch")
+        directory = run_output / relative
+        checkpoint = directory / "checkpoint.pt"
+        bundle = json.loads((directory / "bundle.json").read_text())
+        if (
+            not isinstance(bundle, dict)
+            or bundle.get("schema_version") != 3
+            or bundle.get("identities") != identities
+            or state.get("status") != "complete"
+            or state.get("completed_updates") != bundle.get("update")
+            or bundle.get("checkpoint_sha256")
+            != hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+        ):
+            raise OptunaSearchError("search checkpoint bundle provenance mismatch")
+        payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schema_version") != 3
+            or payload.get("identities") != identities
+            or bundle.get("update") != payload.get("update")
+            or _canonical_digest(payload.get("model")) != seed_result.get("policy_sha256")
+        ):
+            raise OptunaSearchError("search checkpoint provenance mismatch")
+        return checkpoint, cast(dict[str, object], payload)
+    except (
+        KeyError,
+        OSError,
+        json.JSONDecodeError,
+        pickle.UnpicklingError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        if isinstance(exc, OptunaSearchError):
+            raise
+        raise OptunaSearchError("search checkpoint is invalid") from exc
+
+
 def _load_search_model(
     request: TrialRequest,
     run_output: Path,
@@ -726,13 +783,7 @@ def _load_search_model(
     observation_width: int,
 ) -> EntryActorCritic:
     try:
-        state = json.loads((run_output / "state.json").read_text())
-        checkpoint = run_output / cast(str, state["checkpoint"]) / "checkpoint.pt"
-        payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
-        if not isinstance(payload, dict) or payload.get("identities") != seed_result.get(
-            "identities"
-        ):
-            raise OptunaSearchError("search checkpoint provenance mismatch")
+        _checkpoint, payload = _verified_search_checkpoint(run_output, seed_result)
         model = EntryActorCritic(
             observation_width,
             request.variant,
@@ -741,7 +792,7 @@ def _load_search_model(
         model.load_state_dict(cast(dict[str, object], payload["model"]))
         model.eval()
         return model
-    except (KeyError, OSError, json.JSONDecodeError, RuntimeError, TypeError, ValueError) as exc:
+    except (KeyError, RuntimeError, TypeError, ValueError) as exc:
         if isinstance(exc, OptunaSearchError):
             raise
         raise OptunaSearchError("search checkpoint is invalid") from exc
@@ -831,11 +882,7 @@ def execute_optuna_trial(config: RlConfig, request: TrialRequest) -> TrialEvalua
         overshoot = completed.get("timestep_overshoot")
         rollouts = completed.get("rollouts")
         rollout_decisions = rollouts.get("policy_decisions") if isinstance(rollouts, dict) else None
-        try:
-            state = json.loads((run_output / "state.json").read_text())
-            checkpoint = run_output / cast(str, state["checkpoint"]) / "checkpoint.pt"
-        except (KeyError, OSError, json.JSONDecodeError, TypeError) as exc:
-            raise OptunaSearchError("search checkpoint pointer is invalid") from exc
+        checkpoint, _payload = _verified_search_checkpoint(run_output, completed)
         if (
             type(completed_timesteps) is not int
             or completed_timesteps < request.identity.timesteps_per_seed
@@ -1133,7 +1180,9 @@ def _run_optuna_study_locked(
             raise OptunaSearchError("persistent study has multiple RUNNING trials")
         attempted = len(study.trials)
         ceiling = config.training.maximum_search_trials
-        if attempted > ceiling or (attempted == ceiling and not running):
+        if attempted > ceiling or (
+            attempted == ceiling and not running and (output / "winner.json").exists()
+        ):
             raise OptunaSearchError("persistent study already reached the 30-trial ceiling")
         if running:
             frozen = running[0]
