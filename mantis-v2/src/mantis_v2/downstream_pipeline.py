@@ -111,12 +111,18 @@ def _source_digest() -> str:
 def _manifest_base(config: DownstreamConfig, stage: str) -> dict[str, Any]:
     repository_root = Path(__file__).resolve().parents[3]
     lock_path = repository_root / "uv.lock"
+    source_digest = _source_digest()
+    lock_digest = sha256_file(lock_path)
+    if config.run.source_digest and config.run.source_digest != source_digest:
+        raise DownstreamPipelineError("configured source digest does not match this checkout")
+    if config.run.lock_digest and config.run.lock_digest != lock_digest:
+        raise DownstreamPipelineError("configured lock digest does not match this checkout")
     manifest = {
         "schema_version": 1,
         "stage": stage,
         "workflow_digest": config.workflow_digest,
-        "source_digest": _source_digest(),
-        "lock_digest": sha256_file(lock_path),
+        "source_digest": source_digest,
+        "lock_digest": lock_digest,
     }
     if config.strategy_contract is not None:
         manifest["strategy_contract"] = config.strategy_contract
@@ -174,11 +180,33 @@ def _record_stage_instrumentation(
 
 def verify_contract(config: DownstreamConfig) -> dict[str, Any]:
     """Report the validated downstream recipe without reading data or writing artifacts."""
+    identity = _manifest_base(config, "verify")
     return {
         "run": config.run.name,
         "workflow_digest": config.workflow_digest,
         "embedding_contract_digest": config.embedding_contract_digest,
         "strategy_contract": config.strategy_contract,
+        "source_digest": identity["source_digest"],
+        "lock_digest": identity["lock_digest"],
+        "foundation": {
+            "manifest_path": str(config.foundation.manifest_path),
+            "weights_sha256": config.foundation.weights_sha256,
+            "export_role": config.foundation.export_role,
+        },
+        "data": {
+            "corpus_manifest_path": str(config.data.corpus_manifest_path),
+            "corpus_manifest_sha256": config.data.corpus_manifest_sha256,
+            "symbols": list(config.data.symbols),
+            "timeframes": list(config.data.timeframes),
+        },
+        "topstep_execution": {
+            "rule_contract_path": str(config.topstep.rule_contract_path),
+            "rule_contract_sha256": config.topstep.rule_contract_sha256,
+            "contracts": list(config.topstep.execution_contracts),
+            "quantities": list(config.topstep.contract_quantities),
+            "round_trip_fees": list(config.topstep.round_trip_fees),
+            "adverse_slippage_ticks_per_side": (config.topstep.adverse_slippage_ticks_per_side),
+        },
     }
 
 
@@ -711,6 +739,27 @@ def walk_forward(config: DownstreamConfig) -> dict[str, Any]:
         device,
     )
     _atomic_json(manifest_path, manifest)
+    if not convergence_gate_passed or quality_gate["passed"] is not True:
+        reason = (
+            "fold_convergence_gate_failed"
+            if not convergence_gate_passed
+            else "proper_score_gate_failed"
+        )
+        _atomic_json(
+            stage_root / "failure.json",
+            {
+                "schema_version": 1,
+                "stage": "walk-forward",
+                "reason": reason,
+                "head_config_digest": head_config_digest,
+                "embed_manifest": str(embed_manifest_path),
+                "embed_manifest_sha256": embed_manifest_sha,
+                "embedding_contract_digest": config.embedding_contract_digest,
+                "convergence_gate_passed": convergence_gate_passed,
+                "quality_gate": quality_gate,
+                "walk_forward_manifest_sha256": sha256_file(manifest_path),
+            },
+        )
     return manifest
 
 

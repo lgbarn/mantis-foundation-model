@@ -441,17 +441,28 @@ purpose is isolated head fitting against immutable embeddings.
 market data or writing artifacts. The loader rejects drift from every eligible
 closed 3m Trend Magic state bar, next-open entry, ATR(20) risk at 0.5 ATR,
 strict 3R-before-stop labels, the 2/3/4/6R analysis ladder, 120 session-bounded
-bars, 0.03R cost, and stop-first ties. The separate 2R trail belongs to
-execution replay and never changes this supervised label.
+bars, 0.03R cost, and stop-first ties. The separate execution replay starts at a
+-1R stop, arms after +2R, and trails the prior completed-bar favorable extreme
+by 0.75R with no fixed target. It never changes the supervised label.
 
-No all-stage Trend Magic command is currently qualified. A future producer
-config may use `downstream-run` only after its embedded head settings have
-passed the exact-fold convergence diagnostic and that config has its own
-documented run identity.
+The portable four-timeframe route is the only new production path. Bind rather
+than edit configs, then run each stage explicitly:
 
-Each stage verifies upstream hashes and writes a manifest. Production stages fail
-closed on partial output when overwrite is false. Do not delete partial outputs
-before diagnosing which durable stage completed.
+```bash
+just trend-magic-bind-producer PROMOTION CORPUS DATA_ROOT ARTIFACT_ROOT PRODUCER_RUN PRODUCER_CONFIG
+just trend-magic-portable-stage PRODUCER_CONFIG prepare
+just trend-magic-portable-stage PRODUCER_CONFIG embed
+just trend-magic-bind-consumer PRODUCER_CONFIG EMBED_MANIFEST CONSUMER_RUN CONSUMER_CONFIG
+just trend-magic-portable-stage CONSUMER_CONFIG head
+just trend-magic-portable-stage CONSUMER_CONFIG simulate
+```
+
+Binding verifies the promoted export, repaired corpus, configured symbol subset,
+ordered `1min,3min,5min,15min` roles, source, lock, and unique producer/consumer
+run identities. Each stage verifies upstream hashes and writes an atomic
+manifest. Repeating a completed stage resumes only when that manifest matches
+the exact current identity. Incomplete non-embedding output is retained and
+rejected; embedding may resume only its verified atomic shard pairs.
 
 ### Qualify the dependency-light RL entry environment
 
@@ -592,9 +603,9 @@ Verify:
 ### Walk forward
 
 The head must converge on every fold and beat both class-balanced constant
-baselines before simulation. A convergence failure is durable evidence: retain
-`failure.json`, diagnose on the exact capped fold, and create a new run identity
-for any changed head parameters. Never patch an old manifest or copy embeddings
+baselines before simulation. A convergence or proper-score failure writes
+durable `failure.json`: diagnose on the exact capped fold and create a new run
+identity for changed head parameters. Never patch an old manifest or copy embeddings
 into a new directory. Reuse requires exact embed-manifest and producer-config
 paths and SHA-256 values in the consumer TOML.
 
@@ -616,8 +627,10 @@ Verify:
 
 Verify:
 
-- Contract multipliers are correct.
-- Costs and position sizing match config.
+- Tick size/value and underlying mappings match the pinned Topstep rule contract.
+- Ten-micro quantities (one ZB mini), per-contract fees, and adverse slippage
+  match the portable config.
+- Trade P&L uses the causal 2R/0.75R execution exit, never the fixed 3R label exit.
 - Maximum Loss Limit and consistency rules match the selected profile.
 - Session dates use America/Chicago.
 - Results are not selected using future realized exit time.

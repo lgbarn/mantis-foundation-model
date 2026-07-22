@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from mantis_v2 import cli
+from mantis_v2 import downstream_pipeline as downstream_pipeline_module
 from mantis_v2 import strategy as strategy_module
 from mantis_v2.config import ConfigError
 from mantis_v2.corpus import _json_digest, _write_frame
@@ -95,6 +96,8 @@ def test_trend_magic_config_is_strict_and_has_distinct_embedding_identity(
         "session": "17:00-15:10 America/Chicago",
         "round_trip_cost_r": 0.03,
         "same_bar_policy": "stop_first",
+        "execution_policy": "initial_1r_stop_2r_activation_0.75r_prior_bar_trail",
+        "execution_fixed_target": None,
     }
     assert trend_magic.embedding_contract_digest != supertrend.embedding_contract_digest
     invalid = TREND_MAGIC_CONFIG.read_text().replace(
@@ -188,7 +191,12 @@ def test_cli_verifies_the_trend_magic_contract_without_running_a_stage(
 
     result = json.loads(capsys.readouterr().out)
     assert result["strategy_contract"]["version"] == "trend_magic_fixed_3r_v1"
+    assert result["strategy_contract"]["execution_policy"] == (
+        "initial_1r_stop_2r_activation_0.75r_prior_bar_trail"
+    )
     assert result["workflow_digest"] == load_downstream_config(TREND_MAGIC_CONFIG).workflow_digest
+    assert len(result["source_digest"]) == 64
+    assert len(result["lock_digest"]) == 64
 
 
 @pytest.mark.parametrize("value", ["nan", "inf"])
@@ -453,6 +461,47 @@ def test_walk_forward_persists_failure_diagnostics_on_nonconvergence(
     assert failure["convergence"]["n_iter"] == 1
 
 
+def test_walk_forward_persists_failure_when_proper_score_gate_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = load_downstream_config(TREND_MAGIC_CONFIG)
+    config = replace(
+        config,
+        run=replace(config.run, name="quality-failure", artifact_root=tmp_path),
+        walk_forward=replace(
+            config.walk_forward,
+            train_months=1,
+            validation_months=1,
+            test_months=1,
+            stride_months=1,
+            embargo_bars=0,
+            max_fit_rows=100,
+            max_iter=1_000,
+        ),
+    )
+    _write_embedding_fixture(config)
+    monkeypatch.setattr(
+        downstream_pipeline_module,
+        "_walk_forward_quality_gate",
+        lambda _folds: {
+            "passed": False,
+            "mean_test_weighted_log_loss": 0.70,
+            "balanced_constant_weighted_log_loss": float(np.log(2.0)),
+            "mean_test_weighted_brier": 0.26,
+            "balanced_constant_weighted_brier": 0.25,
+        },
+    )
+
+    manifest = walk_forward(config)
+
+    failure = json.loads((tmp_path / config.run.name / "walk-forward" / "failure.json").read_text())
+    assert manifest["quality_gate"]["passed"] is False
+    assert failure["reason"] == "proper_score_gate_failed"
+    assert failure["quality_gate"] == manifest["quality_gate"]
+    with pytest.raises(DownstreamPipelineError, match="quality gate"):
+        simulate(config)
+
+
 def test_causal_alignment_cannot_see_a_forming_higher_timeframe_bar() -> None:
     decisions = np.array(["2026-01-01T09:42", "2026-01-01T09:45"], dtype="datetime64[ns]")
     completed_15m = np.array(
@@ -576,6 +625,54 @@ def test_candidate_builder_dispatches_trend_magic_parameters_and_uses_next_open(
     np.testing.assert_array_equal(
         candidates["entry_price"], frame["open"].iloc[candidates["decision_index"] + 1]
     )
+
+
+def test_trend_magic_execution_trail_is_separate_from_the_fixed_3r_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_downstream_config(TREND_MAGIC_CONFIG)
+    config = replace(
+        config,
+        data=replace(config.data, context_bars=1),
+        strategy=replace(config.strategy, atr_period=2, horizon_bars=4),
+    )
+    timestamps = pd.date_range("2025-01-06T15:00:00Z", periods=8, freq="3min")
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "close_timestamp": timestamps + timedelta(minutes=3),
+            "open": [99.0, 100.0, 100.0, 101.0, 101.0, 101.0, 101.0, 101.0],
+            "high": [100.0, 100.5, 101.0, 101.2, 101.2, 101.2, 101.2, 101.2],
+            "low": [98.5, 99.6, 99.6, 100.5, 100.8, 100.8, 100.8, 100.8],
+            "close": [99.0, 100.0, 100.5, 101.0, 101.0, 101.0, 101.0, 101.0],
+            "volume": np.ones(8),
+        }
+    )
+
+    monkeypatch.setattr(strategy_module, "load_market_frame", lambda *_: frame.copy())
+    monkeypatch.setattr(
+        strategy_module,
+        "trend_magic_state",
+        lambda candidate_frame, *_: (
+            np.zeros(len(candidate_frame)),
+            np.ones(len(candidate_frame), dtype=np.int8),
+        ),
+    )
+    monkeypatch.setattr(
+        strategy_module,
+        "wilder_atr",
+        lambda *_: np.ones(len(frame), dtype=np.float64),
+    )
+
+    candidates = build_symbol_candidates(config, "NQ")
+    candidate = candidates.loc[candidates["decision_index"] == 0].iloc[0]
+
+    assert candidate["label"] == 0
+    assert candidate["label_target_3r"] == 0
+    assert candidate["execution_exit_reason"] == "trail_stop"
+    assert candidate["execution_reward_r"] == pytest.approx(1.25)
+    assert candidate["execution_mae_r"] == pytest.approx(-0.8)
+    assert candidate["execution_end_ts"] < candidate["label_end_ts"]
 
 
 def test_candidate_builder_emits_each_eligible_state_bar(
@@ -1192,6 +1289,44 @@ def test_topstep_fails_when_intraday_equity_touches_mll() -> None:
     assert result.ending_balance == pytest.approx(97_000)
     assert result.trading_days == 1
     assert len(trades) == 1
+
+
+def test_topstep_uses_explicit_micro_tick_fee_and_slippage_economics(tmp_path: Path) -> None:
+    rule_path = ROOT / "configs" / "topstep-100k-2026-07-20.toml"
+    source = TREND_MAGIC_CONFIG.read_text().replace(
+        "daily_loss_limit = 2000.0",
+        "\n".join(
+            (
+                "daily_loss_limit = 2000.0",
+                f'rule_contract_path = "{rule_path}"',
+                f'rule_contract_sha256 = "{sha256_file(rule_path)}"',
+                'execution_contracts = ["MES", "MNQ", "M2K", "MYM", "MGC", "MCL", "ZB"]',
+                "contract_quantities = [10, 10, 10, 10, 10, 10, 1]",
+                "round_trip_fees = [1.22, 1.22, 1.22, 1.22, 1.92, 1.52, 2.76]",
+                "adverse_slippage_ticks_per_side = 1.0",
+            )
+        ),
+    )
+    config_path = tmp_path / "micro.toml"
+    config_path.write_text(source)
+    config = load_downstream_config(config_path)
+    prediction = _prediction(99.0, -0.1, "2025-01-06T15:00:00Z")
+    prediction.update(
+        {
+            "execution_reward_r": 1.0,
+            "execution_mae_r": -0.25,
+            "execution_end_ts": prediction["label_end_ts"],
+        }
+    )
+
+    result, trades = simulate_topstep(pd.DataFrame([prediction]), config)
+
+    assert config.topstep.execution_contracts[1] == "MNQ"
+    assert config.topstep.contract_quantities[1] == 10
+    assert trades.iloc[0]["execution_contract"] == "MNQ"
+    assert trades.iloc[0]["quantity"] == 10
+    assert trades.iloc[0]["pnl_dollars"] == pytest.approx(77.8)
+    assert result.ending_balance == pytest.approx(100_077.8)
 
 
 def test_topstep_rejects_stale_exact_stop_mae_below_the_stop_outcome() -> None:

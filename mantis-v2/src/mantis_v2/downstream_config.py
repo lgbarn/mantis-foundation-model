@@ -23,6 +23,8 @@ class DownstreamRunConfig:
     artifact_root: Path
     device: Literal["cpu", "cuda", "mps"]
     allow_overwrite: bool
+    source_digest: str
+    lock_digest: str
 
 
 @dataclass(frozen=True)
@@ -125,6 +127,12 @@ class TopstepConfig:
     session_end_minute: int
     daily_loss_limit_enabled: bool
     daily_loss_limit: float
+    rule_contract_path: Path | None
+    rule_contract_sha256: str
+    execution_contracts: tuple[str, ...]
+    contract_quantities: tuple[int, ...]
+    round_trip_fees: tuple[float, ...]
+    adverse_slippage_ticks_per_side: float
 
 
 @dataclass(frozen=True)
@@ -165,6 +173,8 @@ class DownstreamConfig:
             "session": "17:00-15:10 America/Chicago",
             "round_trip_cost_r": 0.03,
             "same_bar_policy": "stop_first",
+            "execution_policy": "initial_1r_stop_2r_activation_0.75r_prior_bar_trail",
+            "execution_fixed_target": None,
         }
 
     @property
@@ -227,7 +237,15 @@ class DownstreamConfig:
 
 
 _EXPECTED: dict[str, set[str]] = {
-    "run": {"name", "seed", "artifact_root", "device", "allow_overwrite"},
+    "run": {
+        "name",
+        "seed",
+        "artifact_root",
+        "device",
+        "allow_overwrite",
+        "source_digest",
+        "lock_digest",
+    },
     "data": {
         "root",
         "file_format",
@@ -307,11 +325,18 @@ _EXPECTED: dict[str, set[str]] = {
         "session_end_minute",
         "daily_loss_limit_enabled",
         "daily_loss_limit",
+        "rule_contract_path",
+        "rule_contract_sha256",
+        "execution_contracts",
+        "contract_quantities",
+        "round_trip_fees",
+        "adverse_slippage_ticks_per_side",
     },
     "evaluation": {"allow_holdout", "holdout_unlock"},
 }
 
 _OPTIONAL: dict[str, set[str]] = {
+    "run": {"source_digest", "lock_digest"},
     "data": {
         "max_relative_close_jump",
         "file_format",
@@ -327,6 +352,14 @@ _OPTIONAL: dict[str, set[str]] = {
         "embed_manifest_sha256",
         "embed_producer_config_path",
         "embed_producer_config_sha256",
+    },
+    "topstep": {
+        "rule_contract_path",
+        "rule_contract_sha256",
+        "execution_contracts",
+        "contract_quantities",
+        "round_trip_fees",
+        "adverse_slippage_ticks_per_side",
     },
 }
 
@@ -414,6 +447,12 @@ def _floats(value: Any, field: str) -> tuple[float, ...]:
     return tuple(_float(item, field, minimum=1e-12) for item in value)
 
 
+def _ints(value: Any, field: str) -> tuple[int, ...]:
+    if not isinstance(value, list) or not value:
+        raise ConfigError(f"{field} must be a non-empty integer array")
+    return tuple(_int(item, field, minimum=1) for item in value)
+
+
 def _choice[T: str](value: Any, field: str, choices: set[T]) -> T:
     if not isinstance(value, str) or value not in choices:
         raise ConfigError(f"{field} must be one of: {', '.join(sorted(choices))}")
@@ -478,6 +517,8 @@ def load_downstream_config(path: str | Path, overrides: tuple[str, ...] = ()) ->
             artifact_root=Path(str(run["artifact_root"])),
             device=_choice(run["device"], "run.device", {"cpu", "cuda", "mps"}),
             allow_overwrite=_bool(run["allow_overwrite"], "run.allow_overwrite"),
+            source_digest=str(run.get("source_digest", "")),
+            lock_digest=str(run.get("lock_digest", "")),
         ),
         data=DownstreamDataConfig(
             root=Path(str(data["root"])),
@@ -621,6 +662,31 @@ def load_downstream_config(path: str | Path, overrides: tuple[str, ...] = ()) ->
                 topstep["daily_loss_limit_enabled"], "topstep.daily_loss_limit_enabled"
             ),
             daily_loss_limit=_float(topstep["daily_loss_limit"], "topstep.daily_loss_limit"),
+            rule_contract_path=(
+                _resolve_config_path(topstep["rule_contract_path"], config_path.parent)
+                if topstep.get("rule_contract_path")
+                else None
+            ),
+            rule_contract_sha256=str(topstep.get("rule_contract_sha256", "")),
+            execution_contracts=(
+                _strings(topstep["execution_contracts"], "topstep.execution_contracts")
+                if topstep.get("execution_contracts")
+                else ()
+            ),
+            contract_quantities=(
+                _ints(topstep["contract_quantities"], "topstep.contract_quantities")
+                if topstep.get("contract_quantities")
+                else ()
+            ),
+            round_trip_fees=(
+                _floats(topstep["round_trip_fees"], "topstep.round_trip_fees")
+                if topstep.get("round_trip_fees")
+                else ()
+            ),
+            adverse_slippage_ticks_per_side=_float(
+                topstep.get("adverse_slippage_ticks_per_side", 0.0),
+                "topstep.adverse_slippage_ticks_per_side",
+            ),
         ),
         evaluation=DownstreamEvaluationConfig(
             allow_holdout=_bool(evaluation["allow_holdout"], "evaluation.allow_holdout"),
@@ -749,6 +815,32 @@ def _validate(config: DownstreamConfig) -> None:
                 )
     if len(config.data.contract_multipliers) != len(config.data.symbols):
         raise ConfigError("data.contract_multipliers must align one-for-one with data.symbols")
+    for field, digest in (
+        ("run.source_digest", config.run.source_digest),
+        ("run.lock_digest", config.run.lock_digest),
+    ):
+        if digest and len(digest) != 64:
+            raise ConfigError(f"{field} must be a full SHA-256 digest")
+    explicit_economics = (
+        config.topstep.rule_contract_path is not None,
+        bool(config.topstep.rule_contract_sha256),
+        bool(config.topstep.execution_contracts),
+        bool(config.topstep.contract_quantities),
+        bool(config.topstep.round_trip_fees),
+    )
+    if any(explicit_economics) and not all(explicit_economics):
+        raise ConfigError("topstep explicit execution economics must be set together")
+    if all(explicit_economics):
+        if len(config.topstep.rule_contract_sha256) != 64:
+            raise ConfigError("topstep.rule_contract_sha256 must be a full SHA-256 digest")
+        lengths = {
+            len(config.data.symbols),
+            len(config.topstep.execution_contracts),
+            len(config.topstep.contract_quantities),
+            len(config.topstep.round_trip_fees),
+        }
+        if len(lengths) != 1:
+            raise ConfigError("topstep execution economics must align with data.symbols")
     if config.data.feature_columns != ("open", "high", "low", "close", "volume"):
         raise ConfigError("data.feature_columns must be ordered open, high, low, close, volume")
     if config.foundation.input_length % 32:

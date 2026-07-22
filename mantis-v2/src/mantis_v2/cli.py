@@ -53,6 +53,18 @@ from mantis_v2.downstream_pipeline import verify_contract as downstream_verify
 from mantis_v2.downstream_pipeline import (
     walk_forward as downstream_walk_forward,
 )
+from mantis_v2.downstream_portable import (
+    PortableDownstreamError,
+)
+from mantis_v2.downstream_portable import (
+    bind_consumer as bind_downstream_consumer,
+)
+from mantis_v2.downstream_portable import (
+    bind_producer as bind_downstream_producer,
+)
+from mantis_v2.downstream_portable import (
+    run_stage as run_downstream_stage,
+)
 from mantis_v2.embedding import EmbeddingContractError
 from mantis_v2.embedding_artifacts import EmbeddingArtifactError
 from mantis_v2.embedding_qualification import qualify_embedding_files
@@ -291,6 +303,27 @@ def _parser() -> argparse.ArgumentParser:
             )
         if command == "downstream-holdout":
             child.add_argument("--unlock", required=True)
+    producer_bind = subparsers.add_parser("downstream-bind-producer")
+    producer_bind.add_argument("--template", required=True, type=Path)
+    producer_bind.add_argument("--promotion-manifest", required=True, type=Path)
+    producer_bind.add_argument("--corpus-manifest", required=True, type=Path)
+    producer_bind.add_argument("--data-root", required=True, type=Path)
+    producer_bind.add_argument("--artifact-root", required=True, type=Path)
+    producer_bind.add_argument("--run-name", required=True)
+    producer_bind.add_argument("--device", required=True, choices=("cpu", "cuda", "mps"))
+    producer_bind.add_argument("--output", required=True, type=Path)
+    consumer_bind = subparsers.add_parser("downstream-bind-consumer")
+    consumer_bind.add_argument("--template", required=True, type=Path)
+    consumer_bind.add_argument("--producer-config", required=True, type=Path)
+    consumer_bind.add_argument("--embed-manifest", required=True, type=Path)
+    consumer_bind.add_argument("--run-name", required=True)
+    consumer_bind.add_argument("--output", required=True, type=Path)
+    portable_stage = subparsers.add_parser("downstream-portable-stage")
+    portable_stage.add_argument("--config", required=True, type=Path)
+    portable_stage.add_argument(
+        "--stage", required=True, choices=("prepare", "embed", "head", "simulate")
+    )
+    portable_stage.add_argument("--set", action="append", default=[], metavar="SECTION.KEY=VALUE")
     runpod_plan = subparsers.add_parser("runpod-plan")
     runpod_plan.add_argument("--platform", required=True, type=Path)
     runpod_plan.add_argument("--local", required=True, type=Path)
@@ -921,6 +954,29 @@ def main() -> None:
                 partition_name=args.partition,
                 episode_count=args.episodes,
             )
+        elif args.command == "downstream-bind-producer":
+            result = bind_downstream_producer(
+                template_path=args.template,
+                promotion_manifest_path=args.promotion_manifest,
+                corpus_manifest_path=args.corpus_manifest,
+                data_root=args.data_root,
+                artifact_root=args.artifact_root,
+                run_name=args.run_name,
+                device=args.device,
+                output_path=args.output,
+            )
+        elif args.command == "downstream-bind-consumer":
+            result = bind_downstream_consumer(
+                template_path=args.template,
+                producer_config_path=args.producer_config,
+                embed_manifest_path=args.embed_manifest,
+                run_name=args.run_name,
+                output_path=args.output,
+            )
+        elif args.command == "downstream-portable-stage":
+            result = run_downstream_stage(
+                load_downstream_config(args.config, tuple(args.set)), args.stage
+            )
         elif args.command in _CORPUS_COMMANDS:
             corpus_config = load_corpus_repair_config(args.config)
             if args.command == "repair-corpus":
@@ -994,6 +1050,7 @@ def main() -> None:
         WorkloadError,
         RunpodS3Error,
         RunpodctlError,
+        PortableDownstreamError,
     ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc

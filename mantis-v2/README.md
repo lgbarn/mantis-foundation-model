@@ -310,8 +310,11 @@ The existing `Futures-Foundation-Model/checkpoints/mantis_ssl_ctr_seq2seq.pt` is
 
 ## Strategy and Topstep 100K downstream pipeline
 
-The current production config is `configs/trend-magic-topstep-100k.toml`. It
-uses `ES`, `NQ`, `RTY`, `YM`, `GC`, `CL`, and `ZB` at 1m, 3m, and 15m. A
+The historical config is `configs/trend-magic-topstep-100k.toml`. It and its
+completed embeddings remain rejected three-timeframe diagnostic evidence. New
+work starts from `configs/trend-magic-topstep-100k-portable-template.toml` and
+binds `ES`, `NQ`, `RTY`, `YM`, `GC`, `CL`, and `ZB` at the ordered 1m, 3m, 5m,
+and 15m contract. A
 candidate is emitted for every eligible closed 3m bar and is directed by the
 current close-CCI(20)/SMA-TR(5) Trend Magic state; flips are not required.
 Historical Supertrend configs retain their original semantics and artifact
@@ -325,7 +328,9 @@ The loader names this exact recipe `trend_magic_fixed_3r_v1` and rejects any
 drift in its direction, timing, risk, target ladder, horizon, cost, or session
 settings. This declaration does not change the completed producer TOML or its
 pinned SHA-256. The 2R-activated, 0.75R-giveback trail is a separate downstream
-execution policy; it does not define the supervised label.
+execution policy; it does not define the supervised label. The stop already in
+force is checked first, and a favorable extreme can tighten the stop only for
+the next bar. The execution policy has no fixed profit target.
 
 Run one stage at a time for bounded failure recovery and inspection:
 
@@ -341,9 +346,38 @@ config by SHA-256, uses a distinct run identity, and keeps convergence and
 proper-score gates fail-closed. The original `C=1.0` fold-0 convergence failure
 is retained as evidence. Do not use the all-stage chain for this consumer config.
 
-No all-stage Trend Magic command is currently qualified. Use the separate
-producer and head-consumer commands above; this prevents the known-failing head
-settings from triggering another expensive embed run.
+The portable route materializes immutable configs from the exact promoted
+foundation and repaired corpus. It never edits a template in place:
+
+```bash
+just trend-magic-bind-producer \
+  /workspace/promoted/manifest.json \
+  /workspace/corpus/manifest.json \
+  /workspace/corpus/market \
+  /workspace/artifacts \
+  trend-magic-4tf-producer-seed42 \
+  /workspace/configs/producer.toml
+just trend-magic-portable-stage /workspace/configs/producer.toml prepare
+just trend-magic-portable-stage /workspace/configs/producer.toml embed
+just trend-magic-bind-consumer \
+  /workspace/configs/producer.toml \
+  /workspace/artifacts/trend-magic-4tf-producer-seed42/embed/manifest.json \
+  trend-magic-4tf-head-seed42 \
+  /workspace/configs/consumer.toml
+just trend-magic-portable-stage /workspace/configs/consumer.toml head
+just trend-magic-portable-stage /workspace/configs/consumer.toml simulate
+```
+
+Each completed stage resumes idempotently only when its manifest matches the
+exact config, source, lock, corpus, foundation, strategy, and upstream stage.
+Incomplete non-embedding stages remain untouched for diagnosis. Embedding alone
+resumes its atomic feature/metadata shard pairs. A failed fold or failed
+aggregate log-loss/Brier gate writes `failure.json`; simulation refuses it.
+
+The portable Topstep replay uses the pinned 100K rule snapshot, ten eligible
+micro contracts (one ZB mini), per-contract TopstepX fees, one adverse tick per
+side, America/Chicago session limits, DLL/MLL/consistency rules, and the causal
+execution trail. Account costs do not change the fixed supervised label.
 
 The completed `head-c0001-v2` walk-forward converged on all eight folds but
 failed both primary proper-score gates (weighted log loss 0.695306 and weighted

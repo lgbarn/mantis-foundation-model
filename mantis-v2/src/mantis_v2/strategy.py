@@ -283,6 +283,85 @@ def _label_chunk(
     return won.astype(np.int8), reward_r, exit_price, entry_indices + exit_offset, mae_r
 
 
+def _execution_trail_chunk(
+    frame: pd.DataFrame,
+    candidate_indices: np.ndarray,
+    direction: np.ndarray,
+    risk: np.ndarray,
+    horizon: int,
+    effective_horizons: np.ndarray,
+    *,
+    activation_r: float = 2.0,
+    giveback_r: float = 0.75,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Replay the causal prior-bar 2R/0.75R execution trail in R units."""
+    entry_indices = candidate_indices + 1
+    entry = frame["open"].to_numpy(dtype=np.float64)[entry_indices]
+    high = frame["high"].to_numpy(dtype=np.float64)
+    low = frame["low"].to_numpy(dtype=np.float64)
+    close = frame["close"].to_numpy(dtype=np.float64)
+    stop = entry - direction * risk
+    favorable = entry.copy()
+    active = np.ones(len(candidate_indices), dtype=bool)
+    exit_price = np.full(len(candidate_indices), np.nan, dtype=np.float64)
+    exit_index = np.full(len(candidate_indices), -1, dtype=np.int64)
+    adverse_r = np.full(len(candidate_indices), np.inf, dtype=np.float64)
+    reason = np.full(len(candidate_indices), "", dtype="<U12")
+
+    for offset in range(horizon):
+        valid = active & (offset < effective_horizons)
+        if not valid.any():
+            break
+        indices = entry_indices + offset
+        bar_high = high[indices]
+        bar_low = low[indices]
+        stopped = valid & np.where(direction > 0, bar_low <= stop, bar_high >= stop)
+        exit_price[stopped] = stop[stopped]
+        exit_index[stopped] = indices[stopped]
+        reason[stopped] = np.where(
+            np.isclose(stop[stopped], entry[stopped] - direction[stopped] * risk[stopped]),
+            "initial_stop",
+            "trail_stop",
+        )
+        stop_reward = direction * (stop - entry) / risk
+        adverse_r[stopped] = np.minimum(adverse_r[stopped], stop_reward[stopped])
+        active[stopped] = False
+
+        surviving = valid & ~stopped
+        if surviving.any():
+            bar_adverse = np.where(
+                direction > 0,
+                (bar_low - entry) / risk,
+                (entry - bar_high) / risk,
+            )
+            adverse_r[surviving] = np.minimum(
+                adverse_r[surviving], bar_adverse[surviving]
+            )
+            favorable[surviving] = np.where(
+                direction[surviving] > 0,
+                np.maximum(favorable[surviving], bar_high[surviving]),
+                np.minimum(favorable[surviving], bar_low[surviving]),
+            )
+            progress = direction * (favorable - entry) / risk
+            armed = surviving & (progress >= activation_r)
+            candidate_stop = favorable - direction * giveback_r * risk
+            stop[armed] = np.where(
+                direction[armed] > 0,
+                np.maximum(stop[armed], candidate_stop[armed]),
+                np.minimum(stop[armed], candidate_stop[armed]),
+            )
+            horizon_exit = surviving & (offset == effective_horizons - 1)
+            exit_price[horizon_exit] = close[indices[horizon_exit]]
+            exit_index[horizon_exit] = indices[horizon_exit]
+            reason[horizon_exit] = "horizon"
+            active[horizon_exit] = False
+
+    if active.any() or not np.isfinite(exit_price).all() or (exit_index < 0).any():
+        raise StrategyContractError("execution trail did not resolve every candidate")
+    reward_r = direction * (exit_price - entry) / risk
+    return reward_r, exit_price, exit_index, adverse_r, reason
+
+
 def _session_horizons(
     entry_timestamps: pd.Series,
     close_timestamps: pd.Series,
@@ -394,6 +473,11 @@ def build_symbol_candidates(
     exit_prices: list[np.ndarray] = []
     exit_indices: list[np.ndarray] = []
     adverse: list[np.ndarray] = []
+    execution_rewards: list[np.ndarray] = []
+    execution_exit_prices: list[np.ndarray] = []
+    execution_exit_indices: list[np.ndarray] = []
+    execution_adverse: list[np.ndarray] = []
+    execution_reasons: list[np.ndarray] = []
     analysis_labels: dict[float, list[np.ndarray]] = {
         target: []
         for target in strategy.analysis_targets_r
@@ -417,6 +501,20 @@ def build_symbol_candidates(
         exit_prices.append(result[2])
         exit_indices.append(result[3])
         adverse.append(result[4])
+        if isinstance(strategy, TrendMagicStrategyConfig):
+            execution = _execution_trail_chunk(
+                decision,
+                selected,
+                direction[selected],
+                atr[selected] * strategy.stop_atr,
+                strategy.horizon_bars,
+                effective_horizons[start : start + chunk_rows],
+            )
+            execution_rewards.append(execution[0])
+            execution_exit_prices.append(execution[1])
+            execution_exit_indices.append(execution[2])
+            execution_adverse.append(execution[3])
+            execution_reasons.append(execution[4])
         for target, target_labels in analysis_labels.items():
             target_result = _label_chunk(
                 decision,
@@ -455,6 +553,13 @@ def build_symbol_candidates(
     output[f"label_target_{strategy.target_r:g}r"] = output["label"]
     for target, labels_for_target in analysis_labels.items():
         output[f"label_target_{target:g}r"] = np.concatenate(labels_for_target)
+    if isinstance(strategy, TrendMagicStrategyConfig):
+        execution_index = np.concatenate(execution_exit_indices)
+        output["execution_reward_r"] = np.concatenate(execution_rewards)
+        output["execution_mae_r"] = np.concatenate(execution_adverse)
+        output["execution_exit_price"] = np.concatenate(execution_exit_prices)
+        output["execution_end_ts"] = decision["close_timestamp"].iloc[execution_index].to_numpy()
+        output["execution_exit_reason"] = np.concatenate(execution_reasons)
     output["is_holdout"] = output["decision_ts"] >= pd.Timestamp(config.data.holdout_start)
     output.attrs["contamination"] = {
         "streams": [

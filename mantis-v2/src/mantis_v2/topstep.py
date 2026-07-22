@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import tomllib
 from dataclasses import asdict, dataclass
 from datetime import date, time, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import numpy as np
@@ -53,6 +56,59 @@ def _consistency_ok(ratio: float, config: DownstreamConfig) -> bool:
     return ratio <= config.topstep.consistency_limit
 
 
+def _explicit_execution_economics(
+    config: DownstreamConfig,
+) -> dict[str, dict[str, float | int | str]] | None:
+    path = config.topstep.rule_contract_path
+    if path is None:
+        return None
+    try:
+        content = Path(path).read_bytes()
+        rules = tomllib.loads(content.decode())
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise TopstepContractError("Topstep rule contract is unreadable") from exc
+    if hashlib.sha256(content).hexdigest() != config.topstep.rule_contract_sha256:
+        raise TopstepContractError("Topstep rule contract digest mismatch")
+    contracts = rules.get("contracts")
+    account = rules.get("account")
+    if not isinstance(contracts, dict) or not isinstance(account, dict):
+        raise TopstepContractError("Topstep rule contract is incomplete")
+    maximum = min(
+        float(account.get("maximum_position_equivalence", 0)),
+        config.topstep.max_mini_equivalents,
+    )
+    result: dict[str, dict[str, float | int | str]] = {}
+    rows = zip(
+        config.data.symbols,
+        config.topstep.execution_contracts,
+        config.topstep.contract_quantities,
+        config.topstep.round_trip_fees,
+        strict=True,
+    )
+    for symbol, contract_symbol, quantity, fee in rows:
+        contract = contracts.get(contract_symbol)
+        if not isinstance(contract, dict) or contract.get("underlying") != symbol:
+            raise TopstepContractError(f"execution contract does not match {symbol}")
+        tick_size = float(contract.get("tick_size", 0))
+        tick_value = float(contract.get("tick_value", 0))
+        position_units = float(contract.get("position_units", 0))
+        if min(tick_size, tick_value, position_units) <= 0:
+            raise TopstepContractError(f"execution contract is incomplete: {contract_symbol}")
+        mini_equivalents = position_units * quantity / 10.0
+        if mini_equivalents > maximum:
+            raise TopstepContractError("configured contracts exceed the maximum mini equivalents")
+        result[symbol] = {
+            "contract": contract_symbol,
+            "quantity": quantity,
+            "multiplier": tick_value / tick_size * quantity,
+            "fee": fee * quantity,
+            "slippage": (
+                2.0 * config.topstep.adverse_slippage_ticks_per_side * tick_value * quantity
+            ),
+        }
+    return result
+
+
 def simulate_topstep(
     predictions: pd.DataFrame, config: DownstreamConfig
 ) -> tuple[TopstepResult, pd.DataFrame]:
@@ -72,20 +128,32 @@ def simulate_topstep(
     missing = required - set(predictions)
     if missing:
         raise TopstepContractError(f"missing prediction columns: {', '.join(sorted(missing))}")
-    if config.topstep.contracts > config.topstep.max_mini_equivalents:
+    economics = _explicit_execution_economics(config)
+    if economics is None and config.topstep.contracts > config.topstep.max_mini_equivalents:
         raise TopstepContractError("configured contracts exceed the maximum mini equivalents")
     frame = predictions.copy()
     for column in ("decision_ts", "entry_ts", "label_end_ts"):
         frame[column] = pd.to_datetime(frame[column], utc=True, errors="raise")
-    numeric = frame[["probability", "threshold", "reward_r", "mae_r", "atr"]].to_numpy()
+    reward_column = "execution_reward_r" if economics is not None else "reward_r"
+    adverse_column = "execution_mae_r" if economics is not None else "mae_r"
+    exit_column = "execution_end_ts" if economics is not None else "label_end_ts"
+    execution_columns = {reward_column, adverse_column, exit_column}
+    missing_execution = execution_columns - set(frame)
+    if missing_execution:
+        raise TopstepContractError(
+            f"missing execution columns: {', '.join(sorted(missing_execution))}"
+        )
+    frame[exit_column] = pd.to_datetime(frame[exit_column], utc=True, errors="raise")
+    numeric = frame[["probability", "threshold", reward_column, adverse_column, "atr"]].to_numpy()
     if not np.isfinite(numeric).all():
         raise TopstepContractError("predictions contain non-finite simulation values")
     if ((frame["probability"] < 0) | (frame["probability"] > 1)).any():
         raise TopstepContractError("probabilities must be in [0, 1]")
-    exact_stop = -(1.0 + config.strategy.round_trip_cost_r)
-    stopped = np.isclose(frame["reward_r"], exact_stop, rtol=0.0, atol=1e-9)
-    if (stopped & (frame["mae_r"] < frame["reward_r"] - 1e-9)).any():
-        raise TopstepContractError("exact-stop MAE cannot be below the stopped outcome")
+    if economics is None:
+        exact_stop = -(1.0 + config.strategy.round_trip_cost_r)
+        stopped = np.isclose(frame["reward_r"], exact_stop, rtol=0.0, atol=1e-9)
+        if (stopped & (frame["mae_r"] < frame["reward_r"] - 1e-9)).any():
+            raise TopstepContractError("exact-stop MAE cannot be below the stopped outcome")
     frame = frame[frame["probability"] >= frame["threshold"]]
     frame = frame.sort_values(
         ["decision_ts", "probability", "symbol"], ascending=[True, False, True]
@@ -129,7 +197,8 @@ def simulate_topstep(
 
     for row in frame.itertuples(index=False):
         session_day = _session_day(row.entry_ts, config)
-        exit_day = _session_day(row.label_end_ts, config)
+        execution_end = getattr(row, exit_column)
+        exit_day = _session_day(execution_end, config)
         if session_day is None:
             continue
         if exit_day != session_day:
@@ -147,11 +216,18 @@ def simulate_topstep(
         if current_day is None:
             current_day = session_day
             day_start_balance = balance
-        risk_dollars = (
-            row.atr * config.strategy.stop_atr * multipliers[row.symbol] * config.topstep.contracts
+        execution = economics.get(row.symbol) if economics is not None else None
+        multiplier = (
+            float(execution["multiplier"])
+            if execution is not None
+            else multipliers[row.symbol] * config.topstep.contracts
         )
-        low_equity = balance + row.mae_r * risk_dollars
-        pnl = row.reward_r * risk_dollars
+        friction = (
+            float(execution["fee"]) + float(execution["slippage"]) if execution is not None else 0.0
+        )
+        risk_dollars = row.atr * config.strategy.stop_atr * multiplier
+        low_equity = balance + getattr(row, adverse_column) * risk_dollars - friction
+        pnl = getattr(row, reward_column) * risk_dollars - friction
         if low_equity <= loss_floor:
             balance = low_equity
             status = "failed"
@@ -160,7 +236,9 @@ def simulate_topstep(
                 {
                     **row._asdict(),
                     "pnl_dollars": pnl,
-                    "pnl_booked_ts": row.label_end_ts,
+                    "pnl_booked_ts": execution_end,
+                    "execution_contract": execution["contract"] if execution else row.symbol,
+                    "quantity": execution["quantity"] if execution else config.topstep.contracts,
                     "balance_after": balance,
                     "account_status": status,
                 }
@@ -175,12 +253,14 @@ def simulate_topstep(
         balance_before = balance
         balance += pnl
         accepted_index[row.symbol] = row.decision_index
-        flat_at = row.label_end_ts
+        flat_at = execution_end
         accepted.append(
             {
                 **row._asdict(),
                 "pnl_dollars": pnl,
-                "pnl_booked_ts": row.label_end_ts,
+                "pnl_booked_ts": execution_end,
+                "execution_contract": execution["contract"] if execution else row.symbol,
+                "quantity": execution["quantity"] if execution else config.topstep.contracts,
                 "balance_before": balance_before,
                 "balance_after": balance,
                 "account_status": status,

@@ -255,6 +255,15 @@ trend-magic-embed config="mantis-v2/configs/trend-magic-topstep-100k.toml":
 trend-magic-head config="mantis-v2/configs/trend-magic-topstep-100k-head-c0001-v2.toml":
     uv run mantis-v2 downstream-walk-forward --config {{config}}
 
+trend-magic-bind-producer promotion_manifest corpus_manifest data_root artifact_root run_name output device="cuda" template="mantis-v2/configs/trend-magic-topstep-100k-portable-template.toml":
+    uv run mantis-v2 downstream-bind-producer --template {{quote(template)}} --promotion-manifest {{quote(promotion_manifest)}} --corpus-manifest {{quote(corpus_manifest)}} --data-root {{quote(data_root)}} --artifact-root {{quote(artifact_root)}} --run-name {{quote(run_name)}} --device {{quote(device)}} --output {{quote(output)}}
+
+trend-magic-bind-consumer producer_config embed_manifest run_name output template="mantis-v2/configs/trend-magic-topstep-100k-portable-template.toml":
+    uv run mantis-v2 downstream-bind-consumer --template {{quote(template)}} --producer-config {{quote(producer_config)}} --embed-manifest {{quote(embed_manifest)}} --run-name {{quote(run_name)}} --output {{quote(output)}}
+
+trend-magic-portable-stage config stage *overrides:
+    uv run mantis-v2 downstream-portable-stage --config {{quote(config)}} --stage {{quote(stage)}} {{overrides}}
+
 downstream-holdout config unlock="":
     uv run mantis-v2 downstream-holdout --config {{config}} --unlock {{unlock}}
 
