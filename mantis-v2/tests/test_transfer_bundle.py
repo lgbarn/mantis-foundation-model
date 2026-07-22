@@ -125,6 +125,21 @@ def test_build_bundle_rejects_symlink(tmp_path: Path) -> None:
     assert raised.value.reason == "symlink"
 
 
+def test_build_bundle_rejects_symlinked_parent_directory(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "alpha.txt").write_bytes(b"alpha\n")
+    (source / "linked").symlink_to(real, target_is_directory=True)
+
+    with pytest.raises(transfer_bundle.TransferBundleError) as raised:
+        transfer_bundle.build_bundle(source, ("linked/alpha.txt",))
+
+    assert raised.value.path == "linked"
+    assert raised.value.reason == "symlink"
+
+
 def test_build_bundle_rejects_special_file(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()

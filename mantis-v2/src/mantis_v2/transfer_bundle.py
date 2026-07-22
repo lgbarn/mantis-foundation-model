@@ -206,6 +206,22 @@ def _source_identity(file_stat: object) -> tuple[int, ...]:
     )
 
 
+def _reject_symlinked_parent(source_root: Path, relative_path: str) -> None:
+    current = source_root
+    for part in PurePosixPath(relative_path).parts[:-1]:
+        current /= part
+        try:
+            file_stat = current.lstat()
+        except FileNotFoundError as exc:
+            missing = current.relative_to(source_root).as_posix()
+            raise TransferBundleError(missing, "missing_parent") from exc
+        current_relative = current.relative_to(source_root).as_posix()
+        if stat.S_ISLNK(file_stat.st_mode):
+            raise TransferBundleError(current_relative, "symlink")
+        if not stat.S_ISDIR(file_stat.st_mode):
+            raise TransferBundleError(current_relative, "special_file")
+
+
 def _discover_paths(source_root: Path) -> tuple[str, ...]:
     return tuple(
         sorted(
@@ -235,6 +251,7 @@ def build_bundle(
         if relative_path in seen:
             raise TransferBundleError(provided_path, "duplicate_normalized_path")
         seen.add(relative_path)
+        _reject_symlinked_parent(source_root, relative_path)
         path = source_root / relative_path
         file_stat = path.lstat()
         if stat.S_ISLNK(file_stat.st_mode):
@@ -305,6 +322,7 @@ def write_bundle_manifest(
 
 
 def _verify_source_entry(source_root: Path, entry: BundleEntry) -> None:
+    _reject_symlinked_parent(source_root, entry.path)
     path = source_root / entry.path
     try:
         initial_stat = path.lstat()
