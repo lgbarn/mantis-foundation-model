@@ -251,8 +251,12 @@ def _authorization_for(paths: dict[str, Path], tmp_path: Path, monkeypatch, caps
                 "subject_digest": rejection["authorization_subject_digest"],
                 "authorized_at": "2026-07-21T12:01:30Z",
                 "expires_at": "2026-07-21T12:10:00Z",
-                "maximum_projected_spend_usd": "0.90",
+                "maximum_projected_spend_usd": "0.99",
                 "approver": "lgbarn",
+                "autopay_disabled": True,
+                "ordinary_launch_cutoff_usd": "125.00",
+                "campaign_ceiling_usd": "150.00",
+                "recovery_authorized": False,
             }
         )
         + "\n"
@@ -352,8 +356,12 @@ def test_plan_command_with_exact_authorization_binds_terms_and_approves(
                 "subject_digest": subject_digest,
                 "authorized_at": "2026-07-21T12:01:30Z",
                 "expires_at": "2026-07-21T12:10:00Z",
-                "maximum_projected_spend_usd": "0.90",
+                "maximum_projected_spend_usd": "0.99",
                 "approver": "lgbarn",
+                "autopay_disabled": True,
+                "ordinary_launch_cutoff_usd": "125.00",
+                "campaign_ceiling_usd": "150.00",
+                "recovery_authorized": False,
             }
         )
         + "\n"
@@ -396,7 +404,7 @@ def test_plan_command_with_exact_authorization_binds_terms_and_approves(
     assert decision["provider_price_usd_per_gpu_hour"] == "0.44"
     assert decision["inventory_observed_at"] == "2026-07-21T12:00:00Z"
     assert decision["maximum_duration_seconds"] == 7200
-    assert decision["projected_spend_usd"] == "0.90"
+    assert decision["projected_spend_usd"] == "0.99"
     assert decision["authorization_digest"]
     assert decision["authorization_expires_at"] == "2026-07-21T12:10:00Z"
     assert decision["openapi_identity"] == "https://rest.runpod.io/v1/openapi.json"
@@ -502,8 +510,8 @@ def test_plan_command_rejects_exact_ordinary_launch_cutoff(
 ) -> None:
     paths = _write_inputs(tmp_path)
     ledger = json.loads(paths["ledger"].read_text())
-    ledger["actual_spend_usd"] = "124.10"
-    ledger["bucket_actual_spend_usd"]["production"] = "124.10"
+    ledger["actual_spend_usd"] = "124.01"
+    ledger["bucket_actual_spend_usd"]["production"] = "124.01"
     paths["ledger"].write_text(json.dumps(ledger) + "\n")
     authorization = _authorization_for(paths, tmp_path, monkeypatch, capsys)
 
@@ -511,7 +519,7 @@ def test_plan_command_rejects_exact_ordinary_launch_cutoff(
         paths, tmp_path / "exact-ordinary-cutoff.json", monkeypatch, capsys, authorization
     )
 
-    assert decision["projected_spend_usd"] == "0.90"
+    assert decision["projected_spend_usd"] == "0.99"
     assert decision["reasons"] == ["ordinary_launch_cutoff_reached"]
 
 

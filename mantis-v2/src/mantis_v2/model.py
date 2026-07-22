@@ -13,6 +13,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from mantis_v2.config import ModelConfig, TargetConfig
+from mantis_v2.lora import LoRALinear, inject_mantis_lora, lora_spec
 
 
 class ModelContractError(RuntimeError):
@@ -25,6 +26,12 @@ class NextLegOutput(TypedDict):
 
 
 class LossOutput(TypedDict):
+    total: torch.Tensor
+    candle: torch.Tensor
+    leg: torch.Tensor
+
+
+class PerSampleLossOutput(TypedDict):
     total: torch.Tensor
     candle: torch.Tensor
     leg: torch.Tensor
@@ -71,6 +78,10 @@ class MantisV2Adapter(nn.Module):
             backbone = loaded
         self.backbone: nn.Module = backbone
         self.input_length = config.input_length
+        self.lora_targets: tuple[str, ...] = ()
+        if config.mode.startswith("lora_"):
+            rank, alpha = lora_spec(config.mode)
+            self.lora_targets = inject_mantis_lora(backbone, rank=rank, alpha=alpha)
 
     def forward(self, context: torch.Tensor) -> torch.Tensor:
         if context.ndim != 3:
@@ -98,6 +109,16 @@ class MantisV2Adapter(nn.Module):
             parameter.requires_grad = False
         for parameter in transformer.parameters():
             parameter.requires_grad = True
+
+    def freeze_for_lora(self) -> None:
+        if not self.lora_targets:
+            raise ModelContractError("LoRA mode did not install attention adapters")
+        for parameter in self.backbone.parameters():
+            parameter.requires_grad = False
+        for module in self.backbone.modules():
+            if isinstance(module, LoRALinear):
+                module.lora_A.requires_grad = True
+                module.lora_B.requires_grad = True
 
 
 class NextLegModel(nn.Module):
@@ -137,6 +158,8 @@ class NextLegModel(nn.Module):
                 parameter.requires_grad = False
         elif self.mode == "transformer_finetune":
             self.encoder.freeze_outside_transformer()
+        elif self.mode.startswith("lora_"):
+            self.encoder.freeze_for_lora()
         if self.mode != "adapter_head":
             for parameter in self.adapter.parameters():
                 parameter.requires_grad = False
@@ -159,5 +182,18 @@ def nextleg_loss(
 ) -> LossOutput:
     candle = F.mse_loss(output["candle"], candle_target)
     leg = F.smooth_l1_loss(output["leg"], leg_target)
+    total = target_config.candle_loss_weight * candle + target_config.leg_loss_weight * leg
+    return {"total": total, "candle": candle, "leg": leg}
+
+
+def nextleg_loss_per_sample(
+    output: NextLegOutput,
+    candle_target: torch.Tensor,
+    leg_target: torch.Tensor,
+    target_config: TargetConfig,
+) -> PerSampleLossOutput:
+    """Return unreduced losses so evaluation can aggregate streams without bias."""
+    candle = F.mse_loss(output["candle"], candle_target, reduction="none").mean(dim=(1, 2))
+    leg = F.smooth_l1_loss(output["leg"], leg_target, reduction="none").mean(dim=1)
     total = target_config.candle_loss_weight * candle + target_config.leg_loss_weight * leg
     return {"total": total, "candle": candle, "leg": leg}

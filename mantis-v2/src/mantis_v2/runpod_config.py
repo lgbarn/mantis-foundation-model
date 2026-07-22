@@ -333,6 +333,10 @@ class LaunchAuthorization:
     expires_at: datetime
     maximum_projected_spend_usd: Decimal
     approver: str
+    autopay_disabled: bool
+    ordinary_launch_cutoff_usd: Decimal
+    campaign_ceiling_usd: Decimal
+    recovery_authorized: bool
 
     @property
     def digest(self) -> str:
@@ -737,6 +741,10 @@ def load_launch_authorization(path: str | Path) -> LaunchAuthorization:
             "expires_at",
             "maximum_projected_spend_usd",
             "approver",
+            "autopay_disabled",
+            "ordinary_launch_cutoff_usd",
+            "campaign_ceiling_usd",
+            "recovery_authorized",
         },
         "launch authorization",
     )
@@ -751,6 +759,17 @@ def load_launch_authorization(path: str | Path) -> LaunchAuthorization:
             "authorization.maximum_projected_spend_usd",
         ),
         approver=_text(raw["approver"], "authorization.approver"),
+        autopay_disabled=_boolean(raw["autopay_disabled"], "authorization.autopay_disabled"),
+        ordinary_launch_cutoff_usd=_decimal(
+            raw["ordinary_launch_cutoff_usd"],
+            "authorization.ordinary_launch_cutoff_usd",
+        ),
+        campaign_ceiling_usd=_decimal(
+            raw["campaign_ceiling_usd"], "authorization.campaign_ceiling_usd"
+        ),
+        recovery_authorized=_boolean(
+            raw["recovery_authorized"], "authorization.recovery_authorized"
+        ),
     )
 
 

@@ -7,7 +7,7 @@ import json
 import math
 import tempfile
 import time
-from collections.abc import Sized
+from collections.abc import Mapping, Sized
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,7 +32,14 @@ from mantis_v2.instrumentation import (
     parse_tensorboard_events,
     synchronize_device,
 )
-from mantis_v2.model import MantisV2Adapter, NextLegModel, download_verified_weights, nextleg_loss
+from mantis_v2.lora import adapter_state, lora_metadata, merged_lora_copy
+from mantis_v2.model import (
+    MantisV2Adapter,
+    NextLegModel,
+    download_verified_weights,
+    nextleg_loss,
+    nextleg_loss_per_sample,
+)
 from mantis_v2.precision import (
     autocast_context,
     validate_optimizer_state,
@@ -390,6 +397,104 @@ def _run_epoch(
     return {key: value / batches for key, value in totals.items()}, batches
 
 
+def _mean_metrics(losses: dict[str, torch.Tensor], selected: torch.Tensor) -> dict[str, float]:
+    if not bool(selected.any()):
+        raise PipelineError("evaluation metric group contains no samples")
+    return {key: float(values[selected].mean().item()) for key, values in losses.items()}
+
+
+def _stream_macro_metrics(
+    by_stream: Mapping[str, Mapping[str, float]], members: list[str]
+) -> dict[str, float]:
+    if not members or any(member not in by_stream for member in members):
+        raise PipelineError("evaluation macro group is incomplete")
+    keys = ("total", "candle", "leg")
+    return {
+        key: sum(float(by_stream[member][key]) for member in members) / len(members) for key in keys
+    }
+
+
+def _run_evaluation_views(
+    model: NextLegModel,
+    loader: DataLoader[dict[str, torch.Tensor]],
+    config: PipelineConfig,
+    device: torch.device,
+    max_steps: int,
+) -> tuple[dict[str, Any], int]:
+    """Evaluate micro and unbiased stream/symbol/timeframe views on fixed rows."""
+    model.eval()
+    collected: dict[str, list[torch.Tensor]] = {key: [] for key in ("total", "candle", "leg")}
+    stream_indices: list[torch.Tensor] = []
+    batches = 0
+    with torch.inference_mode():
+        for batch in loader:
+            moved = _move(batch, device)
+            with autocast_context(config.training.precision, device):
+                output = model(moved["context"])
+                losses = nextleg_loss_per_sample(
+                    output,
+                    moved["candle_target"],
+                    moved["leg_target"],
+                    config.target,
+                )
+            if not (
+                torch.isfinite(losses["total"]).all()
+                and torch.isfinite(losses["candle"]).all()
+                and torch.isfinite(losses["leg"]).all()
+            ):
+                raise PipelineError("non-finite validation loss")
+            collected["total"].append(losses["total"].detach().cpu())
+            collected["candle"].append(losses["candle"].detach().cpu())
+            collected["leg"].append(losses["leg"].detach().cpu())
+            stream_indices.append(moved["stream_index"].detach().cpu())
+            batches += 1
+            if max_steps and batches >= max_steps:
+                break
+    if not batches:
+        raise PipelineError("data loader produced no batches")
+    loss_tensors = {key: torch.cat(values) for key, values in collected.items()}
+    indices = torch.cat(stream_indices)
+    dataset = loader.dataset
+    if not isinstance(dataset, NextLegDataset):
+        raise PipelineError("evaluation views require a NextLegDataset")
+    names = [stream.name for stream in dataset.streams]
+    present = sorted(set(int(value) for value in indices.tolist()))
+    if any(index < 0 or index >= len(names) for index in present):
+        raise PipelineError("evaluation stream index is out of range")
+    by_stream = {names[index]: _mean_metrics(loss_tensors, indices == index) for index in present}
+    grouped: dict[str, dict[str, list[int]]] = {"symbol": {}, "timeframe": {}}
+    for index in present:
+        try:
+            symbol, timeframe = names[index].rsplit("_", 1)
+        except ValueError as exc:
+            raise PipelineError(f"stream name has no timeframe suffix: {names[index]}") from exc
+        grouped["symbol"].setdefault(symbol, []).append(index)
+        grouped["timeframe"].setdefault(timeframe, []).append(index)
+
+    def group_metrics(members: list[int]) -> dict[str, float]:
+        return _stream_macro_metrics(by_stream, [names[member] for member in members])
+
+    macro = {
+        key: sum(metrics[key] for metrics in by_stream.values()) / len(by_stream)
+        for key in loss_tensors
+    }
+    return (
+        {
+            "micro": _mean_metrics(loss_tensors, torch.ones_like(indices, dtype=torch.bool)),
+            "macro": macro,
+            "by_stream": by_stream,
+            "by_symbol": {
+                name: group_metrics(members) for name, members in sorted(grouped["symbol"].items())
+            },
+            "by_timeframe": {
+                name: group_metrics(members)
+                for name, members in sorted(grouped["timeframe"].items())
+            },
+        },
+        batches,
+    )
+
+
 def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> dict[str, Any]:
     if process_epoch_limit is not None and process_epoch_limit <= 0:
         raise PipelineError("process_epoch_limit must be positive")
@@ -673,12 +778,11 @@ def evaluate(config: PipelineConfig) -> dict[str, Any]:
 
 
 def _evaluate_loaded(config: PipelineConfig, loaded: _LoadedTrained) -> dict[str, Any]:
-    metrics, batches = _run_epoch(
+    metrics, batches = _run_evaluation_views(
         loaded.model,
         _loader(loaded.validation_dataset, config, shuffle=False),
         config,
         loaded.device,
-        None,
         config.training.validation_max_steps,
     )
     if sha256_file(loaded.checkpoint_path) != loaded.checkpoint_sha256:
@@ -729,8 +833,9 @@ def _validated_evaluation(
     if not isinstance(evaluation.get("batches"), int) or evaluation["batches"] <= 0:
         raise PipelineError("run evaluate before export: evaluation has no completed batches")
     metrics = evaluation.get("metrics")
-    if not isinstance(metrics, dict) or any(
-        not isinstance(metrics.get(key), int | float) or not math.isfinite(float(metrics[key]))
+    micro = metrics.get("micro") if isinstance(metrics, dict) else None
+    if not isinstance(micro, dict) or any(
+        not isinstance(micro.get(key), int | float) or not math.isfinite(float(micro[key]))
         for key in ("total", "candle", "leg")
     ):
         raise PipelineError("run evaluate before export: evaluation metrics are incomplete")
@@ -797,9 +902,36 @@ def _export_loaded(config: PipelineConfig, loaded: _LoadedTrained) -> dict[str, 
     export_root.mkdir(parents=True, exist_ok=True)
     bundled_evaluation_path = export_root / "evaluation.json"
     _write_json(bundled_evaluation_path, evaluation)
+    lora: dict[str, Any] | None = None
+    adapter_reloaded: NextLegModel | None = None
+    export_model: NextLegModel = loaded.model
+    if config.model.mode.startswith("lora_"):
+        adapter_path = export_root / "adapter.safetensors"
+        saved_adapter = adapter_state(loaded.model)
+        save_file(saved_adapter, adapter_path)
+        metadata = dict(lora_metadata(loaded.model))
+        adapter_reloaded = _model(config, loaded.device)
+        incompatible_adapter = adapter_reloaded.load_state_dict(
+            load_file(adapter_path), strict=False
+        )
+        if incompatible_adapter.unexpected_keys or not set(saved_adapter).isdisjoint(
+            incompatible_adapter.missing_keys
+        ):
+            raise PipelineError("LoRA adapter reload state is incompatible")
+        adapter_reloaded.eval()
+        export_model = cast(NextLegModel, merged_lora_copy(loaded.model)).to(loaded.device).eval()
+        lora = {
+            **metadata,
+            "base_weights_sha256": loaded.provenance.upstream_weights_sha256,
+            "adapter": str(adapter_path),
+            "adapter_sha256": sha256_file(adapter_path),
+            "adapter_tensors": sorted(saved_adapter),
+            "includes_trainable_task_heads": True,
+            "merged": True,
+        }
     weights_path = export_root / "model.safetensors"
     state = {
-        key: value.detach().cpu().contiguous() for key, value in loaded.model.state_dict().items()
+        key: value.detach().cpu().contiguous() for key, value in export_model.state_dict().items()
     }
     save_file(state, weights_path)
     loaded_state = load_file(weights_path)
@@ -807,12 +939,15 @@ def _export_loaded(config: PipelineConfig, loaded: _LoadedTrained) -> dict[str, 
         if key not in loaded_state or not torch.equal(tensor, loaded_state[key]):
             raise PipelineError(f"export tensor parity failed for {key}")
     reloaded = _model(config, loaded.device)
+    if config.model.mode.startswith("lora_"):
+        reloaded = cast(NextLegModel, merged_lora_copy(reloaded)).to(loaded.device)
     reloaded.load_state_dict(loaded_state, strict=True)
     reloaded.eval()
     fixture = loaded.validation_dataset[0]["context"].unsqueeze(0).to(loaded.device)
     with torch.inference_mode():
         native = loaded.model(fixture)
         restored = reloaded(fixture)
+        adapter_restored = adapter_reloaded(fixture) if adapter_reloaded is not None else None
     for key in ("candle", "leg"):
         if not torch.allclose(
             native[key],
@@ -821,7 +956,14 @@ def _export_loaded(config: PipelineConfig, loaded: _LoadedTrained) -> dict[str, 
             rtol=config.export.verify_rtol,
         ):
             raise PipelineError(f"export parity failed for {key}")
-    manifest = {
+        if adapter_restored is not None and not torch.allclose(
+            native[key],
+            adapter_restored[key],
+            atol=config.export.verify_atol,
+            rtol=config.export.verify_rtol,
+        ):
+            raise PipelineError(f"LoRA adapter reload parity failed for {key}")
+    manifest: dict[str, Any] = {
         "format": config.export.format,
         "precision": config.training.precision,
         "export_role": "diagnostic_candidate",
@@ -843,6 +985,10 @@ def _export_loaded(config: PipelineConfig, loaded: _LoadedTrained) -> dict[str, 
             "verified": True,
         },
     }
+    if lora is not None:
+        manifest["lora"] = lora
+        manifest["parity"]["lora_merge_verified"] = True
+        manifest["parity"]["lora_adapter_reload_verified"] = True
     _write_json(export_root / "manifest.json", manifest)
     return manifest
 

@@ -350,7 +350,7 @@ def stage_bundle(
     adapter: S3TransferAdapter,
 ) -> StageReceipt:
     """Resume a safe upload into the bundle's content-addressed incoming prefix."""
-    prefix = f"transfer/incoming/{manifest.bundle_digest}"
+    prefix = f"mantis/transfer/incoming/{manifest.bundle_digest}"
     uploaded: list[str] = []
     skipped: list[str] = []
     for entry in manifest.entries:

@@ -719,6 +719,34 @@ def test_downstream_loader_detects_intrabar_stitches_from_full_ohlc(tmp_path: Pa
     assert np.flatnonzero(frame["_discontinuity"].to_numpy()).tolist() == [1]
 
 
+def test_downstream_loader_closes_five_minute_bar_at_five_minutes(tmp_path: Path) -> None:
+    config = load_downstream_config(TREND_MAGIC_CONFIG)
+    config = replace(
+        config,
+        data=replace(
+            config.data,
+            root=tmp_path,
+            file_format="csv",
+            corpus_manifest_path=None,
+        ),
+    )
+    timestamps = pd.date_range("2025-01-01", periods=3, freq="5min", tz="UTC")
+    pd.DataFrame(
+        {
+            "datetime": timestamps,
+            "open": [100.0, 101.0, 102.0],
+            "high": [100.5, 101.5, 102.5],
+            "low": [99.5, 100.5, 101.5],
+            "close": [100.0, 101.0, 102.0],
+            "volume": [1.0, 2.0, 3.0],
+        }
+    ).to_csv(tmp_path / "NQ_5min.csv", index=False)
+
+    frame = load_market_frame(config, "NQ", "5min")
+
+    assert frame["close_timestamp"].tolist() == (timestamps + pd.Timedelta(minutes=5)).tolist()
+
+
 def test_downstream_loader_reads_manifest_bound_parquet(tmp_path: Path) -> None:
     config = load_downstream_config(CONFIG)
     corpus_root = tmp_path / "corpus"

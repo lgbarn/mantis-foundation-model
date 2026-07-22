@@ -55,6 +55,15 @@ def test_transformer_finetune_mode_is_configurable(tmp_path: Path) -> None:
     assert load_config(path).model.mode == "transformer_finetune"
 
 
+@pytest.mark.parametrize("mode", ["lora_r8_alpha16", "lora_r16_alpha32"])
+def test_lora_modes_are_strictly_configurable(tmp_path: Path, mode: str) -> None:
+    source = (ROOT / "configs" / "nextleg.toml").read_text()
+    path = tmp_path / f"{mode}.toml"
+    path.write_text(source.replace('mode = "full_finetune"', f'mode = "{mode}"'))
+
+    assert load_config(path).model.mode == mode
+
+
 def test_legacy_production_config_defaults_to_unbound_csv() -> None:
     config = load_config(ROOT / "configs" / "nextleg.toml")
     assert config.data.file_format == "csv"

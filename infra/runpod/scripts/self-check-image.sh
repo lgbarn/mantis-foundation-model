@@ -15,8 +15,8 @@ output=$2
 mkdir -p "$(dirname "$output")"
 temporary="${output}.tmp.$$"
 trap 'rm -f "$temporary"' EXIT HUP INT TERM
-docker run --rm --gpus all --entrypoint mantis-v2 "$image_reference" \
-    runpod-image-self-check > "$temporary"
+docker run --rm --entrypoint mantis-v2 "$image_reference" \
+    runpod-image-static-check > "$temporary"
 ln "$temporary" "$output"
 rm -f "$temporary"
 trap - EXIT HUP INT TERM

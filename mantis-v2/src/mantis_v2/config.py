@@ -24,6 +24,8 @@ ModelMode = Literal[
     "adapter_head",
     "transformer_finetune",
     "full_finetune",
+    "lora_r8_alpha16",
+    "lora_r16_alpha32",
 ]
 
 
@@ -320,6 +322,8 @@ def load_config(path: str | Path) -> PipelineConfig:
             "adapter_head",
             "transformer_finetune",
             "full_finetune",
+            "lora_r8_alpha16",
+            "lora_r16_alpha32",
         },
     )
     validation_fraction = _number(data["validation_fraction"], "data.validation_fraction")

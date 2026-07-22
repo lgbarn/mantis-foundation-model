@@ -66,12 +66,13 @@ planner itself remains side-effect free.
 
 ## Pod lifecycle
 
-`just runpod-launch <decision> <local>` is the only create path. It validates
-the content digest, approved local-config digest, controller hostname, and
-unexpired authorization before provider access. It takes the approved lock,
-reads fresh Pod inventory, writes a create attempt, and performs exactly one
-`POST /v1/pods`. An unknown outcome requires
-`runpod-reconcile-launch`; never repeat launch.
+`just runpod-supervise-workload <manifest> <decision> <local> <runpodctl>` is
+the only create path. It validates the content digest, approved local-config
+digest, controller hostname, staged bytes, and unexpired authorization before
+provider access. It takes the approved lock, reads fresh Pod inventory, writes
+a create attempt, and performs exactly one create request. An unknown outcome
+is reconciled by that supervisor; never repeat launch. Direct `runpod-launch`
+always fails closed.
 
 Use `runpod-status`, `runpod-terminate`, `runpod-reconcile-termination`,
 `runpod-enforce-deadline`, and `runpod-reconcile-spend` with the exact receipt
@@ -231,9 +232,11 @@ promoting the incoming directory. S3 ETags are not provenance. Use rsync over
 SSH only as a fallback because it requires paid Pod uptime. Never use a
 destructive sync or overwrite an immutable run identity.
 
-The clean disaster-recovery input bundle is 1,395,349,697 bytes: three original
-DBN.ZST archives, the 64-file repaired corpus, and the pinned official
-MantisV2 cache. The 24.675 GiB existing continuation bundle is optional
+The frozen production input bundle is 1,437,579,939 bytes across 75 files. Its
+digest is `4d12c3f334dba95fb045905d89654f16d63e75b68f8423ae8726eac06d70fba6`.
+It contains three original DBN.ZST archives, the 64-file repaired corpus, the
+pinned official MantisV2 cache as regular files, and the frozen diagnostic
+fixture. The 24.675 GiB existing continuation bundle is optional
 reference state, not an input to the fresh CUDA run. Do not copy the 54.6 GB
 historical artifact tree wholesale.
 
@@ -241,7 +244,7 @@ Use this persistent layout:
 
 ```text
 /workspace/mantis/
-|-- inputs/{raw,corpus,upstream}/<content-identity>/
+|-- inputs/<bundle-sha256>/{dbn,corpus,cache,diagnostic}/
 |-- cache/{huggingface,uv}/
 |-- runs/<immutable-run-name>/
 |-- exports/<immutable-run-name>/
@@ -271,8 +274,8 @@ just transfer-bundle infra/runpod/transfer.local.toml
 
 The command rejects unsafe paths, duplicate normalized paths, symlinks,
 special files, and source mutation. It publishes the manifest atomically and
-refuses overwrite. Before enabling a concrete S3 client, exercise the exact
-injected staging policy against a synthetic HEAD inventory:
+refuses overwrite. Exercise the exact staging policy against a synthetic HEAD
+inventory before using live credentials:
 
 ```bash
 just transfer-stage-dry-run \
@@ -286,9 +289,22 @@ accepted as opaque inventory evidence and deliberately ignored. The production
 `S3TransferAdapter` seam follows the RunPod
 [S3-compatible API](https://docs.runpod.io/storage/s3-api) object-key mapping
 and AWS [HeadObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html)
-size semantics. This repository intentionally installs no SDK and ships no
-credential-bearing adapter; inject a reviewed local adapter rather than putting
-keys in config or command arguments. Never use destructive sync.
+size semantics. The production adapter invokes the AWS CLI against the fixed
+RunPod endpoint and passes credentials only in its child-process environment.
+Set the environment variable names declared by ignored `local.toml`; the
+standard names are `RUNPOD_S3_ACCESS_KEY_ID` and
+`RUNPOD_S3_SECRET_ACCESS_KEY`. Then pre-stage without creating a Pod:
+
+```bash
+just transfer-stage-runpod \
+  infra/runpod/transfer.foundation.local.toml \
+  infra/runpod/local.toml \
+  /path/to/approved-bound-decision.json
+```
+
+The command rehashes local inputs, HEAD-checks all objects, uploads only absent
+or wrong-size objects, and verifies each resulting size. Never use destructive
+sync.
 
 Inside a Pod with the network volume mounted, set the config's mounted paths to
 the incoming `files` directory and immutable final parent, then run:
@@ -333,8 +349,7 @@ refuses. The CLI never deletes remote or local data; the isolated deletion
 executor exists only behind an explicit verified decision and is covered by a
 temporary-directory test.
 
-The following no-I/O dry run validates the synthetic manifest fixture whose
-total is the measured 1,395,349,697-byte clean input bundle:
+The following no-I/O dry run validates the older synthetic transfer fixture:
 
 ```bash
 just transfer-manifest-inspect \
@@ -343,10 +358,33 @@ just transfer-manifest-inspect \
 
 It reports total size `1395349697` and roots `cache`, `corpus`, and `dbn`.
 Fixture entry digests and category sizes are deterministic test oracles, not a
-production upload manifest. The production manifest must be rebuilt from the
-immutable snapshot containing the three original DBN.ZST archives, 64 repaired
-corpus files, and pinned MantisV2 cache. Historical continuation checkpoints
-and the 54.6 GB artifact tree are not members and must not be added.
+production upload manifest. The production manifest is rebuilt from the
+immutable 75-file snapshot described above. Historical continuation
+checkpoints and the 54.6 GB artifact tree are not members and must not be added.
+
+### No-idle supervised launch
+
+Direct `runpod-launch` is intentionally rejected. Before a paid create, build,
+statically self-check, and scan a clean digest-pinned image, stage the complete input bundle, render
+the matrix plan, seal the exact workload, create an approved provider decision,
+and bind that decision to the workload. Start the only paid mutation through:
+
+```bash
+just runpod-supervise-workload \
+  /path/to/sealed/launch-manifest.json \
+  /path/to/bound-decision.json \
+  infra/runpod/local.toml \
+  /path/to/pinned/runpodctl
+```
+
+The static image receipt binds architecture, dependencies, source, and lock but
+does not claim local CUDA availability. The Pod executor performs the CUDA and
+driver allocation self-check as its first operation and starts training only on
+success. The supervisor verifies S3 staging before create, requires the first signed
+heartbeat within 600 seconds, terminates after four missed 30-second polls or
+the hard deadline, captures diagnostics and an emergency checkpoint, verifies
+provider absence, reconciles billing, and copies completed artifacts to both
+declared backup roots. TensorBoard is reached only through an SSH tunnel.
 
 ## Accuracy-first training contract
 

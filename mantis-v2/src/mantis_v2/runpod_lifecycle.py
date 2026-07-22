@@ -151,6 +151,11 @@ def _validate_launch_decision(decision: Mapping[str, object], evaluated_at: date
     return decision_digest
 
 
+def validate_launch_decision(decision: Mapping[str, object], evaluated_at: datetime) -> str:
+    """Validate one immutable launch decision without creating a resource."""
+    return _validate_launch_decision(decision, evaluated_at.astimezone(UTC))
+
+
 def _publish_json(path: Path, payload: Mapping[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
@@ -413,7 +418,7 @@ def launch_pod(
         duration = _required_int(
             decision.get("maximum_duration_seconds"), "maximum_duration_seconds"
         )
-        deadline = started_at + timedelta(seconds=duration)
+        deadline = started_at + timedelta(seconds=duration + 600 + 120)
         reserved_spend = _required_decimal(
             decision.get("projected_spend_usd"), "projected_spend_usd"
         )
@@ -657,6 +662,40 @@ def terminate_pod(
         adapter=adapter,
         observed_at=now().astimezone(UTC),
         reason="operator_requested",
+    )
+
+
+def terminate_pod_for_reason(
+    *,
+    pod_id: str,
+    run_name: str,
+    reason: str,
+    state_root: Path,
+    adapter: LifecycleAdapter,
+    now: Clock,
+) -> dict[str, object]:
+    """Terminate a receipt-bound Pod for one machine-owned fail-closed reason."""
+    allowed = {
+        "workload_complete",
+        "startup_heartbeat_timeout",
+        "heartbeat_missed",
+        "workload_blocked",
+        "workload_failed",
+        "provider_not_running",
+        "supervisor_error",
+    }
+    if reason not in allowed:
+        raise LifecycleError("invalid_termination_reason")
+    exact_pod_id = _pod_identity(pod_id)
+    pod_receipt = _read_pod_control_receipt(state_root, exact_pod_id)
+    if pod_receipt.get("run_name") != run_name:
+        raise LifecycleError("run_identity_mismatch")
+    return _terminate_receipted(
+        pod_receipt=pod_receipt,
+        state_root=state_root,
+        adapter=adapter,
+        observed_at=now().astimezone(UTC),
+        reason=reason,
     )
 
 

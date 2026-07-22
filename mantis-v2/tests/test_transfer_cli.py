@@ -173,7 +173,7 @@ def test_transfer_stage_dry_run_uses_injected_inventory_without_upload(
     manifest = transfer_bundle.write_bundle_manifest(
         paths["source"], ("alpha.txt",), paths["manifest"]
     )
-    prefix = f"transfer/incoming/{manifest.bundle_digest}"
+    prefix = f"mantis/transfer/incoming/{manifest.bundle_digest}"
     inventory = tmp_path / "remote-inventory.json"
     inventory.write_text(
         json.dumps(

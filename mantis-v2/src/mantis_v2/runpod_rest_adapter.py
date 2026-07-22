@@ -130,6 +130,9 @@ def _normalize_pod(value: object) -> dict[str, object]:
     }
     if "uptimeSeconds" in raw:
         normalized["uptimeSeconds"] = _required(raw, "uptimeSeconds", int)
+    for field in ("lastStartedAt", "lastStatusChange"):
+        if field in raw and raw[field] is not None:
+            normalized[field] = _required(raw, field, str)
     return normalized
 
 

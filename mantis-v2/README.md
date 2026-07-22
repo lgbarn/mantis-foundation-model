@@ -253,6 +253,14 @@ This is supervised NextLeg fine-tuning, not a reproduction of MantisV2 contrasti
 
 Training stops after eight epochs without validation-total improvement. `metrics.json` records the learning rate plus train and validation total, candle MSE, and leg SmoothL1 for every completed epoch. These regression checkpoints do not report AUC or log loss; those belong to the later 3-minute classifier stage.
 
+The CUDA accuracy matrix compares a `1min`/`3min`/`15min` ablation with the
+full four-timeframe `1min`/`3min`/`5min`/`15min` recipe. The production choice
+is the four-timeframe recipe; the three-timeframe cells remain only as a
+compute-matched test of the incremental 5-minute signal. Seeds 42-44 screen the
+recipe and seeds 42-46 confirm it. The matrix can compare full fine-tuning with
+rank-8 and rank-16 LoRA, but LoRA is selected only when its confirmation median
+meets the frozen non-inferiority margins against the full-fine-tune median.
+
 ## Artifacts and resume
 
 Outputs live under the configured external `artifact_root`:

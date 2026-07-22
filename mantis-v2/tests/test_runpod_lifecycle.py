@@ -87,7 +87,7 @@ def test_expired_decision_is_rejected_before_provider_access(tmp_path: Path) -> 
         )
 
 
-def test_launch_cli_wires_approved_decision_to_receipt_without_secret_output(
+def test_launch_cli_rejects_unsupervised_paid_resource_creation(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
     decision = _approved_decision()
@@ -99,28 +99,6 @@ def test_launch_cli_wires_approved_decision_to_receipt_without_secret_output(
     decision_path = tmp_path / "decision.json"
     decision_path.write_text(json.dumps(decision))
 
-    class FakeAdapter:
-        def inventory(self) -> list[dict[str, object]]:
-            return []
-
-        def create(self, submitted: dict[str, object], deadline: datetime) -> dict[str, object]:
-            return {
-                "id": "pod-cli",
-                "name": submitted["run_name"],
-                "desiredStatus": "RUNNING",
-                "imageName": submitted["image_ref"],
-                "templateId": submitted["template_id"],
-                "networkVolumeId": submitted["volume_id"],
-                "costPerHr": 0.44,
-                "vcpuCount": 8,
-                "memoryInGb": 32,
-            }
-
-    monkeypatch.setattr(
-        cli,
-        "_live_adapter",
-        lambda path, *, expected_local_digest=None: (tmp_path / "state", FakeAdapter()),
-    )
     monkeypatch.setattr(
         sys,
         "argv",
@@ -134,11 +112,13 @@ def test_launch_cli_wires_approved_decision_to_receipt_without_secret_output(
         ],
     )
 
-    cli.main()
+    with pytest.raises(SystemExit, match="2"):
+        cli.main()
 
-    output = capsys.readouterr().out
-    assert json.loads(output)["pod_id"] == "pod-cli"
-    assert "RUNPOD_API_KEY" not in output
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "supervised_workload_command_required" in output.err
+    assert "RUNPOD_API_KEY" not in output.err
 
 
 def test_concurrent_launches_create_once_and_publish_one_receipt(tmp_path: Path) -> None:
@@ -158,7 +138,7 @@ def test_concurrent_launches_create_once_and_publish_one_receipt(tmp_path: Path)
                 calls.append("create")
             create_entered.set()
             assert allow_create.wait(timeout=2)
-            assert deadline == datetime(2026, 7, 21, 14, 0, tzinfo=UTC)
+            assert deadline == datetime(2026, 7, 21, 14, 12, tzinfo=UTC)
             return {
                 "id": "pod-001",
                 "name": decision["run_name"],
@@ -240,7 +220,7 @@ def test_deadline_watchdog_terminates_once_and_reuses_receipt(tmp_path: Path) ->
         now=lambda: current,
     )
 
-    current = datetime(2026, 7, 21, 14, 0, 1, tzinfo=UTC)
+    current = datetime(2026, 7, 21, 14, 12, 1, tzinfo=UTC)
     first = enforce_deadline(
         pod_id=str(receipt["pod_id"]),
         state_root=state_root,

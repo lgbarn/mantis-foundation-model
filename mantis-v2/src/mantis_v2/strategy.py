@@ -18,7 +18,7 @@ class StrategyContractError(ValueError):
     """Raised when market data cannot satisfy the strategy contract."""
 
 
-_TIMEFRAME_MINUTES = {"1min": 1, "3min": 3, "15min": 15}
+_TIMEFRAME_MINUTES = {"1min": 1, "3min": 3, "5min": 5, "15min": 15}
 
 
 def market_path(config: DownstreamConfig, symbol: str, timeframe: str) -> Path:
