@@ -9,6 +9,8 @@ import platform
 import sys
 import tempfile
 import time
+from collections.abc import Callable
+from concurrent.futures import Executor, ProcessPoolExecutor
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -446,23 +448,97 @@ def _mmap_benchmark(refs: tuple[FeatureRef, ...]) -> dict[str, float | int]:
     }
 
 
-def _throughput_benchmark(config: RlConfig, episode: EnvironmentEpisode) -> dict[str, float | int]:
+def _run_environment_transitions(config: RlConfig, episode: EnvironmentEpisode, target: int) -> int:
     transitions = 0
-    started = time.perf_counter()
-    while transitions < 10_000:
+    while transitions < target:
         environment = TopstepEntryEnvironment(config, episode)
         _, _ = environment.reset(seed=config.run.seed)
-        while transitions < 10_000:
+        while transitions < target:
             _, _, terminated, truncated, _ = environment.step(0)
             transitions += 1
             if terminated or truncated:
                 break
-    elapsed = time.perf_counter() - started
+    return transitions
+
+
+def _run_collector_batch(
+    executor: Executor,
+    config: RlConfig,
+    episode: EnvironmentEpisode,
+    worker_count: int,
+    steps_per_worker: int,
+) -> int:
+    futures = [
+        executor.submit(_run_environment_transitions, config, episode, steps_per_worker)
+        for _worker in range(worker_count)
+    ]
+    return sum(future.result() for future in futures)
+
+
+def _warmup_collector(
+    executor: Executor,
+    config: RlConfig,
+    episode: EnvironmentEpisode,
+    worker_count: int,
+) -> int:
+    return _run_collector_batch(executor, config, episode, worker_count, 1_000)
+
+
+def _measure_collector_window(
+    executor: Executor,
+    config: RlConfig,
+    episode: EnvironmentEpisode,
+    worker_count: int,
+    *,
+    minimum_steps: int = 14_000,
+    minimum_seconds: float = 2.0,
+    clock: Callable[[], float] = time.perf_counter,
+) -> tuple[int, float, float]:
+    transitions = 0
+    started = clock()
+    elapsed = 0.0
+    while transitions < minimum_steps or elapsed < minimum_seconds:
+        transitions += _run_collector_batch(
+            executor, config, episode, worker_count, steps_per_worker=2_000
+        )
+        elapsed = clock() - started
+    return transitions, elapsed, transitions / elapsed
+
+
+def _throughput_benchmark(config: RlConfig, episode: EnvironmentEpisode) -> dict[str, object]:
+    worker_count = 7
+    with ProcessPoolExecutor(max_workers=worker_count) as executor:
+        warmup_steps = _warmup_collector(executor, config, episode, worker_count)
+        samples = tuple(
+            _measure_collector_window(executor, config, episode, worker_count)
+            for _sample in range(7)
+        )
+    rates = [sample[2] for sample in samples]
+    elapsed = float(np.median([sample[1] for sample in samples]))
+    steps_per_second = float(np.median(rates))
     return {
-        "steps": transitions,
+        "benchmark_kind": "aggregate_vector_environment_throughput",
+        "workers": worker_count,
+        "minimum_steps_per_window": 14_000,
+        "minimum_seconds_per_window": 2.0,
+        "warmup_steps": warmup_steps,
+        "samples": len(samples),
+        "sample_steps": [sample[0] for sample in samples],
+        "sample_elapsed_seconds": [sample[1] for sample in samples],
+        "sample_steps_per_second": rates,
         "elapsed_seconds": elapsed,
-        "steps_per_second": transitions / elapsed,
+        "steps_per_second": steps_per_second,
+        "minimum_steps_per_second": min(rates),
+        "p25_steps_per_second": float(np.percentile(rates, 25)),
+        "maximum_steps_per_second": max(rates),
     }
+
+
+def _require_environment_throughput(steps_per_second: object) -> None:
+    if isinstance(steps_per_second, bool) or not isinstance(steps_per_second, int | float):
+        raise EnvironmentValidationError("environment throughput evidence is invalid")
+    if steps_per_second < 5_000.0:
+        raise EnvironmentValidationError("environment throughput is below 5,000 steps/second")
 
 
 def validate_environment(
@@ -550,8 +626,7 @@ def validate_environment(
         raise EnvironmentValidationError("future-bar mutation changed a prior observation")
     if mmap["headroom_x"] < 100.0:
         raise EnvironmentValidationError("mmap observation latency lacks 100x headroom")
-    if throughput["steps_per_second"] < 5_000.0:
-        raise EnvironmentValidationError("environment throughput is below 5,000 steps/second")
+    _require_environment_throughput(throughput["steps_per_second"])
     return {
         "schema_version": 1,
         "stage": "rl-environment-validation",

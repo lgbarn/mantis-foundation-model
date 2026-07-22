@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import Future
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
 import pytest
 from mantis_v2 import cli
+from mantis_v2 import rl_validation as validation_module
 from mantis_v2.rl_baselines import (
     BaselineContractError,
     MatchedRandomPolicy,
@@ -247,7 +249,13 @@ def test_environment_validation_emits_baselines_benchmarks_and_provenance(
         "hist_gradient_boosting_contextual",
     }
     assert result["benchmark"]["mmap_fetch"]["samples"] == 1000
-    assert result["benchmark"]["environment"]["steps"] == 10_000
+    benchmark = result["benchmark"]["environment"]
+    assert benchmark["benchmark_kind"] == "aggregate_vector_environment_throughput"
+    assert benchmark["workers"] == 7
+    assert benchmark["warmup_steps"] == 7_000
+    assert benchmark["samples"] == 7
+    assert all(steps >= 14_000 for steps in benchmark["sample_steps"])
+    assert all(seconds >= 2.0 for seconds in benchmark["sample_elapsed_seconds"])
     assert result["host"]["machine"]
     for episode in result["baseline_replays"]:
         by_name = {item["policy"]: item for item in episode["results"]}
@@ -255,6 +263,94 @@ def test_environment_validation_emits_baselines_benchmarks_and_provenance(
             by_name["matched_random_take"]["accepted_trades"]
             == by_name["hist_gradient_boosting_contextual"]["accepted_trades"]
         )
+
+
+class _ImmediateExecutor:
+    def __init__(self, events: list[str] | None = None) -> None:
+        self.events = events if events is not None else []
+        self.max_workers: int | None = None
+
+    def __enter__(self) -> _ImmediateExecutor:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def submit(self, _function: object, *_args: object) -> Future[int]:
+        self.events.append("submit")
+        future: Future[int] = Future()
+        future.set_result(int(_args[-1]))
+        return future
+
+
+def test_collector_window_times_reset_work_and_aggregates_exactly_seven_workers() -> None:
+    events: list[str] = []
+    executor = _ImmediateExecutor(events)
+    times = iter((0.0, 2.0))
+
+    def clock() -> float:
+        events.append("clock")
+        return next(times)
+
+    transitions, elapsed, rate = validation_module._measure_collector_window(
+        executor, _config(), _baseline_episode(), 7, clock=clock
+    )
+
+    assert transitions == 14_000
+    assert elapsed == 2.0
+    assert rate == 7_000.0
+    assert events == ["clock", *("submit" for _worker in range(7)), "clock"]
+
+
+def test_throughput_benchmark_excludes_warmup_and_uses_seven_sample_median(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    executor = _ImmediateExecutor(events)
+    rates = iter((1_000.0, 2_000.0, 3_000.0, 6_000.0, 7_000.0, 8_000.0, 9_000.0))
+    monkeypatch.setattr(
+        validation_module,
+        "ProcessPoolExecutor",
+        lambda max_workers: executor,
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "_warmup_collector",
+        lambda _executor, _config, _episode, worker_count: events.append("warmup") or 7_000,
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "_measure_collector_window",
+        lambda _executor, _config, _episode, _worker_count: (
+            events.append("measure") or 14_000,
+            2.0,
+            next(rates),
+        ),
+    )
+
+    result = validation_module._throughput_benchmark(_config(), _baseline_episode())
+
+    assert events == ["warmup", *("measure" for _sample in range(7))]
+    assert result["workers"] == 7
+    assert result["warmup_steps"] == 7_000
+    assert result["samples"] == 7
+    assert result["steps_per_second"] == 6_000.0
+    assert result["minimum_steps_per_second"] == 1_000.0
+    assert result["p25_steps_per_second"] == 2_500.0
+    assert result["maximum_steps_per_second"] == 9_000.0
+
+
+@pytest.mark.parametrize("rate", (5_000.0, 5_001.0))
+def test_environment_throughput_gate_accepts_at_least_5000(rate: float) -> None:
+    validation_module._require_environment_throughput(rate)
+
+
+def test_environment_throughput_gate_rejects_4999_999() -> None:
+    with pytest.raises(
+        validation_module.EnvironmentValidationError,
+        match="below 5,000 steps/second",
+    ):
+        validation_module._require_environment_throughput(4_999.999)
 
 
 def test_cli_exposes_manifest_backed_environment_validation(
