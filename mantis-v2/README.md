@@ -369,10 +369,10 @@ Each actor emits only `skip` or `enter`. Trend Magic direction, the deterministi
 outside actor authority. Training uses episodic PPO-Lagrangian with separate
 ticker-owned reward and BLOW-cost critics. PASS reward and BLOW cost are binary
 terminal signals with gamma 1.0; minimum MLL cushion remains an observation and
-logged path metric, never a dense cost. Reward advantages are standardized per
-ticker, cost advantages are only centered, and the actor uses
-`(A_reward - lambda*A_cost) / (1 + lambda)`. The projected multiplier starts at
-1.0, uses a 0.01 cost limit and 0.05 learning rate, and is capped at 100. A run
+logged path metric, never a dense cost. Reward and cost advantages are
+standardized independently per ticker, and the actor uses
+`A_reward - lambda*A_cost`. The projected multiplier starts at 1.0, uses a 0.01
+cost limit and 0.01 learning rate, and is capped at 100. A run
 freezes rollout log probabilities and both values before four configured PPO
 epochs. Every minibatch contains exactly equal samples per present ticker,
 oversampling shorter streams when legal decision counts differ. The

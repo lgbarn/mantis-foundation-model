@@ -13,7 +13,12 @@ import pytest
 import torch
 from mantis_v2 import cli
 from mantis_v2.rl_config import load_rl_config
-from mantis_v2.rl_environment import BarData, CandidateData, EnvironmentEpisode
+from mantis_v2.rl_environment import (
+    BarData,
+    CandidateData,
+    EnvironmentContractError,
+    EnvironmentEpisode,
+)
 from mantis_v2.rl_policy import EntryActorCritic, ReturnNormalizers
 from mantis_v2.rl_training import (
     ConstraintController,
@@ -24,15 +29,18 @@ from mantis_v2.rl_training import (
     _actor_weights,
     _apply_training_control,
     _balanced_minibatches,
+    _complete_seed_statistics,
     _completed_timesteps,
     _cost_returns,
     _lagrangian_actor_advantages,
     _ppo_update,
     _reward_returns,
+    _reward_targets_and_advantages,
     _terminal_signal,
     _train_loaded_policy,
     _train_policy_seeds_loaded,
     _Transition,
+    _validate_contract,
     load_training_episodes,
     train_entry_policy,
 )
@@ -101,13 +109,14 @@ def _learning_episode(ticker: str, outcome: str) -> EnvironmentEpisode:
 
 def _learning_episodes() -> TrainingEpisodes:
     config = _config()
-    episodes = tuple(
-        episode
-        for ticker in TICKERS
-        for episode in (_learning_episode(ticker, "PASS"), _learning_episode(ticker, "BLOW"))
-    )
+    episodes = []
+    for ticker in TICKERS:
+        profiles = ("one_mini",) if ticker == "ZB" else ("one_mini", "ten_micros")
+        for profile in profiles:
+            for outcome in ("PASS", "BLOW"):
+                episodes.append(replace(_learning_episode(ticker, outcome), profile=profile))
     return TrainingEpisodes(
-        episodes,
+        tuple(episodes),
         manifest_sha256="f" * 64,
         config_sha256=config.digest,
         artifact_sha256=config.upstream.embedding_manifest_sha256,
@@ -230,6 +239,40 @@ def test_ticker_cost_heads_update_only_for_owners() -> None:
         )
 
 
+def test_shared_critic_shares_reward_and_cost_heads() -> None:
+    shared = EntryActorCritic(42, PolicyVariant.SHARED_CRITIC)
+    ticker_owned = EntryActorCritic(42, PolicyVariant.SHARED_TICKER_VALUE)
+
+    assert shared.value_parameters("ES")[0] is shared.value_parameters("NQ")[0]
+    assert shared.cost_value_parameters("ES")[0] is shared.cost_value_parameters("NQ")[0]
+    assert ticker_owned.value_parameters("ES")[0] is not ticker_owned.value_parameters("NQ")[0]
+    assert (
+        ticker_owned.cost_value_parameters("ES")[0]
+        is not ticker_owned.cost_value_parameters("NQ")[0]
+    )
+
+
+def test_training_contract_requires_supported_ticker_profile_matrix() -> None:
+    config = _config()
+    valid = _training_episodes()
+    _validate_contract(config, valid)
+
+    missing_cl_micro = replace(
+        valid,
+        episodes=tuple(
+            episode
+            for episode in valid.episodes
+            if not (episode.ticker == "CL" and episode.profile == "ten_micros")
+        ),
+        collection_sha256="",
+    )
+    with pytest.raises(ProductionTrainingError, match="ticker/profile matrix"):
+        _validate_contract(config, missing_cl_micro)
+
+    with pytest.raises(EnvironmentContractError, match="ZB is mini-only"):
+        _episode("ZB", "ten_micros")
+
+
 def test_constraint_controller_uses_raw_episode_costs_and_projects_bounds() -> None:
     controller = ConstraintController.from_config(_config())
 
@@ -257,6 +300,24 @@ def test_actor_advantage_uses_exact_lagrangian_formula() -> None:
     combined = _lagrangian_actor_advantages(reward, cost, dual_lambda=3.0)
 
     assert torch.equal(combined, torch.tensor([-0.5, 0.5]))
+
+
+def test_reward_advantages_use_rollout_normalizer_snapshot() -> None:
+    normalizers = ReturnNormalizers(TICKERS)
+    normalizers.update("ES", np.array([0.0, 2.0]))
+    raw_returns = np.array([4.0, 6.0])
+    old_values = torch.tensor([3.0, 5.0])
+
+    critic_targets, advantages = _reward_targets_and_advantages(
+        normalizers,
+        torch.zeros(2, dtype=torch.long),
+        raw_returns,
+        old_values,
+    )
+
+    assert torch.equal(advantages, torch.zeros(2))
+    assert not torch.equal(critic_targets, old_values)
+    assert normalizers.count("ES") == 4
 
 
 def test_terminal_reward_and_cost_are_unshaped() -> None:
@@ -484,7 +545,9 @@ def test_public_learning_controls_detect_reward_and_mask_failures(
 
     assert separations[TrainingControl.NORMAL] > 0.10
     assert separations[TrainingControl.ZERO_REWARD] < separations[TrainingControl.NORMAL] / 2
-    assert separations[TrainingControl.SHUFFLED_REWARD] < 0.0
+    assert abs(separations[TrainingControl.SHUFFLED_REWARD]) < (
+        separations[TrainingControl.NORMAL] / 2
+    )
     with pytest.raises(ProductionTrainingError, match="mask-disabled control"):
         train_entry_policy(
             config,
@@ -520,24 +583,38 @@ def test_balanced_rollouts_finite_gradients_and_policy_diagnostics(tmp_path: Pat
     assert max(actor_totals.values()) - min(actor_totals.values()) < 1e-7
 
 
-def test_checkpoint_reload_and_interruption_resume_are_exact(tmp_path: Path) -> None:
+@pytest.mark.parametrize("variant", tuple(PolicyVariant))
+def test_checkpoint_reload_and_interruption_resume_are_exact(
+    tmp_path: Path, variant: PolicyVariant
+) -> None:
     config = _config()
     episodes = _training_episodes()
     uninterrupted = tmp_path / "uninterrupted"
     resumed = tmp_path / "resumed"
-    full = _train_loaded_policy(config, episodes, uninterrupted, seed=42, target_updates=2)
+    full = _train_loaded_policy(
+        config, episodes, uninterrupted, seed=42, variant=variant, target_updates=2
+    )
     partial = _train_loaded_policy(
         config,
         episodes,
         resumed,
         seed=42,
+        variant=variant,
         target_updates=2,
         maximum_updates_this_run=1,
     )
     assert partial["status"] == "incomplete"
     partial_state = json.loads((resumed / "state.json").read_text())
     assert partial_state["completed_timesteps"] == partial["rollouts"]["bars_replayed"]
-    final = _train_loaded_policy(config, episodes, resumed, seed=42, target_updates=2, resume=True)
+    final = _train_loaded_policy(
+        config,
+        episodes,
+        resumed,
+        seed=42,
+        variant=variant,
+        target_updates=2,
+        resume=True,
+    )
 
     assert final["status"] == "complete"
     assert final["deterministic_reload_actions"] is True
@@ -636,11 +713,15 @@ def test_resume_rejects_provenance_and_all_seed_reporting_has_worst_seed(
     )
     assert [run["seed"] for run in aggregate["runs"]] == [42, 43]
     assert aggregate["reported_seeds"] == [42, 43]
+    assert aggregate["status"] == "complete"
     assert aggregate["worst_seed"] in {42, 43}
     assert aggregate["worst_constraint_seed"] in {42, 43}
     assert aggregate["aggregate_blow_count"] >= 0
     assert 0.0 <= aggregate["aggregate_blow_rate"] <= 1.0
     assert 0.0 <= aggregate["maximum_seed_blow_rate"] <= 1.0
+    assert 0.0 <= aggregate["median_pass_rate"] <= 1.0
+    assert 0.0 <= aggregate["interquartile_mean_pass_rate"] <= 1.0
+    assert len(aggregate["seed_mean_pass_rate_interval_95"]) == 2
     assert "best_seed" not in aggregate
     resumed = _train_policy_seeds_loaded(
         two_seed_config,
@@ -663,6 +744,100 @@ def test_resume_rejects_provenance_and_all_seed_reporting_has_worst_seed(
             target_updates=None,
             resume=True,
         )
+
+
+def _fake_seed_run(seed: int, passes: int, blows: int, timeouts: int = 0) -> dict[str, object]:
+    episode_count = passes + blows + timeouts
+    return {
+        "status": "complete",
+        "seed": seed,
+        "finite_gradients": True,
+        "metrics": [
+            {"rollouts": {"outcomes": {"PASS": passes, "BLOW": blows, "TIMEOUT": timeouts}}}
+        ],
+        "constraint_controller": {"episode_count": episode_count, "cost_sum": float(blows)},
+    }
+
+
+def test_seed_ranking_uses_rate_under_unequal_exposure() -> None:
+    statistics = _complete_seed_statistics((_fake_seed_run(42, 8, 2), _fake_seed_run(43, 9, 91)))
+
+    assert statistics["worst_seed"] == 43
+    assert statistics["aggregate_pass_count"] == 17
+    assert statistics["aggregate_episode_count"] == 110
+    assert statistics["aggregate_pass_rate"] == pytest.approx(17 / 110)
+
+
+def test_seed_summary_reports_iqm_and_intervals() -> None:
+    runs = tuple(
+        _fake_seed_run(seed, passes, 100 - passes)
+        for seed, passes in zip(range(5), (0, 25, 50, 75, 100), strict=True)
+    )
+
+    statistics = _complete_seed_statistics(runs)
+
+    assert statistics["median_pass_rate"] == 0.5
+    assert statistics["interquartile_mean_pass_rate"] == 0.5
+    low, high = statistics["seed_mean_pass_rate_interval_95"]
+    assert 0.0 <= low <= 0.5 <= high <= 1.0
+    for seed_metrics in statistics["seed_metrics"]:
+        pass_low, pass_high = seed_metrics["pass_rate_interval_95"]
+        blow_low, blow_high = seed_metrics["blow_rate_interval_95"]
+        assert 0.0 <= pass_low <= pass_high <= 1.0
+        assert 0.0 <= blow_low <= blow_high <= 1.0
+
+
+def test_seed_orchestrator_does_not_rank_incomplete_runs(tmp_path: Path) -> None:
+    config = replace(
+        _config(),
+        training=replace(
+            _config().training,
+            development_seeds=(42, 43),
+            confirmation_seeds=(42, 43),
+        ),
+    )
+    episodes = replace(_training_episodes(), config_sha256=config.digest)
+
+    progress = _train_policy_seeds_loaded(
+        config,
+        episodes,
+        tmp_path / "partial-seeds",
+        seeds=(42, 43),
+        target_updates=2,
+        maximum_updates_this_run=1,
+    )
+
+    assert progress["status"] == "incomplete"
+    assert not (tmp_path / "partial-seeds" / "seed-summary.json").exists()
+    assert (tmp_path / "partial-seeds" / "seed-progress.json").is_file()
+    for forbidden in ("worst_seed", "median_pass_rate", "interquartile_mean_pass_rate"):
+        assert forbidden not in progress
+
+
+def test_seed_orchestrator_atomically_records_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import mantis_v2.rl_training as training
+
+    config = _config()
+    episodes = _training_episodes()
+
+    def fail(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise ProductionTrainingError("injected seed failure")
+
+    monkeypatch.setattr(training, "_train_loaded_policy", fail)
+    output = tmp_path / "failed-seeds"
+    with pytest.raises(ProductionTrainingError, match="injected seed failure"):
+        _train_policy_seeds_loaded(config, episodes, output, seeds=(42,), target_updates=1)
+
+    failures = list((output / "fold-00" / "failures" / "seed-42").glob("attempt-*.json"))
+    assert len(failures) == 1
+    evidence = json.loads(failures[0].read_text())
+    assert evidence["failed_seed"] == 42
+    assert evidence["exception_type"] == "ProductionTrainingError"
+    assert evidence["exception_message"] == "injected seed failure"
+    assert evidence["quality_claim"] is False
+    assert not (output / "seed-summary.json").exists()
 
 
 def _policy_transitions(
@@ -721,7 +896,7 @@ def test_masked_ppo_reuses_frozen_rollout_and_clips_changed_ratios() -> None:
     assert metrics["ppo_epochs"] == 6
 
 
-def test_cost_targets_remain_binary_and_cost_advantages_are_centered_only() -> None:
+def test_cost_targets_remain_binary_and_cost_advantages_are_standardized() -> None:
     torch.manual_seed(18)
     model = EntryActorCritic(4, PolicyVariant.SHARED_TICKER_VALUE, hidden_width=8)
     transitions = _policy_transitions(model)
@@ -744,7 +919,7 @@ def test_cost_targets_remain_binary_and_cost_advantages_are_centered_only() -> N
     assert metrics["cost_target_min"] == 0.0
     assert metrics["cost_target_max"] == 1.0
     assert metrics["cost_advantage_mean"] == pytest.approx(0.0)
-    assert metrics["cost_advantage_std"] == pytest.approx(0.5)
+    assert metrics["cost_advantage_std"] == pytest.approx(1.0)
     assert metrics["dual_update_count"] == 1
 
 

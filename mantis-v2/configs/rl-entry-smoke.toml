@@ -1,7 +1,7 @@
 schema_version = 1
 
 [upstream]
-source_digest = "f5aa2bafd0de7f7b4580e9aeb09627d1ed921a4e82a08f7ff2aeabfc7333b492"
+source_digest = "7fd314b1832554996d20847ddf3b59aa057e6cfd11cc933f19049e8f3d4e6a8b"
 lock_digest = "2c93e1dcfd2a929856549b9efb5716679d22fb24d8626154ed63aa0393955ee0"
 rule_contract_path = "mantis-v2/configs/topstep-100k-2026-07-20.toml"
 rule_contract_sha256 = "6e8b0d71716ec7b4c3e40a902b2ba62b4983f614463d1a823ea1dd85a4860db5"

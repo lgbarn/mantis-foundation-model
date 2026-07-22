@@ -135,9 +135,15 @@ class EntryActorCritic(nn.Module):
             self.value_heads = nn.ModuleDict(
                 {ticker: nn.Linear(hidden_width, 1) for ticker in TICKERS}
             )
-        self.cost_value_heads = nn.ModuleDict(
-            {ticker: nn.Linear(hidden_width, 1) for ticker in TICKERS}
-        )
+        self.cost_value_head: nn.Linear | None
+        if self.variant is PolicyVariant.SHARED_CRITIC:
+            self.cost_value_head = nn.Linear(hidden_width, 1)
+            self.cost_value_heads = nn.ModuleDict()
+        else:
+            self.cost_value_head = None
+            self.cost_value_heads = nn.ModuleDict(
+                {ticker: nn.Linear(hidden_width, 1) for ticker in TICKERS}
+            )
 
     def _conditioned(
         self, observations: torch.Tensor, tickers: torch.Tensor, profiles: torch.Tensor
@@ -207,7 +213,12 @@ class EntryActorCritic(nn.Module):
         logits, reward_values = self.forward(observations, tickers, profiles)
         conditioned = self._conditioned(observations, tickers, profiles)
         cost_hidden = self.cost_critic_trunk(conditioned)
-        cost_values = self._owned_output(cost_hidden, tickers, self.cost_value_heads, 1).squeeze(1)
+        if self.cost_value_head is None:
+            cost_values = self._owned_output(
+                cost_hidden, tickers, self.cost_value_heads, 1
+            ).squeeze(1)
+        else:
+            cost_values = self.cost_value_head(cost_hidden).squeeze(1)
         return logits, reward_values, cost_values
 
     def value_parameters(self, ticker: str) -> tuple[nn.Parameter, ...]:
@@ -219,7 +230,12 @@ class EntryActorCritic(nn.Module):
     def cost_value_parameters(self, ticker: str) -> tuple[nn.Parameter, ...]:
         if ticker not in TICKERS:
             raise ValueError(f"unknown ticker: {ticker}")
-        return tuple(self.cost_value_heads[ticker].parameters())
+        head = (
+            self.cost_value_head
+            if self.cost_value_head is not None
+            else self.cost_value_heads[ticker]
+        )
+        return tuple(head.parameters())
 
     def actor_parameters(self) -> tuple[nn.Parameter, ...]:
         heads: Iterable[nn.Parameter]

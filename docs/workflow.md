@@ -520,12 +520,11 @@ just rl-train \
 Use `independent_actor` or `shared_critic` only for the named architecture
 ablation. Training replays complete episodes with separate reward and cost
 objectives. PASS reward=1 and BLOW cost=1 only at termination; both use gamma
-1.0. Ticker-specific reward advantages are standardized, while ticker-specific
-cost advantages are centered without scaling and retain raw binary cost-value
-targets. The actor surrogate uses
-`(A_reward - lambda*A_cost) / (1 + lambda)`. The projected multiplier starts at
+1.0. Ticker-specific reward and cost advantages are standardized independently;
+cost-value targets and dual updates retain raw binary outcomes. The actor surrogate uses
+`A_reward - lambda*A_cost`. The projected multiplier starts at
 1.0, updates once per complete episode batch from raw BLOW indicators toward a
-0.01 cost limit at learning rate 0.05, and is capped at 100. Minimum MLL cushion
+0.01 cost limit at learning rate 0.01, and is capped at 100. Minimum MLL cushion
 is an observation and logged path metric only, never reward shaping or dense
 cost. Old policy log probabilities plus reward and cost values are frozen
 before the configured PPO epochs. Each minibatch has exactly equal samples per

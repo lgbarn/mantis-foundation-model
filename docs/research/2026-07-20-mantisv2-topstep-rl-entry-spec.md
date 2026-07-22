@@ -434,9 +434,10 @@ from `lambda = 1`. The nonzero initial multiplier prevents sparse PASS reward
 from establishing a take-all policy before the first safety update. The episode
 cost is exactly the raw binary terminal BLOW
 indicator; minimum cushion remains an observation and evaluation metric and is
-not a shaped training cost. Binary cost targets and advantages are not scaled
-by a running cost normalizer because doing so magnifies rare BLOW samples. Exact
-resume persists the reward and cost critics, reward-return normalizers,
+not a shaped training cost. Binary cost targets and raw dual updates remain
+unscaled, while reward and cost advantages are standardized independently per
+ticker so critic calibration cannot silently change their relative policy-gradient
+weight. Exact resume persists the reward and cost critics, reward-return normalizers,
 multiplier, projected-SGD counters and raw cost statistics, optimizer state,
 and RNG state. Aggregate and worst-seed
 results are mandatory; best-seed-only selection is prohibited. Promotion keeps

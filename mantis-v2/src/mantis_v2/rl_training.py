@@ -254,12 +254,17 @@ def _validate_contract(config: RlConfig, episodes: TrainingEpisodes) -> None:
         raise ProductionTrainingError("training reward must be unshaped with gamma 1")
     if config.policy.actions != ("skip", "enter") or config.sizing.actor_controls_size:
         raise ProductionTrainingError("entry actor authority must remain skip/enter only")
-    counts = Counter(episode.ticker for episode in episodes.episodes)
-    if set(counts) != set(TICKERS) or max(counts.values()) - min(counts.values()) > 1:
-        raise ProductionTrainingError("training schedule is not balanced across all tickers")
-    for episode in episodes.episodes:
-        if episode.profile not in PROFILES:
-            raise ProductionTrainingError("training schedule has an unsupported sizing profile")
+    expected_cells = {
+        (ticker, profile)
+        for ticker in TICKERS
+        for profile in (("one_mini",) if ticker == "ZB" else PROFILES)
+    }
+    cell_counts = Counter((episode.ticker, episode.profile) for episode in episodes.episodes)
+    if (
+        set(cell_counts) != expected_cells
+        or max(cell_counts.values()) - min(cell_counts.values()) > 1
+    ):
+        raise ProductionTrainingError("training schedule ticker/profile matrix is incomplete")
 
 
 def _identities(
@@ -509,6 +514,34 @@ def _lagrangian_actor_advantages(
     return reward_advantages - dual_lambda * cost_advantages
 
 
+def _reward_targets_and_advantages(
+    normalizers: ReturnNormalizers,
+    tickers: torch.Tensor,
+    raw_returns: np.ndarray,
+    old_values: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Keep rollout values and actor returns in one frozen normalization basis."""
+    critic_targets = torch.empty(len(raw_returns), dtype=torch.float32)
+    actor_advantages = torch.empty(len(raw_returns), dtype=torch.float32)
+    ticker_array = tickers.numpy()
+    for ticker_index, ticker in enumerate(TICKERS):
+        owned = np.flatnonzero(ticker_array == ticker_index)
+        if not len(owned):
+            continue
+        owned_tensor = torch.from_numpy(owned)
+        owned_returns = torch.as_tensor(raw_returns[owned], dtype=torch.float32)
+        rollout_basis_returns = normalizers.normalize(ticker, owned_returns)
+        owned_advantages = rollout_basis_returns - old_values[owned_tensor]
+        owned_advantages = owned_advantages - owned_advantages.mean()
+        reward_std = owned_advantages.std(unbiased=False)
+        if len(owned_advantages) > 1 and float(reward_std) > 1e-8:
+            owned_advantages = owned_advantages / reward_std
+        actor_advantages[owned_tensor] = owned_advantages
+        normalizers.update(ticker, raw_returns[owned])
+        critic_targets[owned_tensor] = normalizers.normalize(ticker, owned_returns)
+    return critic_targets, actor_advantages
+
+
 def _ppo_update(
     model: EntryActorCritic,
     optimizer: torch.optim.Optimizer,
@@ -536,28 +569,21 @@ def _ppo_update(
     masks = torch.from_numpy(np.stack([item.mask for item in transitions]))
     raw_reward_returns = _reward_returns(transitions)
     raw_cost_returns = _cost_returns(transitions)
-    normalized_reward_returns = torch.empty(len(transitions), dtype=torch.float32)
-    reward_advantages = torch.empty(len(transitions), dtype=torch.float32)
+    normalized_reward_returns, reward_advantages = _reward_targets_and_advantages(
+        normalizers, tickers, raw_reward_returns, old_values
+    )
     cost_returns = torch.from_numpy(raw_cost_returns)
     cost_advantages = torch.empty(len(transitions), dtype=torch.float32)
-    for ticker_index, ticker in enumerate(TICKERS):
+    for ticker_index in range(len(TICKERS)):
         owned = np.flatnonzero(np.asarray([item.ticker for item in transitions]) == ticker_index)
         if len(owned):
-            normalizers.update(ticker, raw_reward_returns[owned])
             owned_tensor = torch.from_numpy(owned)
-            normalized_reward_returns[owned_tensor] = normalizers.normalize(
-                ticker, torch.from_numpy(raw_reward_returns[owned])
-            )
-            owned_reward_advantages = (
-                normalized_reward_returns[owned_tensor] - old_values[owned_tensor]
-            )
-            owned_reward_advantages = owned_reward_advantages - owned_reward_advantages.mean()
-            reward_std = owned_reward_advantages.std(unbiased=False)
-            if len(owned_reward_advantages) > 1 and float(reward_std) > 1e-8:
-                owned_reward_advantages = owned_reward_advantages / reward_std
-            reward_advantages[owned_tensor] = owned_reward_advantages
             owned_cost_advantages = cost_returns[owned_tensor] - old_cost_values[owned_tensor]
-            cost_advantages[owned_tensor] = owned_cost_advantages - owned_cost_advantages.mean()
+            owned_cost_advantages = owned_cost_advantages - owned_cost_advantages.mean()
+            cost_std = owned_cost_advantages.std(unbiased=False)
+            if len(owned_cost_advantages) > 1 and float(cost_std) > 1e-8:
+                owned_cost_advantages = owned_cost_advantages / cost_std
+            cost_advantages[owned_tensor] = owned_cost_advantages
     dual_lambda = controller.lambda_value
     advantages = _lagrangian_actor_advantages(reward_advantages, cost_advantages, dual_lambda)
     _actor_weight_values, actor_weight_totals = _actor_weights(tickers)
@@ -1143,6 +1169,139 @@ def _completed_seed(
     return cast(dict[str, object], result)
 
 
+def _wilson_interval(successes: int, attempts: int) -> list[float]:
+    if attempts < 1 or not 0 <= successes <= attempts:
+        raise ProductionTrainingError("seed outcome counts are invalid")
+    z = 1.959963984540054
+    rate = successes / attempts
+    denominator = 1.0 + z * z / attempts
+    center = (rate + z * z / (2.0 * attempts)) / denominator
+    radius = (
+        z
+        * float(np.sqrt(rate * (1.0 - rate) / attempts + z * z / (4.0 * attempts**2)))
+        / denominator
+    )
+    return [max(0.0, center - radius), min(1.0, center + radius)]
+
+
+def _interquartile_mean(values: Sequence[float]) -> float:
+    if not values:
+        raise ProductionTrainingError("seed pass rates are empty")
+    ordered = sorted(float(value) for value in values)
+    lower = len(ordered) * 0.25
+    upper = len(ordered) * 0.75
+    weighted = 0.0
+    for index, value in enumerate(ordered):
+        weight = max(0.0, min(index + 1.0, upper) - max(float(index), lower))
+        weighted += weight * value
+    return weighted / (upper - lower)
+
+
+def _bootstrap_mean_interval(values: Sequence[float]) -> list[float]:
+    if not values:
+        raise ProductionTrainingError("seed pass rates are empty")
+    array = np.asarray(values, dtype=np.float64)
+    if len(array) == 1:
+        return [float(array[0]), float(array[0])]
+    generator = np.random.default_rng(0)
+    indices = generator.integers(0, len(array), size=(5_000, len(array)))
+    means = array[indices].mean(axis=1)
+    low, high = np.quantile(means, (0.025, 0.975))
+    return [float(low), float(high)]
+
+
+def _complete_seed_statistics(runs: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    if not runs or any(run.get("status") != "complete" for run in runs):
+        raise ProductionTrainingError("seed statistics require complete runs")
+    seed_metrics: list[dict[str, object]] = []
+    for run in runs:
+        seed = run.get("seed")
+        metrics = run.get("metrics")
+        if type(seed) is not int or not isinstance(metrics, list) or not metrics:
+            raise ProductionTrainingError("seed run metrics are invalid")
+        outcomes: Counter[str] = Counter()
+        for update_metrics in metrics:
+            rollouts = (
+                update_metrics.get("rollouts") if isinstance(update_metrics, Mapping) else None
+            )
+            update_outcomes = rollouts.get("outcomes") if isinstance(rollouts, Mapping) else None
+            if not isinstance(update_outcomes, Mapping):
+                raise ProductionTrainingError("seed run outcome metrics are invalid")
+            for outcome in ("PASS", "BLOW", "TIMEOUT"):
+                count = update_outcomes.get(outcome, 0)
+                if type(count) is not int or count < 0:
+                    raise ProductionTrainingError("seed run outcome metrics are invalid")
+                outcomes[outcome] += count
+            if set(update_outcomes) - {"PASS", "BLOW", "TIMEOUT"}:
+                raise ProductionTrainingError("seed run outcome metrics are invalid")
+        episode_count = sum(outcomes.values())
+        constraint_state = run.get("constraint_controller")
+        controller_episodes = (
+            constraint_state.get("episode_count") if isinstance(constraint_state, Mapping) else None
+        )
+        cost_sum = (
+            constraint_state.get("cost_sum") if isinstance(constraint_state, Mapping) else None
+        )
+        if (
+            episode_count < 1
+            or controller_episodes != episode_count
+            or not isinstance(cost_sum, int | float)
+            or not float(cost_sum).is_integer()
+            or int(cost_sum) != outcomes["BLOW"]
+        ):
+            raise ProductionTrainingError("seed run outcome metrics are invalid")
+        pass_count = outcomes["PASS"]
+        blow_count = outcomes["BLOW"]
+        seed_metrics.append(
+            {
+                "seed": seed,
+                "pass_count": pass_count,
+                "blow_count": blow_count,
+                "timeout_count": outcomes["TIMEOUT"],
+                "episode_count": episode_count,
+                "pass_rate": pass_count / episode_count,
+                "blow_rate": blow_count / episode_count,
+                "pass_rate_interval_95": _wilson_interval(pass_count, episode_count),
+                "blow_rate_interval_95": _wilson_interval(blow_count, episode_count),
+            }
+        )
+    pass_rates = [cast(float, item["pass_rate"]) for item in seed_metrics]
+    blow_rates = [cast(float, item["blow_rate"]) for item in seed_metrics]
+    aggregate_pass_count = sum(cast(int, item["pass_count"]) for item in seed_metrics)
+    aggregate_blow_count = sum(cast(int, item["blow_count"]) for item in seed_metrics)
+    aggregate_episode_count = sum(cast(int, item["episode_count"]) for item in seed_metrics)
+    worst = min(seed_metrics, key=lambda item: (cast(float, item["pass_rate"]), item["seed"]))
+    worst_constraint = max(
+        seed_metrics, key=lambda item: (cast(float, item["blow_rate"]), -cast(int, item["seed"]))
+    )
+    return {
+        "seed_metrics": seed_metrics,
+        "worst_seed": worst["seed"],
+        "worst_constraint_seed": worst_constraint["seed"],
+        "median_pass_rate": float(np.median(pass_rates)),
+        "interquartile_mean_pass_rate": _interquartile_mean(pass_rates),
+        "seed_mean_pass_rate_interval_95": _bootstrap_mean_interval(pass_rates),
+        "aggregate_pass_count": aggregate_pass_count,
+        "aggregate_blow_count": aggregate_blow_count,
+        "aggregate_episode_count": aggregate_episode_count,
+        "aggregate_pass_rate": aggregate_pass_count / aggregate_episode_count,
+        "aggregate_blow_rate": aggregate_blow_count / aggregate_episode_count,
+        "aggregate_pass_rate_interval_95": _wilson_interval(
+            aggregate_pass_count, aggregate_episode_count
+        ),
+        "aggregate_blow_rate_interval_95": _wilson_interval(
+            aggregate_blow_count, aggregate_episode_count
+        ),
+        "maximum_seed_blow_rate": max(blow_rates),
+    }
+
+
+def _seed_failure_path(output: Path, fold: int, seed: int) -> Path:
+    directory = output / f"fold-{fold:02d}" / "failures" / f"seed-{seed}"
+    attempts = sorted(directory.glob("attempt-*.json")) if directory.is_dir() else []
+    return directory / f"attempt-{len(attempts) + 1:04d}.json"
+
+
 def _train_policy_seeds_loaded(
     config: RlConfig,
     episodes: TrainingEpisodes,
@@ -1161,15 +1320,13 @@ def _train_policy_seeds_loaded(
     selected_variant = PolicyVariant(variant)
     for seed in selected:
         run_output = output / f"fold-{episodes.fold:02d}" / f"seed-{seed}"
-        if resume and (run_output / "manifest.json").is_file():
-            runs.append(
-                _completed_seed(
+        try:
+            if resume and (run_output / "manifest.json").is_file():
+                run = _completed_seed(
                     config, episodes, run_output, seed, selected_variant, target_updates
                 )
-            )
-        else:
-            runs.append(
-                _train_loaded_policy(
+            else:
+                run = _train_loaded_policy(
                     config,
                     episodes,
                     run_output,
@@ -1179,45 +1336,45 @@ def _train_policy_seeds_loaded(
                     maximum_updates_this_run=maximum_updates_this_run,
                     resume=resume and run_output.exists(),
                 )
+            runs.append(run)
+        except Exception as exc:
+            completed = []
+            for completed_run in runs:
+                completed_seed = completed_run.get("seed")
+                if type(completed_seed) is not int or completed_run.get("status") != "complete":
+                    continue
+                manifest_path = (
+                    output
+                    / f"fold-{episodes.fold:02d}"
+                    / f"seed-{completed_seed}"
+                    / "manifest.json"
+                )
+                if manifest_path.is_file():
+                    completed.append(
+                        {
+                            "seed": completed_seed,
+                            "manifest_sha256": sha256_file(manifest_path),
+                        }
+                    )
+            _atomic_json(
+                _seed_failure_path(output, episodes.fold, seed),
+                {
+                    "schema_version": 1,
+                    "stage": "rl-train-seeds",
+                    "fold": episodes.fold,
+                    "failed_seed": seed,
+                    "variant": selected_variant.value,
+                    "config_sha256": config.digest,
+                    "schedule_sha256": episodes.manifest_sha256,
+                    "exception_type": type(exc).__name__,
+                    "exception_message": str(exc),
+                    "completed_seed_manifests": completed,
+                    "sealed_holdout_accessed": False,
+                    "quality_claim": False,
+                },
             )
-    scores: dict[int, float] = {}
-    blow_rates: dict[int, float] = {}
-    aggregate_blow_count = 0
-    aggregate_episode_count = 0
-    for run in runs:
-        run_seed = run["seed"]
-        run_metrics = run["metrics"]
-        if type(run_seed) is not int or not isinstance(run_metrics, list) or not run_metrics:
-            raise ProductionTrainingError("seed run metrics are invalid")
-        passes = 0
-        for update_metrics in run_metrics:
-            rollouts = update_metrics.get("rollouts") if isinstance(update_metrics, dict) else None
-            outcomes = rollouts.get("outcomes") if isinstance(rollouts, dict) else None
-            update_passes = outcomes.get("PASS", 0) if isinstance(outcomes, dict) else 0
-            if type(update_passes) is not int:
-                raise ProductionTrainingError("seed run outcome metrics are invalid")
-            passes += update_passes
-        constraint_state = run.get("constraint_controller")
-        episode_count = (
-            constraint_state.get("episode_count") if isinstance(constraint_state, dict) else None
-        )
-        cost_sum = constraint_state.get("cost_sum") if isinstance(constraint_state, dict) else None
-        if (
-            type(episode_count) is not int
-            or episode_count < 1
-            or not isinstance(cost_sum, int | float)
-            or not float(cost_sum).is_integer()
-            or not 0.0 <= float(cost_sum) <= episode_count
-        ):
-            raise ProductionTrainingError("seed run outcome metrics are invalid")
-        blow_count = int(cost_sum)
-        scores[run_seed] = float(passes)
-        blow_rates[run_seed] = blow_count / episode_count
-        aggregate_blow_count += blow_count
-        aggregate_episode_count += episode_count
-    worst_seed = min(scores, key=lambda item: (scores[item], item))
-    worst_constraint_seed = max(blow_rates, key=lambda item: (blow_rates[item], -item))
-    aggregate: dict[str, object] = {
+            raise
+    base: dict[str, object] = {
         "stage": "rl-train-seeds",
         "variant": selected_variant.value,
         "fold": episodes.fold,
@@ -1230,18 +1387,22 @@ def _train_policy_seeds_loaded(
         ),
         "reported_seeds": list(selected),
         "runs": runs,
-        "worst_seed": worst_seed,
-        "worst_constraint_seed": worst_constraint_seed,
-        "median_passes": float(np.median(list(scores.values()))),
-        "aggregate_blow_count": aggregate_blow_count,
-        "aggregate_episode_count": aggregate_episode_count,
-        "aggregate_blow_rate": aggregate_blow_count / aggregate_episode_count,
-        "maximum_seed_blow_rate": blow_rates[worst_constraint_seed],
         "all_finite_gradients": all(bool(run["finite_gradients"]) for run in runs),
         "sealed_holdout_accessed": False,
         "quality_claim": False,
     }
     output.mkdir(parents=True, exist_ok=True)
+    incomplete = [run.get("seed") for run in runs if run.get("status") != "complete"]
+    if incomplete:
+        progress = {
+            **base,
+            "status": "incomplete",
+            "completed_seeds": [run.get("seed") for run in runs if run.get("status") == "complete"],
+            "incomplete_seeds": incomplete,
+        }
+        _atomic_json(output / "seed-progress.json", progress)
+        return progress
+    aggregate = {**base, "status": "complete", **_complete_seed_statistics(runs)}
     _atomic_json(output / "seed-summary.json", aggregate)
     return aggregate
 
