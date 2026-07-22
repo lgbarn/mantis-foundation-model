@@ -14,7 +14,7 @@ holdout.
 The route uses:
 
 - one on-demand Secure Cloud Pod at a time;
-- a provisional NVIDIA A40 48 GB qualification target;
+- a provisional NVIDIA H100 SXM 80 GB qualification target;
 - one 150 GB Standard network volume;
 - a digest-pinned Linux amd64 CUDA image;
 - Terraform for stable non-secret resources;
@@ -32,7 +32,9 @@ mutable long-lived host configuration.
 - No RunPod GPU, CPU host, precision mode, batch size, or runtime is qualified
   yet.
 - No paid resource has been created.
-- The funded $150 is a hard ceiling, not standing launch permission.
+- The funded $150 is a hard ceiling and the operator has granted standing
+  permission for this documented pipeline within that ceiling. Exact launch
+  identity, fresh price and stock, and every fail-closed gate still apply.
 - This is supervised futures adaptation from the pinned official MantisV2
   checkpoint, not random-weight base pretraining.
 - The corpus may span July 2021 through July 2026, but ordinary training,
@@ -167,11 +169,11 @@ environment/I-O inventory
   -> Pod termination
 ```
 
-The first A40 Pod has a two-hour hard deadline. A longer qualification requires
-a new explicit approval after reviewing that result. The A40 cumulative
-qualification allowance is at most eight hours/$3.52 at the observed
-$0.44/hour price; it is not authority for one eight-hour Pod. Sequential L40,
-L40S, or A100 fallback probes are manual only. Total qualification compute plus
+The first H100 SXM Pod has a 7,200-second workload, a 600-second startup
+allowance, and 120 seconds of shutdown grace, for a 7,920-second wall-clock cap.
+At the observed $2.99/hour Secure Cloud price, its maximum projected
+qualification spend is $6.60. Sequential L40S or A40 fallback probes are manual
+only and require a fresh exact decision. Total qualification compute plus
 container-disk overhead remains below $10.
 
 No model accuracy decision uses the smoke benchmark. It selects a safe device,

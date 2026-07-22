@@ -6,15 +6,15 @@
     {
       "available": true,
       "cloud_type": "secure",
-      "datacenter_id": "US-CA-2",
-      "gpu_type": "NVIDIA A40",
-      "price_usd_per_gpu_hour": "0.44"
+      "datacenter_id": "US-MO-1",
+      "gpu_type": "NVIDIA H100 80GB HBM3",
+      "price_usd_per_gpu_hour": "2.99"
     }
   ],
   "schema_version": 1,
   "volumes": [
     {
-      "datacenter_id": "US-CA-2",
+      "datacenter_id": "US-MO-1",
       "free_bytes": 100000000000,
       "size_gb": 150,
       "volume_id": "replace-with-current-volume-id"

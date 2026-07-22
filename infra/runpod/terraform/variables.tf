@@ -1,10 +1,10 @@
 variable "data_center_id" {
   description = "Approved Secure Cloud datacenter that supports the S3-compatible volume API."
   type        = string
-  default     = "US-CA-2"
+  default     = "US-MO-1"
 
   validation {
-    condition     = var.data_center_id == "US-CA-2"
+    condition     = var.data_center_id == "US-MO-1"
     error_message = "data_center_id must match the committed platform allowlist."
   }
 }

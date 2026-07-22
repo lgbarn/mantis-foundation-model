@@ -32,7 +32,7 @@ just runpod-plan \
   infra/runpod/configs/platform-v1.toml \
   infra/runpod/configs/local.example.toml \
   infra/runpod/configs/experiment-cuda-qualification.example.toml \
-  infra/runpod/examples/intent-a40-qualification.json \
+  infra/runpod/examples/intent-h100-qualification.json \
   infra/runpod/examples/inventory-synthetic.json \
   infra/runpod/examples/spend-ledger-empty.json \
   2026-07-21T12:02:00Z \
@@ -193,11 +193,12 @@ The first CUDA qualification target is deliberately one Pod, not a production
 fleet:
 
 - Secure Cloud
-- one NVIDIA A40 with 48 GiB VRAM
+- one NVIDIA H100 SXM with 80 GiB VRAM
 - at least 8 vCPU and 32 GiB host RAM
 - 50 GB container disk
 - 150 GB network volume
-- two-hour automatic termination for the smoke benchmark
+- 7,200-second smoke workload plus 600 seconds of startup allowance and 120
+  seconds of shutdown grace, capped at 7,920 wall-clock seconds
 - no automatic retry that can create a second Pod
 
 This is a benchmark envelope, not a final production size or authorization to
@@ -416,7 +417,7 @@ route and cannot be substituted when official weights are unavailable.
 First compare the current three-timeframe recipe with a compute-matched
 four-timeframe recipe. If 5-minute data is promoted, preserve per-stream epoch
 exposure with 267 training batches and 27 validation batches at batch size 128,
-subject to the measured A40 memory and throughput gate. Screen seeds 42-44 and
+subject to the measured H100 memory and throughput gate. Screen seeds 42-44 and
 confirm with seeds 42-46. Promotion requires improvement on at least four of
 five confirmation seeds, improved median macro 3-minute performance, no
 material instrument-family regression, and improved downstream log loss and
@@ -429,9 +430,9 @@ memory, host RSS, and checkpoint state. JSON provenance remains authoritative.
 ## Compute qualification contract
 
 No RunPod shape is qualified yet. The provisional target is one Secure Cloud
-NVIDIA A40 with 48 GB VRAM, at least 8 vCPU, and at least 32 GB host RAM. A
-read-only query on 2026-07-21 returned $0.44/hour with Low availability; always
-re-query immediately before launch.
+NVIDIA H100 SXM with 80 GB VRAM, at least 8 vCPU, and at least 32 GB host RAM.
+A read-only query on 2026-07-22 returned $2.99/hour with Low availability in
+S3-compatible `US-MO-1`; always re-query immediately before launch.
 
 The repository now has a pinned CUDA image, real-data FP32 probe contract,
 TensorBoard event writing, fixed cross-device and interrupted-resume oracles,
@@ -474,13 +475,13 @@ parity mismatch, resume mismatch, export mismatch, or precision-record mismatch
 selects FP32 with no retry and no tolerance change. CPU fake evidence tests do
 not promote BF16; promotion requires reviewed real-CUDA evidence.
 
-Run the A40 alone first with a two-hour hard deadline. A longer qualification
-requires a new explicit approval after reviewing that result. The cumulative
-A40 qualification allowance is at most eight hours and $3.52 at the observed
-price; this is not permission for one eight-hour Pod. L40, L40S, and A100 PCIe
-are explicit sequential fallbacks only. The worst-case approved matrix is $8.53
-compute and must remain below the $10 qualification allocation after
-container-disk overhead. Never launch a fallback automatically.
+Run the H100 SXM alone first with a 7,200-second workload, 600-second startup
+allowance, and 120-second shutdown grace. The wall-clock cap is 7,920 seconds.
+At the observed $2.99/hour Secure Cloud price, its maximum projected
+qualification spend is $6.60. L40S and A40 are explicit sequential fallbacks
+only, each requiring a fresh inventory, price, and launch decision after a
+failed allocation. Total qualification compute and container-disk overhead must
+remain below the $10 allocation. Never launch a fallback automatically.
 
 The matrix covers environment and network-volume I/O; FP32 batch doubling;
 CPU/CUDA output, loss, gradient, and update parity; BF16 qualification;

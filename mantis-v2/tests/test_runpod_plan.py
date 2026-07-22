@@ -264,6 +264,48 @@ def _authorization_for(paths: dict[str, Path], tmp_path: Path, monkeypatch, caps
     return authorization
 
 
+def test_committed_h100_qualification_inputs_are_coherent(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    output = tmp_path / "h100-launch-decision.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "mantis-v2",
+            "runpod-plan",
+            "--platform",
+            str(ROOT / "infra/runpod/configs/platform-v1.toml"),
+            "--local",
+            str(ROOT / "infra/runpod/configs/local.example.toml"),
+            "--experiment",
+            str(ROOT / "infra/runpod/configs/experiment-cuda-qualification.example.toml"),
+            "--intent",
+            str(ROOT / "infra/runpod/examples/intent-h100-qualification.json"),
+            "--inventory",
+            str(ROOT / "infra/runpod/examples/inventory-synthetic.json"),
+            "--ledger",
+            str(ROOT / "infra/runpod/examples/spend-ledger-empty.json"),
+            "--evaluated-at",
+            "2026-07-21T12:02:00Z",
+            "--output",
+            str(output),
+        ],
+    )
+
+    cli.main()
+
+    capsys.readouterr()
+    decision = json.loads(output.read_text())
+    assert decision["allowed"] is False
+    assert decision["reasons"] == ["authorization_required"]
+    assert decision["gpu_type"] == "NVIDIA H100 80GB HBM3"
+    assert decision["datacenter_id"] == "US-MO-1"
+    assert decision["provider_price_usd_per_gpu_hour"] == "2.99"
+    assert decision["maximum_duration_seconds"] == 7200
+    assert decision["projected_spend_usd"] == "6.60"
+
+
 def test_plan_command_without_authorization_writes_canonical_rejection(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:

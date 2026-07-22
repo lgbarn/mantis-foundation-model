@@ -29,8 +29,9 @@ stable non-secret resources, direct S3 transfer owns content-addressed bundles,
 the immutable image owns the runtime, and existing MantisV2 commands own model
 behavior.
 
-Implementation proceeds through zero-cost dry runs before a human-approved
-two-hour Secure Cloud A40 qualification. Production remains locked until CUDA,
+Implementation proceeds through zero-cost dry runs before a human-approved Secure
+Cloud H100 SXM qualification with a 7,200-second workload, 600-second startup
+allowance, and 120-second shutdown grace. Production remains locked until CUDA,
 precision, resume, embedding, CPU-host, TensorBoard, artifact, and projected-cost
 gates pass. Foundation and Trend Magic form one gated DAG; Topstep constrained
 PPO, Optuna, Monte Carlo, and policy export form a separately CPU-qualified DAG.
@@ -52,8 +53,8 @@ The 2026 Sealed Holdout is never available to infrastructure or model selection.
    ceiling, and expiry, so that general approval cannot be reused.
 7. As an operator, I want only one live Mantis Pod, so that concurrent commands
    cannot multiply spend or corrupt a shared volume.
-8. As an operator, I want a two-hour independent first-probe deadline, so that a
-   hung trainer or lost SSH session cannot keep accruing charges.
+8. As an operator, I want an independent 7,920-second first-probe wall-clock cap,
+   so that a hung trainer or lost SSH session cannot keep accruing charges.
 9. As an auditor, I want Pod and Termination Receipts, so that every resource and
    charge can be reconciled with its authorization.
 10. As a security owner, I want the account provisioning key confined to the
@@ -126,9 +127,10 @@ The 2026 Sealed Holdout is never available to infrastructure or model selection.
 
 - Use one repository context and the canonical terms in the root glossary.
 - Use one on-demand Secure Cloud Pod at a time. The first qualification target
-  is an A40 with 48 GB VRAM, at least 8 vCPU, at least 32 GB RAM, and a two-hour
-  hard deadline. Price and availability are observations, never configuration
-  truths.
+  is an H100 SXM with 80 GB VRAM, at least 8 vCPU, at least 32 GB RAM, and a
+  7,200-second workload. Its wall-clock cap is 7,920 seconds: 600 seconds for
+  startup and 120 seconds for shutdown grace. Price and availability are
+  observations, never configuration truths.
 - Use one provider-sized 150 GB Standard network volume. Enforce a 120 GB
   high-water policy and at least 30,000,000,000 measured free bytes.
 - Terraform owns the network volume and private Pod template. It does not create
