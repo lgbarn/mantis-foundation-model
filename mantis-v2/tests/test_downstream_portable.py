@@ -6,10 +6,13 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 from mantis_v2 import cli
+from mantis_v2 import downstream_portable as portable_module
 from mantis_v2.downstream_config import load_downstream_config
 from mantis_v2.downstream_pipeline import _manifest_base
+from mantis_v2.downstream_portable import PortableDownstreamError, run_stage
 from mantis_v2.model import sha256_file
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -102,14 +105,64 @@ def test_producer_binding_rejects_corrupt_promoted_evaluation(
 def _write_corpus_manifest(tmp_path: Path) -> tuple[Path, Path]:
     root = tmp_path / "corpus" / "market"
     root.mkdir(parents=True)
-    outputs = [
-        {"kind": "market", "symbol": symbol, "timeframe": timeframe}
-        for symbol in ("ES", "NQ", "RTY", "YM", "GC", "CL", "ZB")
-        for timeframe in ("1min", "3min", "5min", "15min")
-    ]
+    outputs = []
+    for symbol in ("ES", "NQ", "RTY", "YM", "GC", "CL", "ZB"):
+        for timeframe in ("1min", "3min", "5min", "15min"):
+            path = root / f"{symbol}_{timeframe}.parquet"
+            pd.DataFrame({"value": [1.0]}).to_parquet(path, index=False)
+            outputs.append(
+                {
+                    "kind": "market",
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "path": str(path.relative_to(root.parent)),
+                    "size": path.stat().st_size,
+                    "sha256": sha256_file(path),
+                    "rows": 1,
+                }
+            )
     manifest = root.parent / "manifest.json"
-    manifest.write_text(json.dumps({"schema_version": 1, "validated": True, "outputs": outputs}))
+    payload = {"schema_version": 1, "validated": True, "outputs": outputs}
+    payload["manifest_digest"] = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    manifest.write_text(json.dumps(payload))
     return root, manifest
+
+
+def test_producer_binding_rejects_a_corrupt_corpus_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    promotion = _write_promoted_foundation(tmp_path)
+    data_root, corpus = _write_corpus_manifest(tmp_path)
+    (data_root / "NQ_3min.parquet").write_bytes(b"corrupt")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "mantis-v2",
+            "downstream-bind-producer",
+            "--template",
+            str(TEMPLATE),
+            "--promotion-manifest",
+            str(promotion),
+            "--corpus-manifest",
+            str(corpus),
+            "--data-root",
+            str(data_root),
+            "--artifact-root",
+            str(tmp_path / "artifacts"),
+            "--run-name",
+            "producer",
+            "--device",
+            "cpu",
+            "--output",
+            str(tmp_path / "producer.toml"),
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="2"):
+        cli.main()
 
 
 def test_cli_binds_exact_portable_producer_and_consumer_configs(
@@ -389,3 +442,49 @@ def test_portable_stage_resumes_only_an_exact_completed_manifest(
     )
     with pytest.raises(SystemExit, match="2"):
         cli.main()
+
+
+def test_portable_head_stage_raises_after_durable_failed_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "portable.toml"
+    config_path.write_text(
+        TEMPLATE.read_text().replace("/workspace/artifacts", str(tmp_path / "artifacts"))
+    )
+    config = load_downstream_config(config_path)
+    root = config.run.artifact_root / config.run.name / "walk-forward"
+
+    def failed_head(_config: object) -> dict[str, object]:
+        root.mkdir(parents=True)
+        head = root / "head.npz"
+        predictions = root / "predictions.parquet"
+        head.write_bytes(b"head")
+        predictions.write_bytes(b"predictions")
+        manifest = {
+            **_manifest_base(config, "walk-forward"),
+            "folds": [
+                {
+                    "head": {
+                        "path": str(head),
+                        "size": head.stat().st_size,
+                        "sha256": sha256_file(head),
+                    },
+                    "predictions": {
+                        "path": str(predictions),
+                        "size": predictions.stat().st_size,
+                        "sha256": sha256_file(predictions),
+                    },
+                }
+            ],
+            "convergence_gate_passed": False,
+            "quality_gate": {"passed": False},
+        }
+        (root / "manifest.json").write_text(json.dumps(manifest))
+        (root / "failure.json").write_text(json.dumps({"reason": "proper_score_gate_failed"}))
+        return manifest
+
+    monkeypatch.setattr(portable_module, "walk_forward", failed_head)
+
+    with pytest.raises(PortableDownstreamError, match="head promotion gates failed"):
+        run_stage(config, "head")
+    assert (root / "failure.json").is_file()

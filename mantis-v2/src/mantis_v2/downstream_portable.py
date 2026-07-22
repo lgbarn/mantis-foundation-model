@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from mantis_v2.corpus import CorpusRepairError, validate_corpus_binding
 from mantis_v2.downstream_config import DownstreamConfig, load_downstream_config
 from mantis_v2.downstream_pipeline import (
     _manifest,
@@ -22,6 +23,7 @@ from mantis_v2.downstream_pipeline import (
 )
 from mantis_v2.embedding_artifacts import FOUR_TIMEFRAME_CONTRACT
 from mantis_v2.model import sha256_file
+from mantis_v2.strategy import market_path
 
 
 class PortableDownstreamError(RuntimeError):
@@ -239,6 +241,8 @@ def _validate_completed_manifest(
             _verify_file_identity(fold.get("predictions"), "walk-forward predictions", within=root)
         if not isinstance(manifest.get("convergence_gate_passed"), bool):
             raise PortableDownstreamError("completed head gate evidence is incomplete")
+        if manifest["convergence_gate_passed"] is not True or quality.get("passed") is not True:
+            raise PortableDownstreamError("head promotion gates failed")
         return
     if stage == "simulate":
         _verify_file_identity(manifest.get("trades"), "simulation trades", within=root)
@@ -273,21 +277,20 @@ def bind_producer(
     promotion = _read_json(promotion_path, "promoted foundation manifest")
     _validate_promoted_bundle(promotion_path, promotion)
     corpus_path = corpus_manifest_path.resolve()
-    corpus = _read_json(corpus_path, "corpus manifest")
-    if corpus.get("validated") is not True or not isinstance(corpus.get("outputs"), list):
-        raise PortableDownstreamError("corpus manifest is not validated")
-    available = {
-        (output.get("symbol"), output.get("timeframe"))
-        for output in corpus["outputs"]
-        if isinstance(output, dict) and output.get("kind") == "market"
-    }
-    required = {
-        (symbol, timeframe)
+    corpus_sha256 = sha256_file(corpus_path)
+    provisional = replace(
+        template,
+        data=replace(template.data, root=data_root.resolve()),
+    )
+    required_paths = [
+        market_path(provisional, symbol, timeframe)
         for symbol in template.data.symbols
         for timeframe in FOUR_TIMEFRAME_CONTRACT
-    }
-    if not required.issubset(available):
-        raise PortableDownstreamError("corpus manifest lacks the configured symbol/timeframe set")
+    ]
+    try:
+        validate_corpus_binding(data_root.resolve(), corpus_path, corpus_sha256, required_paths)
+    except CorpusRepairError as exc:
+        raise PortableDownstreamError(str(exc)) from exc
     runtime_identity = _binding_base()
     producer = replace(
         template,
@@ -304,7 +307,7 @@ def bind_producer(
             template.data,
             root=data_root.resolve(),
             corpus_manifest_path=corpus_path,
-            corpus_manifest_sha256=sha256_file(corpus_path),
+            corpus_manifest_sha256=corpus_sha256,
             timeframes=FOUR_TIMEFRAME_CONTRACT,
         ),
         foundation=replace(
@@ -443,4 +446,5 @@ def run_stage(config: DownstreamConfig, stage: str) -> dict[str, Any]:
             f"incomplete {stage} stage cannot be resumed without a completed exact manifest"
         )
     manifest = operation(config)
+    _validate_completed_manifest(manifest, config, stage, root)
     return {"stage": stage, "resumed": False, "manifest": manifest}
