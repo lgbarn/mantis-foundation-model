@@ -12,8 +12,9 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
-from mantis_v2 import cli
+from mantis_v2 import cli, rl_confirmation, rl_training
 from mantis_v2.rl_config import load_rl_config
+from mantis_v2.rl_confirmation import ConfirmationRequest
 from mantis_v2.rl_environment import (
     BarData,
     CandidateData,
@@ -48,6 +49,7 @@ from mantis_v2.rl_training import (
     load_training_episodes,
     train_entry_policy,
 )
+from mantis_v2.rl_validation import LoadedEpisodes
 
 ROOT = Path(__file__).resolve().parents[1]
 TICKERS = ("ES", "NQ", "RTY", "YM", "GC", "CL", "ZB")
@@ -148,6 +150,99 @@ def _training_episodes() -> TrainingEpisodes:
     )
 
 
+def test_real_production_campaign_adapter_trains_and_replays_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = _config()
+    config = replace(
+        base,
+        training=replace(
+            base.training,
+            development_seeds=(42,),
+            confirmation_seeds=(42, 43),
+            serving_seed=42,
+            development_timesteps_per_seed=26,
+            confirmation_timesteps_per_seed=52,
+            maximum_timesteps_per_seed=78,
+        ),
+    )
+    training_path = tmp_path / "training.json"
+    validation_path = tmp_path / "validation.json"
+    raw_episodes = [{"number": index} for index in range(14)]
+    training_path.write_text(json.dumps({"episodes": raw_episodes}, sort_keys=True))
+    validation_path.write_text(json.dumps({"episodes": raw_episodes}, sort_keys=True))
+    training_sha256 = hashlib.sha256(training_path.read_bytes()).hexdigest()
+    validation_sha256 = hashlib.sha256(validation_path.read_bytes()).hexdigest()
+    fixture = _training_episodes()
+    episodes = replace(
+        fixture,
+        episodes=(*fixture.episodes, replace(fixture.episodes[-1])),
+        manifest_sha256=training_sha256,
+        config_sha256=config.digest,
+        runtime_identities={
+            "source": {
+                "revision": "test-fixture",
+                "dirty": False,
+                "sha256": config.upstream.source_digest,
+            },
+            "lock": {"sha256": config.upstream.lock_digest},
+        },
+    )
+    loaded = LoadedEpisodes(episodes.episodes, (), validation_sha256, "validation", 0)
+    monkeypatch.setattr(rl_training, "load_training_episodes", lambda *_args: episodes)
+    monkeypatch.setattr(rl_confirmation, "load_episode_manifest", lambda *_args: loaded)
+    campaign = tmp_path / "campaign"
+    runner = rl_confirmation._production_campaign_runner(
+        config,
+        [
+            {
+                "fold": 0,
+                "training_manifest_path": str(training_path),
+                "training_manifest_sha256": training_sha256,
+                "validation_manifest_path": str(validation_path),
+                "validation_manifest_sha256": validation_sha256,
+            }
+        ],
+        campaign,
+    )
+    output = campaign / "runs" / "fold-0" / "development" / "seed-42"
+    result = runner(
+        ConfirmationRequest(
+            phase="development",
+            fold=0,
+            training_manifest_sha256=training_sha256,
+            validation_manifest_sha256=validation_sha256,
+            seed=42,
+            timesteps=26,
+            variant=PolicyVariant.SHARED_TICKER_VALUE.value,
+            parameters={
+                "learning_rate": 0.0003,
+                "rollout_length": 14,
+                "batch_size": 256,
+                "gae_lambda": 0.95,
+                "clip_range": 0.2,
+                "entropy_coefficient": 0.01,
+                "value_loss_coefficient": 0.5,
+                "max_grad_norm": 0.5,
+                "hidden_width": 64,
+            },
+            candidate_sha256="c" * 64,
+            output=output,
+            resume=False,
+            parent_artifact_sha256=None,
+            required_milestone_timesteps=26,
+        )
+    )
+
+    report = json.loads(Path(result["validation_report_path"]).read_text())
+    assert result["status"] == "complete"
+    assert result["finite"] is True
+    assert result["completed_timesteps"] == 26
+    assert len(report["rows"]) == len(episodes.episodes)
+    assert report["test_accessed"] is False
+    assert Path(result["checkpoint_bundle_path"]).is_file()
+
+
 @pytest.mark.parametrize("variant", tuple(PolicyVariant))
 def test_public_policy_seam_emits_binary_actions_for_every_variant(variant: PolicyVariant) -> None:
     torch.manual_seed(5)
@@ -178,6 +273,49 @@ def test_public_policy_seam_emits_binary_actions_for_every_variant(variant: Poli
     )
     assert trained["variant"] == variant.value
     assert trained["finite_gradients"] is True
+
+
+def test_campaign_continuation_matches_fresh_endpoint_with_real_trainer(tmp_path: Path) -> None:
+    config = _config()
+    episodes = _training_episodes()
+    development = tmp_path / "development"
+    _train_loaded_policy(
+        config,
+        episodes,
+        development,
+        seed=42,
+        target_updates=1,
+        campaign_phase="development",
+    )
+    state = json.loads((development / "state.json").read_text())
+    parent = development / state["checkpoint"] / "checkpoint.pt"
+
+    continued = _train_loaded_policy(
+        config,
+        episodes,
+        tmp_path / "continued",
+        seed=42,
+        target_updates=2,
+        campaign_phase="confirmation",
+        parent_checkpoint=parent,
+    )
+    fresh = _train_loaded_policy(
+        config,
+        episodes,
+        tmp_path / "fresh",
+        seed=42,
+        target_updates=2,
+        campaign_phase="fresh_5m_reference",
+    )
+
+    for key in (
+        "policy_sha256",
+        "optimizer_sha256",
+        "normalizers",
+        "constraint_controller",
+        "metrics",
+    ):
+        assert continued[key] == fresh[key]
 
 
 def test_ticker_value_heads_and_normalizers_update_only_for_owners() -> None:

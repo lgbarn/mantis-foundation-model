@@ -70,6 +70,14 @@ from mantis_v2.pipeline import (
 )
 from mantis_v2.rl_account import RlAccountError, write_account_replay_manifest
 from mantis_v2.rl_config import load_rl_config
+from mantis_v2.rl_confirmation import (
+    ConfirmationError,
+    decide_continuation,
+    freeze_architecture_plan,
+    qualify_architecture,
+    run_architecture_ablation,
+    run_production_seed_campaign,
+)
 from mantis_v2.rl_episodes import EpisodeContractError, build_episode_manifest
 from mantis_v2.rl_optuna import (
     OptunaSearchError,
@@ -155,6 +163,11 @@ def _parser() -> argparse.ArgumentParser:
         "rl-smoke",
         "rl-train",
         "rl-optuna-search",
+        "rl-qualify-architecture",
+        "rl-freeze-architecture-plan",
+        "rl-decide-continuation",
+        "rl-run-architecture-ablation",
+        "rl-run-seed-campaign",
         "runpod-image-self-check",
         *_CORPUS_COMMANDS,
         *_DOWNSTREAM_COMMANDS,
@@ -204,6 +217,31 @@ def _parser() -> argparse.ArgumentParser:
                 choices=tuple(variant.value for variant in PolicyVariant),
                 default=PolicyVariant.SHARED_TICKER_VALUE.value,
             )
+        if command == "rl-qualify-architecture":
+            child.add_argument("--winner", required=True, type=Path)
+            child.add_argument("--evidence", required=True, type=Path)
+            child.add_argument("--output", required=True, type=Path)
+        if command == "rl-freeze-architecture-plan":
+            child.add_argument("--winner", required=True, type=Path)
+            child.add_argument("--training-manifest", required=True, action="append", type=Path)
+            child.add_argument("--validation-manifest", required=True, action="append", type=Path)
+            child.add_argument("--created-at", required=True)
+            child.add_argument("--output", required=True, type=Path)
+        if command == "rl-decide-continuation":
+            child.add_argument("--candidate", required=True, type=Path)
+            child.add_argument("--evidence", required=True, type=Path)
+            child.add_argument("--output", required=True, type=Path)
+        if command == "rl-run-architecture-ablation":
+            child.add_argument("--plan", required=True, type=Path)
+            child.add_argument("--resume", action="store_true")
+            child.add_argument("--output", required=True, type=Path)
+        if command == "rl-run-seed-campaign":
+            child.add_argument("--candidate", required=True, type=Path)
+            child.add_argument("--training-manifest", required=True, action="append", type=Path)
+            child.add_argument("--validation-manifest", required=True, action="append", type=Path)
+            child.add_argument("--continuation-decision", type=Path)
+            child.add_argument("--resume", action="store_true")
+            child.add_argument("--output", required=True, type=Path)
         if command in _DOWNSTREAM_COMMANDS:
             child.add_argument(
                 "--set",
@@ -531,6 +569,37 @@ def main() -> None:
                 study_name=args.study_name,
                 variant=PolicyVariant(args.variant),
             )
+        elif args.command == "rl-qualify-architecture":
+            result = qualify_architecture(
+                load_rl_config(args.config), args.winner, args.evidence, args.output
+            )
+        elif args.command == "rl-freeze-architecture-plan":
+            result = freeze_architecture_plan(
+                load_rl_config(args.config),
+                args.winner,
+                args.training_manifest,
+                args.validation_manifest,
+                args.output,
+                created_at=args.created_at,
+            )
+        elif args.command == "rl-decide-continuation":
+            result = decide_continuation(
+                load_rl_config(args.config), args.candidate, args.evidence, args.output
+            )
+        elif args.command == "rl-run-architecture-ablation":
+            result = run_architecture_ablation(
+                load_rl_config(args.config), args.plan, args.output, resume=args.resume
+            )
+        elif args.command == "rl-run-seed-campaign":
+            result = run_production_seed_campaign(
+                load_rl_config(args.config),
+                args.candidate,
+                args.training_manifest,
+                args.validation_manifest,
+                args.output,
+                resume=args.resume,
+                continuation_decision_path=args.continuation_decision,
+            )
         elif args.command == "rl-smoke":
             result = run_maskable_ppo_smoke(
                 load_rl_config(args.config), args.output, resume=args.resume
@@ -601,6 +670,7 @@ def main() -> None:
         RlSmokeError,
         ProductionTrainingError,
         OptunaSearchError,
+        ConfirmationError,
         EpisodeContractError,
         EnvironmentValidationError,
         DownstreamPipelineError,

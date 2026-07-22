@@ -73,6 +73,19 @@ just rl-train training.json artifacts/rl-entry-training \
   mantis-v2/configs/rl-entry-topstep-100k.toml shared_ticker_value
 just rl-optuna-search training.json validation.json artifacts/rl-optuna \
   mantis-v2-topstep-100k-shared-ticker-value-v1
+just rl-freeze-architecture-plan winner.json artifacts/rl-architecture-plan \
+  2026-07-22T12:00:00+00:00 \
+  --training-manifest training.json --validation-manifest validation.json
+just rl-run-architecture-ablation architecture-plan.json artifacts/rl-ablation
+just rl-qualify-architecture winner.json ablation-evidence.json \
+  artifacts/rl-candidate
+just rl-run-seed-campaign candidate-freeze.json artifacts/rl-seed-campaign \
+  --training-manifest training.json --validation-manifest validation.json
+just rl-decide-continuation candidate-freeze.json budget-evidence.json \
+  artifacts/rl-continuation-decision
+just rl-run-seed-campaign candidate-freeze.json artifacts/rl-seed-campaign \
+  --training-manifest training.json --validation-manifest validation.json \
+  --resume --continuation-decision continuation-decision.json
 just runpod-image-build ghcr.io/lgbarn/mantis-v2-cuda:SOURCE_SHA
 just runpod-image-scan ghcr.io/lgbarn/mantis-v2-cuda:SOURCE_SHA reports/image-scan.json
 just runpod-image-self-check \
@@ -157,6 +170,26 @@ blow is infeasible; feasible COMPLETE trials rank by pass-rate LCB, median pass
 days, then trial number. The command accepts only same-fold training and
 validation manifests before the sealed holdout. It cannot receive a test or
 holdout path and never exports a winner when no feasible trial exists.
+
+`rl-qualify-architecture` is the validation-only Stage 3 transfer-ablation gate.
+The plan command accepts repeated, ordered `--training-manifest` and
+`--validation-manifest` flags and freezes every same-fold pair. The ablation
+runner ledgers every variant/seed/fold tuple; rerun it with `--resume` after an
+interruption. Qualification consumes the frozen `winner.json` and aligned
+fold/seed/ticker/profile/regime/
+calendar-block evidence for all three preregistered architectures. It fails on
+missing pairs, non-finite runs, action collapse, any blow, or a negative pooled
+or ticker/profile paired one-sided 95% lower bound against independent PPO. A
+passing run writes only the shared-actor/ticker-specific-critic candidate under
+its content hash, with the 5 x 2M development, 10 x 5M confirmation, 10M maximum
+continuation, and serving seed 42 protocol frozen before any test access.
+`rl-decide-continuation` consumes only matched 2M/5M validation outcomes and a
+candidate freeze. It writes an immutable decision before any 10M update: all ten
+seeds continue together only when pooled improvement is positive, its weekly
+bootstrap LCB is nonnegative, every ticker/profile point estimate is
+nonnegative, and no safety or estimability gate regresses. The seed campaign API
+then records immutable attempts, verifies 2M-to-5M lineage and fresh endpoint
+parity, and emits `serving-freeze-v1`; test remains inaccessible throughout.
 
 The approved CPU RL supply chain resolves from hash-locked `uv.lock` entries:
 
