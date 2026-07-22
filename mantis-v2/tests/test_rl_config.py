@@ -82,7 +82,7 @@ def test_production_rl_config_loads_locked_entry_contract() -> None:
     assert config.constraint.cost_limit == 0.01
     assert config.constraint.cost_gamma == 1.0
     assert config.constraint.lambda_init == 1.0
-    assert config.constraint.lambda_lr == 0.05
+    assert config.constraint.lambda_lr == 0.01
     assert config.constraint.lambda_max == 100.0
     assert config.constraint.minimum_cushion_role == "observation_metric_only"
     assert len(config.digest) == 64
@@ -241,7 +241,7 @@ def test_every_locked_rl_identity_contributes_to_the_canonical_digest() -> None:
         replace(config, episode=replace(config.episode, timeout_trading_days=21)),
         replace(config, training=replace(config.training, smoke_timesteps=129)),
         replace(config, training=replace(config.training, development_seeds=(41,))),
-        replace(config, constraint=replace(config.constraint, lambda_lr=0.01)),
+        replace(config, constraint=replace(config.constraint, lambda_lr=0.02)),
         replace(
             config,
             evaluation=replace(config.evaluation, minimum_raw_pass_rate=0.61),

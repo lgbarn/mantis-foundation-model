@@ -819,7 +819,7 @@ def _validate(config: RlConfig) -> None:
         (config.constraint.cost_limit == 0.01, "rl.constraint.cost_limit must be 0.01"),
         (config.constraint.cost_gamma == 1.0, "rl.constraint.cost_gamma must be 1"),
         (config.constraint.lambda_init == 1.0, "rl.constraint.lambda_init must be 1"),
-        (config.constraint.lambda_lr == 0.05, "rl.constraint.lambda_lr must be 0.05"),
+        (config.constraint.lambda_lr == 0.01, "rl.constraint.lambda_lr must be 0.01"),
         (config.constraint.lambda_max == 100.0, "rl.constraint.lambda_max must be 100"),
         (
             config.evaluation.maximum_observed_blows == 0,

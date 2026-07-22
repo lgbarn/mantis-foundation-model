@@ -234,6 +234,7 @@ def test_constraint_controller_uses_raw_episode_costs_and_projects_bounds() -> N
     controller = ConstraintController.from_config(_config())
 
     lower = controller.update([0.0, 0.0])
+    assert lower["lambda_before"] == 1.0
     assert lower["lambda_after"] < lower["lambda_before"]
     upper = controller.update([1.0, 1.0])
     assert upper["lambda_after"] > upper["lambda_before"]
@@ -249,13 +250,13 @@ def test_constraint_controller_uses_raw_episode_costs_and_projects_bounds() -> N
     assert saturated["dual_saturated"] is True
 
 
-def test_actor_advantage_uses_exact_normalized_lagrangian_formula() -> None:
+def test_actor_advantage_uses_exact_lagrangian_formula() -> None:
     reward = torch.tensor([1.0, -1.0])
     cost = torch.tensor([0.5, -0.5])
 
     combined = _lagrangian_actor_advantages(reward, cost, dual_lambda=3.0)
 
-    assert torch.equal(combined, torch.tensor([-0.125, 0.125]))
+    assert torch.equal(combined, torch.tensor([-0.5, 0.5]))
 
 
 def test_terminal_reward_and_cost_are_unshaped() -> None:
@@ -636,6 +637,10 @@ def test_resume_rejects_provenance_and_all_seed_reporting_has_worst_seed(
     assert [run["seed"] for run in aggregate["runs"]] == [42, 43]
     assert aggregate["reported_seeds"] == [42, 43]
     assert aggregate["worst_seed"] in {42, 43}
+    assert aggregate["worst_constraint_seed"] in {42, 43}
+    assert aggregate["aggregate_blow_count"] >= 0
+    assert 0.0 <= aggregate["aggregate_blow_rate"] <= 1.0
+    assert 0.0 <= aggregate["maximum_seed_blow_rate"] <= 1.0
     assert "best_seed" not in aggregate
     resumed = _train_policy_seeds_loaded(
         two_seed_config,

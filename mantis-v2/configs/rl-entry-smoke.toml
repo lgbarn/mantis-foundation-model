@@ -1,7 +1,7 @@
 schema_version = 1
 
 [upstream]
-source_digest = "57a54b9a70e55440c79e24c777df8536d2a6eb7ed65ff6b7babfa723a2ee3e9a"
+source_digest = "f5aa2bafd0de7f7b4580e9aeb09627d1ed921a4e82a08f7ff2aeabfc7333b492"
 lock_digest = "2c93e1dcfd2a929856549b9efb5716679d22fb24d8626154ed63aa0393955ee0"
 rule_contract_path = "mantis-v2/configs/topstep-100k-2026-07-20.toml"
 rule_contract_sha256 = "6e8b0d71716ec7b4c3e40a902b2ba62b4983f614463d1a823ea1dd85a4860db5"
@@ -93,7 +93,7 @@ kind = "episodic_blow_lagrangian"
 cost_limit = 0.01
 cost_gamma = 1.0
 lambda_init = 1.0
-lambda_lr = 0.05
+lambda_lr = 0.01
 lambda_max = 100.0
 minimum_cushion_role = "observation_metric_only"
 

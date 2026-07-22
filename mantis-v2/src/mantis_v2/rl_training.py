@@ -506,7 +506,7 @@ def _lagrangian_actor_advantages(
 ) -> torch.Tensor:
     if dual_lambda < 0.0 or reward_advantages.shape != cost_advantages.shape:
         raise ProductionTrainingError("invalid constrained actor advantages")
-    return (reward_advantages - dual_lambda * cost_advantages) / (1.0 + dual_lambda)
+    return reward_advantages - dual_lambda * cost_advantages
 
 
 def _ppo_update(
@@ -1181,19 +1181,42 @@ def _train_policy_seeds_loaded(
                 )
             )
     scores: dict[int, float] = {}
+    blow_rates: dict[int, float] = {}
+    aggregate_blow_count = 0
+    aggregate_episode_count = 0
     for run in runs:
         run_seed = run["seed"]
         run_metrics = run["metrics"]
         if type(run_seed) is not int or not isinstance(run_metrics, list) or not run_metrics:
             raise ProductionTrainingError("seed run metrics are invalid")
-        final_metrics = run_metrics[-1]
-        rollouts = final_metrics.get("rollouts") if isinstance(final_metrics, dict) else None
-        outcomes = rollouts.get("outcomes") if isinstance(rollouts, dict) else None
-        passes = outcomes.get("PASS", 0) if isinstance(outcomes, dict) else 0
-        if type(passes) is not int:
+        passes = 0
+        for update_metrics in run_metrics:
+            rollouts = update_metrics.get("rollouts") if isinstance(update_metrics, dict) else None
+            outcomes = rollouts.get("outcomes") if isinstance(rollouts, dict) else None
+            update_passes = outcomes.get("PASS", 0) if isinstance(outcomes, dict) else 0
+            if type(update_passes) is not int:
+                raise ProductionTrainingError("seed run outcome metrics are invalid")
+            passes += update_passes
+        constraint_state = run.get("constraint_controller")
+        episode_count = (
+            constraint_state.get("episode_count") if isinstance(constraint_state, dict) else None
+        )
+        cost_sum = constraint_state.get("cost_sum") if isinstance(constraint_state, dict) else None
+        if (
+            type(episode_count) is not int
+            or episode_count < 1
+            or not isinstance(cost_sum, int | float)
+            or not float(cost_sum).is_integer()
+            or not 0.0 <= float(cost_sum) <= episode_count
+        ):
             raise ProductionTrainingError("seed run outcome metrics are invalid")
+        blow_count = int(cost_sum)
         scores[run_seed] = float(passes)
+        blow_rates[run_seed] = blow_count / episode_count
+        aggregate_blow_count += blow_count
+        aggregate_episode_count += episode_count
     worst_seed = min(scores, key=lambda item: (scores[item], item))
+    worst_constraint_seed = max(blow_rates, key=lambda item: (blow_rates[item], -item))
     aggregate: dict[str, object] = {
         "stage": "rl-train-seeds",
         "variant": selected_variant.value,
@@ -1208,7 +1231,12 @@ def _train_policy_seeds_loaded(
         "reported_seeds": list(selected),
         "runs": runs,
         "worst_seed": worst_seed,
+        "worst_constraint_seed": worst_constraint_seed,
         "median_passes": float(np.median(list(scores.values()))),
+        "aggregate_blow_count": aggregate_blow_count,
+        "aggregate_episode_count": aggregate_episode_count,
+        "aggregate_blow_rate": aggregate_blow_count / aggregate_episode_count,
+        "maximum_seed_blow_rate": blow_rates[worst_constraint_seed],
         "all_finite_gradients": all(bool(run["finite_gradients"]) for run in runs),
         "sealed_holdout_accessed": False,
         "quality_claim": False,
