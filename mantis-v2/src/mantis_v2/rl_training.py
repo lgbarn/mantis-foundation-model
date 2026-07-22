@@ -369,6 +369,8 @@ def _identities(
     target_timesteps: int | None = None,
     search_trial_number: int | None = None,
     search_seed_index: int | None = None,
+    campaign_phase: str | None = None,
+    parent_checkpoint_sha256: str | None = None,
 ) -> dict[str, object]:
     source = episodes.runtime_identities.get("source", {})
     lock = episodes.runtime_identities.get("lock", {})
@@ -385,6 +387,8 @@ def _identities(
         "target_timesteps": minimum_timesteps if target_updates is None else None,
         "search_trial_number": search_trial_number,
         "search_seed_index": search_seed_index,
+        "campaign_phase": campaign_phase,
+        "parent_checkpoint_sha256": parent_checkpoint_sha256,
         "ppo_hyperparameters": asdict(selected_hyperparameters),
         "training_control": training_control.value,
         "variant": variant.value,
@@ -1098,7 +1102,9 @@ def _recover_checkpoint(output: Path, identities: Mapping[str, object]) -> dict[
         raise ProductionTrainingError("resume has no immutable checkpoint bundle")
     payloads = [_load_bundle(path, identities) for path in candidates]
     updates = [payload.get("update") for payload in payloads]
-    if updates != list(range(1, len(payloads) + 1)):
+    first_update = cast(int, updates[0])
+    expected_first = 1 if identities.get("parent_checkpoint_sha256") is None else first_update
+    if updates != list(range(expected_first, expected_first + len(payloads))):
         raise ProductionTrainingError("resume checkpoint sequence is not contiguous")
     return payloads[-1]
 
@@ -1185,6 +1191,8 @@ def _train_loaded_policy(
     hyperparameters: PpoHyperparameters | None = None,
     search_trial_number: int | None = None,
     search_seed_index: int | None = None,
+    campaign_phase: str | None = None,
+    parent_checkpoint: Path | None = None,
 ) -> dict[str, object]:
     """Internal seam for an already verified, complete schedule collection."""
     _validate_contract(config, episodes)
@@ -1203,8 +1211,44 @@ def _train_loaded_policy(
             or selected_hyperparameters.rollout_length not in {14, 28, 56}
         ):
             raise ProductionTrainingError("search seed or budget authorization mismatch")
-    elif seed not in config.training.development_seeds:
+    elif campaign_phase is None and seed not in config.training.development_seeds:
         raise ProductionTrainingError("seed is not declared in development_seeds")
+    elif campaign_phase is not None:
+        expected: tuple[Sequence[int], int, bool]
+        if campaign_phase == "development":
+            expected = (
+                config.training.development_seeds,
+                config.training.development_timesteps_per_seed,
+                False,
+            )
+        elif campaign_phase == "confirmation":
+            expected = (
+                config.training.confirmation_seeds,
+                config.training.confirmation_timesteps_per_seed,
+                seed in config.training.development_seeds,
+            )
+        elif campaign_phase == "fresh_5m_reference":
+            expected = (
+                config.training.development_seeds,
+                config.training.confirmation_timesteps_per_seed,
+                False,
+            )
+        elif campaign_phase == "continuation":
+            expected = (
+                config.training.confirmation_seeds,
+                config.training.maximum_timesteps_per_seed,
+                True,
+            )
+        else:
+            raise ProductionTrainingError("unknown seed campaign phase")
+        seeds, required_timesteps, requires_parent = expected
+        if (
+            seed not in seeds
+            or (target_updates is None and target_timesteps != required_timesteps)
+            or (target_updates is not None and target_timesteps is not None)
+            or (parent_checkpoint is not None) is not requires_parent
+        ):
+            raise ProductionTrainingError("seed campaign authorization mismatch")
     if target_updates is not None and target_timesteps is not None:
         raise ProductionTrainingError("training target must use updates or timesteps, not both")
     if target_updates is not None and target_updates < 1:
@@ -1227,6 +1271,7 @@ def _train_loaded_policy(
     optimizer = torch.optim.Adam(model.parameters(), lr=selected_hyperparameters.learning_rate)
     normalizers = ReturnNormalizers(TICKERS)
     controller = ConstraintController.from_config(config)
+    parent_checkpoint_sha256 = sha256_file(parent_checkpoint) if parent_checkpoint else None
     identities = _identities(
         config,
         episodes,
@@ -1238,6 +1283,8 @@ def _train_loaded_policy(
         target_timesteps=target_timesteps,
         search_trial_number=search_trial_number,
         search_seed_index=search_seed_index,
+        campaign_phase=campaign_phase,
+        parent_checkpoint_sha256=parent_checkpoint_sha256,
     )
     completed = 0
     metrics: list[dict[str, object]] = []
@@ -1257,6 +1304,43 @@ def _train_loaded_policy(
                 raise ProductionTrainingError("training run identity already exists") from exc
     elif resume:
         raise ProductionTrainingError("in-memory training cannot resume")
+    if parent_checkpoint is not None and not resume:
+        try:
+            parent_payload = torch.load(parent_checkpoint, map_location="cpu", weights_only=True)
+            if not isinstance(parent_payload, dict) or not isinstance(
+                parent_payload.get("identities"), dict
+            ):
+                raise ProductionTrainingError("parent checkpoint payload is invalid")
+            parent_identities = dict(cast(dict[str, object], parent_payload["identities"]))
+            child_fixed = dict(identities)
+            for key in (
+                "target_updates",
+                "target_timesteps",
+                "campaign_phase",
+                "parent_checkpoint_sha256",
+            ):
+                parent_identities.pop(key, None)
+                child_fixed.pop(key, None)
+            if parent_identities != child_fixed:
+                raise ProductionTrainingError("parent checkpoint lineage mismatch")
+            completed, metrics, last_evidence = _restore_checkpoint(
+                parent_payload, model, optimizer, normalizers, controller
+            )
+            inherited_payload = _checkpoint_payload(
+                model,
+                optimizer,
+                normalizers,
+                controller,
+                identities,
+                completed,
+                metrics,
+                last_evidence,
+            )
+            _publish_checkpoint(output, completed, inherited_payload)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            if isinstance(exc, ProductionTrainingError):
+                raise
+            raise ProductionTrainingError("parent checkpoint is invalid") from exc
     completed_timesteps = _completed_timesteps(metrics) if metrics else 0
 
     def is_complete() -> bool:
@@ -1449,6 +1533,8 @@ def train_entry_policy(
     hyperparameters: PpoHyperparameters | None = None,
     search_trial_number: int | None = None,
     search_seed_index: int | None = None,
+    campaign_phase: str | None = None,
+    parent_checkpoint: Path | None = None,
 ) -> dict[str, object]:
     """Load the declared schedule and train one fold/seed through the public seam."""
     episodes = load_training_episodes(config, training_manifest, repository_root)
@@ -1467,6 +1553,8 @@ def train_entry_policy(
         hyperparameters=hyperparameters,
         search_trial_number=search_trial_number,
         search_seed_index=search_seed_index,
+        campaign_phase=campaign_phase,
+        parent_checkpoint=parent_checkpoint,
     )
 
 

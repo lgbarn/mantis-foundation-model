@@ -226,3 +226,18 @@ rl-train training_manifest output config="mantis-v2/configs/rl-entry-topstep-100
 
 rl-optuna-search training_manifest validation_manifest output study_name config="mantis-v2/configs/rl-entry-topstep-100k.toml" variant="shared_ticker_value":
     uv run mantis-v2 rl-optuna-search --config {{config}} --training-manifest {{training_manifest}} --validation-manifest {{validation_manifest}} --output {{output}} --study-name {{study_name}} --variant {{variant}}
+
+rl-qualify-architecture winner evidence output config="mantis-v2/configs/rl-entry-topstep-100k.toml":
+    uv run mantis-v2 rl-qualify-architecture --config {{config}} --winner {{winner}} --evidence {{evidence}} --output {{output}}
+
+rl-freeze-architecture-plan winner output created_at *manifest_args:
+    uv run mantis-v2 rl-freeze-architecture-plan --config mantis-v2/configs/rl-entry-topstep-100k.toml --winner {{quote(winner)}} --output {{quote(output)}} --created-at {{quote(created_at)}} {{manifest_args}}
+
+rl-decide-continuation candidate evidence output config="mantis-v2/configs/rl-entry-topstep-100k.toml":
+    uv run mantis-v2 rl-decide-continuation --config {{config}} --candidate {{candidate}} --evidence {{evidence}} --output {{output}}
+
+rl-run-architecture-ablation plan output *args:
+    uv run mantis-v2 rl-run-architecture-ablation --config mantis-v2/configs/rl-entry-topstep-100k.toml --plan {{quote(plan)}} --output {{quote(output)}} {{args}}
+
+rl-run-seed-campaign candidate output +args:
+    uv run mantis-v2 rl-run-seed-campaign --config mantis-v2/configs/rl-entry-topstep-100k.toml --candidate {{quote(candidate)}} --output {{quote(output)}} {{args}}
