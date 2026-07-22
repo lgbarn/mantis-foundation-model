@@ -848,6 +848,7 @@ def build_episode_manifest(
     repository_root: Path | None = None,
     evaluation: bool = False,
     access_plan_path: Path | None = None,
+    publish: bool = True,
 ) -> dict[str, object]:
     """Validate immutable inputs, sample episodes, and publish one atomic schedule."""
     if partition_name not in {"training", "validation", "test"}:
@@ -1025,7 +1026,8 @@ def build_episode_manifest(
             (json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n").encode()
         ).hexdigest()
         output = output_directory / f"evaluation-schedule-{digest}.json"
-        _atomic_resume(output, payload)
+        if publish:
+            _atomic_resume(output, payload)
         return {"schedule_path": str(output), "schedule_sha256": digest, **payload}
     _atomic_resume(output, payload)
     return payload

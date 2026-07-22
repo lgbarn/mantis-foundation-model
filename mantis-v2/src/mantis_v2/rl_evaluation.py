@@ -1885,6 +1885,41 @@ def _validated_evaluation_access_plan(
     return plan, digest
 
 
+def _rederive_test_schedule_from_authorized_metadata(
+    config: RlConfig, schedule: Mapping[str, object]
+) -> dict[str, object]:
+    """Rebuild the complete test schedule from its frozen metadata authority."""
+    proof = schedule.get("schedule_proof")
+    fold = schedule.get("fold")
+    if (
+        not isinstance(proof, dict)
+        or not isinstance(proof.get("access_plan_path"), str)
+        or not isinstance(proof.get("access_plan_sha256"), str)
+        or type(fold) is not int
+    ):
+        raise EvaluationContractError("test schedule metadata authority is missing")
+    access_plan_path = Path(cast(str, proof["access_plan_path"]))
+    _access_plan, access_plan_sha256 = _validated_evaluation_access_plan(config, access_plan_path)
+    if access_plan_sha256 != proof["access_plan_sha256"]:
+        raise EvaluationContractError("test schedule metadata authority changed")
+    from mantis_v2.rl_episodes import EpisodeContractError, build_episode_manifest
+
+    try:
+        return build_episode_manifest(
+            config,
+            fold_number=fold,
+            partition_name="test",
+            episode_count=1,
+            evaluation=True,
+            access_plan_path=access_plan_path,
+            publish=False,
+        )
+    except EpisodeContractError as exc:
+        raise EvaluationContractError(
+            "test schedule cannot be rederived from authorized metadata"
+        ) from exc
+
+
 def _validated_test_schedule_reference(
     config: RlConfig, path: Path
 ) -> tuple[dict[str, object], dict[str, object]]:
@@ -2020,6 +2055,9 @@ def _validated_test_schedule_reference(
         or _sha256(Path(cast(str, proof["builder_code_path"]))) != proof.get("builder_code_sha256")
     ):
         raise EvaluationContractError("test schedule greedy construction proof mismatch")
+    canonical = _rederive_test_schedule_from_authorized_metadata(config, schedule)
+    if canonical.get("schedule_sha256") != digest:
+        raise EvaluationContractError("test schedule differs from canonical authorized metadata")
     return schedule, {"path": str(path.resolve()), "sha256": digest}
 
 
@@ -2938,7 +2976,7 @@ def _production_evaluation_runner(config: RlConfig, plan: Mapping[str, object]) 
         cast(int, item["fold"]): item for item in cast(list[dict[str, object]], baseline["folds"])
     }
     loaded_schedules: dict[
-        tuple[Path, str | None], tuple[LoadedEpisodes, list[dict[str, object]]]
+        tuple[Path, str, str | None], tuple[LoadedEpisodes, list[dict[str, object]]]
     ] = {}
     actor_cache: dict[tuple[str, int, int], EntryActorCritic] = {}
 
@@ -2974,12 +3012,23 @@ def _production_evaluation_runner(config: RlConfig, plan: Mapping[str, object]) 
         )
         stress_identity_sha256 = hashlib.sha256(_canonical_bytes(stress_definition)).hexdigest()
         coverage = "overlapping_starts" if request.stress == "overlapping_starts" else None
-        schedule_key = (request.test_manifest_path, coverage)
+        schedule_key = (
+            request.test_manifest_path.resolve(),
+            request.test_manifest_sha256,
+            coverage,
+        )
         if schedule_key not in loaded_schedules:
+            if _sha256(request.test_manifest_path) != request.test_manifest_sha256:
+                raise EvaluationContractError("test schedule changed before replay")
             loaded = load_test_episode_manifest(
                 config, request.test_manifest_path, coverage=coverage
             )
             raw = _load_object(request.test_manifest_path, "test schedule")
+            if (
+                loaded.manifest_sha256 != request.test_manifest_sha256
+                or _sha256(request.test_manifest_path) != request.test_manifest_sha256
+            ):
+                raise EvaluationContractError("loaded test schedule digest mismatch")
             if coverage is None:
                 identities = raw.get("episodes")
             else:
@@ -2995,6 +3044,8 @@ def _production_evaluation_runner(config: RlConfig, plan: Mapping[str, object]) 
                 cast(list[dict[str, object]], identities),
             )
         loaded, identities = loaded_schedules[schedule_key]
+        if loaded.manifest_sha256 != request.test_manifest_sha256:
+            raise EvaluationContractError("cached test schedule digest mismatch")
         episodes: Sequence[EnvironmentEpisode] = loaded.episodes
         fold_baseline = baseline_folds[request.fold]
         historical: HistoricalLogisticPolicy | None = None

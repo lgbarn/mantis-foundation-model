@@ -12,7 +12,7 @@ from typing import cast
 import numpy as np
 import pytest
 import torch
-from mantis_v2 import cli, rl_evaluation
+from mantis_v2 import cli, rl_episodes, rl_evaluation
 from mantis_v2.rl_config import load_rl_config
 from mantis_v2.rl_environment import BarData, CandidateData, EnvironmentEpisode
 from mantis_v2.rl_evaluation import (
@@ -828,7 +828,9 @@ def test_pre_promotion_contract_binds_selector_and_shared_shield(
         )
 
 
-def test_test_schedule_validator_requires_content_addressed_filename(tmp_path: Path) -> None:
+def test_test_schedule_validator_rederives_content_addressed_schedule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     config = load_rl_config(ROOT / "configs" / "rl-entry-smoke.toml")
     episode = {
         "number": 0,
@@ -902,6 +904,12 @@ def test_test_schedule_validator_requires_content_addressed_filename(tmp_path: P
     ).hexdigest()
     data = json.dumps(schedule, sort_keys=True, separators=(",", ":")).encode()
     digest = hashlib.sha256(data).hexdigest()
+    canonical = {"schedule_sha256": digest, **schedule}
+    monkeypatch.setattr(
+        rl_evaluation,
+        "_rederive_test_schedule_from_authorized_metadata",
+        lambda *_args: canonical,
+    )
     mutable_name = tmp_path / "test-schedule.json"
     mutable_name.write_bytes(data)
     with pytest.raises(EvaluationContractError, match="provenance mismatch"):
@@ -910,6 +918,199 @@ def test_test_schedule_validator_requires_content_addressed_filename(tmp_path: P
     frozen.write_bytes(data)
     _payload, reference = rl_evaluation._validated_test_schedule_reference(config, frozen)
     assert reference == {"path": str(frozen.resolve()), "sha256": digest}
+
+    mutated = json.loads(json.dumps(schedule))
+    mutated["episodes"][0]["number"] = 2
+    mutated_selected = [
+        {
+            key: mutated["episodes"][0][key]
+            for key in (
+                "number",
+                "ticker",
+                "profile",
+                "lookback_start",
+                "decision_start",
+                "exit_end",
+                "terminal_end",
+            )
+        }
+    ]
+    mutated["schedule_proof"]["selected_identity_sha256"] = hashlib.sha256(
+        json.dumps(mutated_selected, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    mutated_data = json.dumps(mutated, sort_keys=True, separators=(",", ":")).encode()
+    mutated_path = tmp_path / (
+        f"evaluation-schedule-{hashlib.sha256(mutated_data).hexdigest()}.json"
+    )
+    mutated_path.write_bytes(mutated_data)
+    with pytest.raises(EvaluationContractError, match="canonical authorized metadata"):
+        rl_evaluation._validated_test_schedule_reference(config, mutated_path)
+
+
+def test_schedule_rederivation_uses_frozen_access_plan_and_metadata_builder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = load_rl_config(ROOT / "configs" / "rl-entry-smoke.toml")
+    access_plan = tmp_path / "evaluation-access-plan.json"
+    access_plan.write_text("{}")
+    access_sha256 = hashlib.sha256(access_plan.read_bytes()).hexdigest()
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        rl_evaluation,
+        "_validated_evaluation_access_plan",
+        lambda _config, path: ({}, access_sha256) if path == access_plan else ({}, "wrong"),
+    )
+
+    def build(_config: object, **kwargs: object) -> dict[str, object]:
+        observed.update(kwargs)
+        return {"schedule_sha256": "a" * 64, "episodes": [{"number": 7}]}
+
+    monkeypatch.setattr(rl_episodes, "build_episode_manifest", build)
+    result = rl_evaluation._rederive_test_schedule_from_authorized_metadata(
+        config,
+        {
+            "fold": 3,
+            "schedule_proof": {
+                "access_plan_path": str(access_plan),
+                "access_plan_sha256": access_sha256,
+            },
+        },
+    )
+
+    assert result["episodes"] == [{"number": 7}]
+    assert observed == {
+        "fold_number": 3,
+        "partition_name": "test",
+        "episode_count": 1,
+        "evaluation": True,
+        "access_plan_path": access_plan,
+        "publish": False,
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "headline_deletion",
+        "headline_substitution",
+        "overlap_deletion",
+        "overlap_extra",
+        "overlap_substitution",
+    ),
+)
+def test_schedule_validator_rejects_self_consistent_noncanonical_sets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    config = load_rl_config(ROOT / "configs" / "rl-entry-smoke.toml")
+    builder = ROOT / "src" / "mantis_v2" / "rl_episodes.py"
+
+    def episode(number: int, day: int, hour: int, minute: int = 0) -> dict[str, object]:
+        decision = datetime(2025, 1, day, hour, minute, tzinfo=UTC)
+        return {
+            "number": number,
+            "ticker": "NQ",
+            "profile": "one_mini",
+            "lookback_start": (decision - timedelta(hours=1)).isoformat(),
+            "decision_start": decision.isoformat(),
+            "exit_end": (decision + timedelta(hours=1)).isoformat(),
+            "terminal_end": (decision + timedelta(hours=2)).isoformat(),
+        }
+
+    canonical_schedule: dict[str, object] = {
+        "schema_version": 1,
+        "stage": "rl-episode-schedule",
+        "fold": 0,
+        "partition": {
+            "name": "test",
+            "start": "2025-01-01T00:00:00+00:00",
+            "end": "2025-02-01T00:00:00+00:00",
+        },
+        "schedule_mode": "chronological_greedy_nonoverlap_v1",
+        "overlapping_starts": False,
+        "identities": {"config": {"sha256": config.digest}},
+        "episodes": [episode(0, 6, 13), episode(1, 7, 13)],
+        "stress_coverage": {
+            "overlapping_starts": {
+                "stage": "overlapping-start-coverage-v1",
+                "promotion_denominator": False,
+                "overlapping_starts": True,
+                "episodes": [episode(2, 6, 14), episode(3, 6, 14, 30)],
+            }
+        },
+        "schedule_proof": {
+            "algorithm": "chronological_greedy_nonoverlap_v1",
+            "builder_code_path": str(builder),
+            "builder_code_sha256": hashlib.sha256(builder.read_bytes()).hexdigest(),
+        },
+    }
+
+    def refresh(payload: dict[str, object]) -> bytes:
+        episodes = cast(list[dict[str, object]], payload["episodes"])
+        selected = [
+            {
+                key: item[key]
+                for key in (
+                    "number",
+                    "ticker",
+                    "profile",
+                    "lookback_start",
+                    "decision_start",
+                    "exit_end",
+                    "terminal_end",
+                )
+            }
+            for item in episodes
+        ]
+        cast(dict[str, object], payload["schedule_proof"])["selected_identity_sha256"] = (
+            hashlib.sha256(
+                json.dumps(selected, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+        )
+        overlap = cast(
+            dict[str, object],
+            cast(dict[str, object], payload["stress_coverage"])["overlapping_starts"],
+        )
+        overlap_episodes = cast(list[dict[str, object]], overlap["episodes"])
+        overlap["episode_count"] = len(overlap_episodes)
+        overlap["identity_sha256"] = hashlib.sha256(
+            json.dumps(overlap_episodes, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+
+    canonical_bytes = refresh(canonical_schedule)
+    canonical_digest = hashlib.sha256(canonical_bytes).hexdigest()
+    monkeypatch.setattr(
+        rl_evaluation,
+        "_rederive_test_schedule_from_authorized_metadata",
+        lambda *_args: {"schedule_sha256": canonical_digest, **canonical_schedule},
+    )
+    mutated = json.loads(json.dumps(canonical_schedule))
+    mutated_headline = cast(list[dict[str, object]], mutated["episodes"])
+    mutated_overlap = cast(
+        list[dict[str, object]],
+        cast(
+            dict[str, object],
+            cast(dict[str, object], mutated["stress_coverage"])["overlapping_starts"],
+        )["episodes"],
+    )
+    if mutation == "headline_deletion":
+        mutated_headline.pop()
+    elif mutation == "headline_substitution":
+        mutated_headline[1]["number"] = 99
+    elif mutation == "overlap_deletion":
+        mutated_overlap.pop()
+    elif mutation == "overlap_extra":
+        mutated_overlap.append(episode(4, 6, 14, 45))
+    else:
+        mutated_overlap[1]["number"] = 99
+    mutated_bytes = refresh(mutated)
+    mutated_digest = hashlib.sha256(mutated_bytes).hexdigest()
+    path = tmp_path / f"evaluation-schedule-{mutated_digest}.json"
+    path.write_bytes(mutated_bytes)
+
+    with pytest.raises(EvaluationContractError, match="canonical authorized metadata"):
+        rl_evaluation._validated_test_schedule_reference(config, path)
 
 
 @pytest.mark.parametrize(
@@ -1864,27 +2065,36 @@ def test_default_production_runner_replays_real_environment_path(
     baseline = tmp_path / "baseline.json"
     for path in (schedule, serving, baseline):
         path.write_text("{}")
+    schedule_sha256 = hashlib.sha256(schedule.read_bytes()).hexdigest()
     objects = {
         serving: {"seed_artifacts": []},
         baseline: {"folds": [{"fold": 0}]},
-        schedule: {"episodes": [{"number": 7}]},
+        schedule: {
+            "episodes": [{"number": 7}],
+            "stress_coverage": {"overlapping_starts": {"episodes": [{"number": 8}]}},
+        },
     }
     monkeypatch.setattr(
         rl_evaluation,
         "_load_object",
         lambda path, _description: objects[path],
     )
-    monkeypatch.setattr(
-        rl_evaluation,
-        "load_test_episode_manifest",
-        lambda *_args, **_kwargs: LoadedEpisodes(
+    loaded_coverages: list[str | None] = []
+    loaded_sha256 = ["d" * 64]
+
+    def load_schedule(
+        *_args: object, coverage: str | None = None, **_kwargs: object
+    ) -> LoadedEpisodes:
+        loaded_coverages.append(coverage)
+        return LoadedEpisodes(
             episodes=(episode,),
             feature_refs=(),
-            manifest_sha256="c" * 64,
+            manifest_sha256=loaded_sha256[0],
             partition="test",
             fold=0,
-        ),
-    )
+        )
+
+    monkeypatch.setattr(rl_evaluation, "load_test_episode_manifest", load_schedule)
     runner = rl_evaluation._production_evaluation_runner(
         config,
         {
@@ -1896,9 +2106,43 @@ def test_default_production_runner_replays_real_environment_path(
                     "fee": "pinned_product_round_turn_snapshot",
                 },
                 "latency_1bar": {"base": "primary", "entry_defer_eligible_bars": 1},
+                "overlapping_starts": {
+                    "base": "primary",
+                    "schedule": "all_rejected_overlapping_starts_v1",
+                    "promotion_denominator": False,
+                },
             },
         },
     )
+    with pytest.raises(EvaluationContractError, match="changed before replay"):
+        runner(
+            EvaluationRequest(
+                ordinal=0,
+                fold=0,
+                seed=42,
+                policy="reject_all",
+                stress="primary",
+                evaluation_plan_sha256="a" * 64,
+                test_manifest_path=schedule,
+                test_manifest_sha256="c" * 64,
+                output=tmp_path / "tampered-run",
+            )
+        )
+    with pytest.raises(EvaluationContractError, match="loaded test schedule digest mismatch"):
+        runner(
+            EvaluationRequest(
+                ordinal=0,
+                fold=0,
+                seed=42,
+                policy="reject_all",
+                stress="primary",
+                evaluation_plan_sha256="a" * 64,
+                test_manifest_path=schedule,
+                test_manifest_sha256=schedule_sha256,
+                output=tmp_path / "loaded-digest-run",
+            )
+        )
+    loaded_sha256[0] = schedule_sha256
     rows = runner(
         EvaluationRequest(
             ordinal=1,
@@ -1908,7 +2152,7 @@ def test_default_production_runner_replays_real_environment_path(
             stress="primary",
             evaluation_plan_sha256="a" * 64,
             test_manifest_path=schedule,
-            test_manifest_sha256="c" * 64,
+            test_manifest_sha256=schedule_sha256,
             output=tmp_path / "run",
         )
     )
@@ -1927,12 +2171,28 @@ def test_default_production_runner_replays_real_environment_path(
             stress="latency_1bar",
             evaluation_plan_sha256="a" * 64,
             test_manifest_path=schedule,
-            test_manifest_sha256="c" * 64,
+            test_manifest_sha256=schedule_sha256,
             output=tmp_path / "latency-run",
         )
     )
     assert latency_rows[0]["latency_cancellations"] == 2
     assert first.isoformat() not in latency_rows[0]["accepted_opportunity_ids"]
+
+    overlap_rows = runner(
+        EvaluationRequest(
+            ordinal=3,
+            fold=0,
+            seed=42,
+            policy="reject_all",
+            stress="overlapping_starts",
+            evaluation_plan_sha256="a" * 64,
+            test_manifest_path=schedule,
+            test_manifest_sha256=schedule_sha256,
+            output=tmp_path / "overlap-run",
+        )
+    )
+    assert overlap_rows[0]["episode_id"] == "8"
+    assert loaded_coverages == [None, None, "overlapping_starts"]
 
 
 def test_production_runner_covers_policy_stress_and_cost_orchestration(
@@ -1972,6 +2232,7 @@ def test_production_runner_covers_policy_stress_and_cost_orchestration(
         independent_checkpoint,
     ):
         path.write_text("{}")
+    schedule_sha256 = hashlib.sha256(schedule.read_bytes()).hexdigest()
     hgb_path.write_bytes(b"frozen-hgb")
     plan_sha256 = "a" * 64
     objects = {
@@ -2019,7 +2280,7 @@ def test_production_runner_covers_policy_stress_and_cost_orchestration(
         lambda *_args, **_kwargs: LoadedEpisodes(
             episodes=(episode,),
             feature_refs=(),
-            manifest_sha256="c" * 64,
+            manifest_sha256=schedule_sha256,
             partition="test",
             fold=0,
         ),
@@ -2085,7 +2346,7 @@ def test_production_runner_covers_policy_stress_and_cost_orchestration(
                 stress="primary",
                 evaluation_plan_sha256=plan_sha256,
                 test_manifest_path=schedule,
-                test_manifest_sha256="c" * 64,
+                test_manifest_sha256=schedule_sha256,
                 output=tmp_path / policy,
             )
         )[0]
@@ -2107,7 +2368,7 @@ def test_production_runner_covers_policy_stress_and_cost_orchestration(
             stress="primary",
             evaluation_plan_sha256=plan_sha256,
             test_manifest_path=schedule,
-            test_manifest_sha256="c" * 64,
+            test_manifest_sha256=schedule_sha256,
             output=tmp_path / "matched",
             candidate_attempt_path=candidate_attempt,
         )
@@ -2123,7 +2384,7 @@ def test_production_runner_covers_policy_stress_and_cost_orchestration(
             stress="gap_adverse_tick",
             evaluation_plan_sha256=plan_sha256,
             test_manifest_path=schedule,
-            test_manifest_sha256="c" * 64,
+            test_manifest_sha256=schedule_sha256,
             output=tmp_path / "gap",
         )
     )[0]
@@ -2150,7 +2411,7 @@ def test_production_runner_covers_policy_stress_and_cost_orchestration(
             stress="missed_fill_10pct",
             evaluation_plan_sha256=missed_plan,
             test_manifest_path=schedule,
-            test_manifest_sha256="c" * 64,
+            test_manifest_sha256=schedule_sha256,
             output=tmp_path / "missed",
         )
     )[0]
