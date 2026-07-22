@@ -189,10 +189,14 @@ def iter_symbol_embeddings(
     symbol: str,
     config: DownstreamConfig,
     foundation: LoadedFoundation,
+    *,
+    start_row: int = 0,
 ) -> Iterator[tuple[int, int, np.ndarray]]:
-    """Extract concatenated 1m/3m/15m channel embeddings in bounded batches."""
+    """Extract concatenated four-timeframe channel embeddings in bounded batches."""
     if candidates.empty:
         raise EmbeddingContractError(f"candidate table is empty for {symbol}")
+    if start_row < 0 or start_row > len(candidates):
+        raise EmbeddingContractError("embedding resume row is outside the candidate table")
     streams = {
         timeframe: load_market_frame(config, symbol, timeframe)
         .loc[:, list(config.data.feature_columns)]
@@ -201,7 +205,7 @@ def iter_symbol_embeddings(
     }
     batch_size = config.foundation.batch_size
     channels = len(config.data.feature_columns)
-    for start in range(0, len(candidates), batch_size):
+    for start in range(start_row, len(candidates), batch_size):
         stop = min(start + batch_size, len(candidates))
         timeframe_embeddings: list[torch.Tensor] = []
         with torch.inference_mode():

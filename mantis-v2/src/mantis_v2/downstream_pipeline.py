@@ -374,17 +374,17 @@ def embed(config: DownstreamConfig) -> dict[str, Any]:
         feature_parts: list[np.ndarray] = []
         metadata_parts: list[pd.DataFrame] = []
         buffered = 0
+        symbol_resume_row = min(max(completed_rows - visited_rows, 0), len(candidates))
 
-        for start, stop, features in iter_symbol_embeddings(candidates, symbol, config, foundation):
-            absolute_start = visited_rows + start
-            absolute_stop = visited_rows + stop
-            if absolute_stop <= completed_rows:
-                continue
-            resume_offset = max(completed_rows - absolute_start, 0)
-            features = features[resume_offset:]
-            metadata_start = start + resume_offset
+        for start, stop, features in iter_symbol_embeddings(
+            candidates,
+            symbol,
+            config,
+            foundation,
+            start_row=symbol_resume_row,
+        ):
             feature_parts.append(features)
-            metadata_parts.append(candidates.iloc[metadata_start:stop].reset_index(drop=True))
+            metadata_parts.append(candidates.iloc[start:stop].reset_index(drop=True))
             buffered += len(features)
             if buffered >= config.foundation.shard_rows:
                 shard_number, published = _flush_embedding_shard(

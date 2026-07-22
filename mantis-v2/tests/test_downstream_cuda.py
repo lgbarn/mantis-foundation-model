@@ -7,11 +7,17 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 from mantis_v2 import downstream_pipeline
 from mantis_v2.cli import _parser
 from mantis_v2.config import ConfigError
 from mantis_v2.downstream_config import load_downstream_config
-from mantis_v2.embedding import EmbeddingContractError, resolve_embedding_device
+from mantis_v2.embedding import (
+    EmbeddingContractError,
+    LoadedFoundation,
+    iter_symbol_embeddings,
+    resolve_embedding_device,
+)
 from mantis_v2.embedding_artifacts import (
     EmbeddingArtifactError,
     EmbeddingIdentity,
@@ -89,6 +95,40 @@ def test_unavailable_cuda_fails_before_prepare_read_or_output_mutation(
         downstream_pipeline.embed(config)
 
     assert not (tmp_path / "artifacts" / config.run.name / "embed").exists()
+
+
+def test_embedding_resume_starts_at_first_uncommitted_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config_with_device(tmp_path, "cpu")
+    market = pd.DataFrame(
+        np.arange(400, dtype=np.float32).reshape(80, 5),
+        columns=config.data.feature_columns,
+    )
+    monkeypatch.setattr("mantis_v2.embedding.load_market_frame", lambda *_args: market)
+    candidates = pd.DataFrame(
+        {f"{timeframe}_index": np.arange(40, 45) for timeframe in config.data.timeframes}
+    )
+
+    class FixtureModel(torch.nn.Module):
+        def forward(self, values: torch.Tensor) -> torch.Tensor:
+            return torch.ones((len(values), 2), dtype=torch.float32)
+
+    foundation = LoadedFoundation(
+        model=FixtureModel(),
+        device=torch.device("cpu"),
+        weights_path=tmp_path / "weights",
+        weights_sha256="a" * 64,
+        validation_evidence_path=tmp_path / "evaluation",
+        validation_evidence_sha256="b" * 64,
+        embedding_dim=2,
+        manifest={},
+    )
+
+    batches = list(iter_symbol_embeddings(candidates, "NQ", config, foundation, start_row=3))
+
+    assert [(start, stop) for start, stop, _features in batches] == [(3, 5)]
+    assert batches[0][2].shape == (2, 40)
 
 
 def _identity(*, role: str = "promoted") -> EmbeddingIdentity:
