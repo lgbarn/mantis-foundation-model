@@ -610,6 +610,7 @@ def _tell_from_ledger(
         trial.set_user_attr(
             "validation_median_pass_days", None if math.isinf(median_days) else median_days
         )
+        trial.set_user_attr("validation_evaluation_sha256", _canonical_sha256(evaluation_raw))
         study.tell(trial, values=value)
     elif ledger.get("state") == "failed":
         study.tell(trial, state=TrialState.FAIL)
@@ -663,6 +664,8 @@ def _completed_evaluations(
             or frozen.value != expected_value
             or frozen.user_attrs.get("validation_blow_count") != loaded_evaluation.aggregate_blows
             or frozen.user_attrs.get("validation_median_pass_days") != expected_median_days
+            or frozen.user_attrs.get("validation_evaluation_sha256")
+            != _canonical_sha256(evaluation)
         ):
             raise OptunaSearchError("trial evaluation does not match persistent Optuna state")
         evaluations.append(loaded_evaluation)

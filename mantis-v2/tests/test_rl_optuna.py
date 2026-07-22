@@ -823,7 +823,10 @@ def test_full_state_cap_refuses_before_mutating_running_pruned_or_failed_trials(
     assert after == before
 
 
-@pytest.mark.parametrize("tamper", ("parameters", "evaluation", "trial_number", "median_pass_days"))
+@pytest.mark.parametrize(
+    "tamper",
+    ("parameters", "evaluation", "trial_number", "median_pass_days", "provenance"),
+)
 def test_modified_ledger_cannot_participate_in_winner_selection(
     tmp_path: Path, tamper: str
 ) -> None:
@@ -862,6 +865,8 @@ def test_modified_ledger_cannot_participate_in_winner_selection(
     elif tamper == "median_pass_days":
         for outcome in ledger["evaluation"]["outcomes"]:
             outcome["median_pass_days"] = 1.0
+    elif tamper == "provenance":
+        ledger["evaluation"]["outcomes"][0]["checkpoint_sha256"] = "a" * 64
     else:
         ledger["evaluation"]["trial_number"] = 1
     ledger_path.write_text(json.dumps(ledger))
