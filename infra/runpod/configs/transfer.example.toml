@@ -1,0 +1,21 @@
+schema_version = 1
+remote_identity = "replace-with-immutable-remote-bundle-name"
+
+[source]
+root = "/replace-with-internal-ssd-snapshot"
+include = [
+  "dbn/replace-with-original.dbn.zst",
+  "corpus/replace-with-repaired-corpus.parquet",
+  "cache/mantisv2/model.safetensors",
+]
+manifest = "/replace-with-local-state/manifests/input-bundle.json"
+
+[mounted]
+incoming_root = "/workspace/mantis/transfer/incoming/replace-with-bundle-digest/files"
+final_parent = "/workspace/mantis/inputs"
+
+[backups]
+internal_root = "/replace-with-internal-ssd/completed-artifact"
+internal_manifest = "/replace-with-internal-ssd/completed-artifact.manifest.json"
+external_root = "/replace-with-external-drive/completed-artifact"
+external_manifest = "/replace-with-external-drive/completed-artifact.manifest.json"

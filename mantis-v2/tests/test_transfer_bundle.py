@@ -327,13 +327,11 @@ def test_verify_and_promote_is_atomic_and_idempotent(tmp_path: Path) -> None:
     assert not incoming.exists()
     assert (final_path / "alpha.txt").read_bytes() == b"alpha\n"
 
-    incoming.mkdir()
-    (incoming / "alpha.txt").write_bytes(b"alpha\n")
     second = transfer_bundle.verify_and_promote(incoming, final_parent, manifest)
 
     assert second.path == final_path
     assert second.promoted is False
-    assert incoming.exists()
+    assert not incoming.exists()
     assert (final_path / "alpha.txt").read_bytes() == b"alpha\n"
 
 
@@ -572,7 +570,11 @@ def test_retention_refusal_cannot_delete(tmp_path: Path) -> None:
 
 def test_measured_input_bundle_fixture_is_canonical_and_excludes_historical_artifacts() -> None:
     fixture = (
-        Path(__file__).parent / "fixtures" / "transfer" / "measured-input-bundle.json"
+        Path(__file__).parents[2]
+        / "infra"
+        / "runpod"
+        / "examples"
+        / "measured-input-bundle.fixture.json"
     ).read_bytes()
 
     manifest = transfer_bundle.BundleManifest.from_bytes(fixture)

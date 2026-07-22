@@ -62,6 +62,11 @@ them can make a checkpoint intentionally non-resumable.
 | `just runpod-image-build <image>` | Builds the pinned Linux amd64 CUDA image from a clean commit | Local Docker image | Docker CPU/disk/network use; no Pod or registry push |
 | `just runpod-image-scan <image> <output>` | Scans saved image layers and history | Canonical scan JSON | Requires a local Docker daemon |
 | `just runpod-image-self-check <image> <output>` | Verifies CUDA, driver, tools, lock, and runtime inventory | Canonical runtime JSON | Requires Docker plus a compatible NVIDIA GPU |
+| `just transfer-bundle <config>` | Hashes an immutable source snapshot | Canonical no-overwrite manifest | Full local read; no network access |
+| `just transfer-stage-dry-run <config> <inventory>` | Exercises injected S3 HEAD/PUT policy | JSON plan on stdout | Zero network and zero object writes |
+| `just transfer-promote <config>` | Verifies mounted bytes and atomically renames incoming | Immutable final input directory | Fails closed before promotion |
+| `just transfer-backup-verify <config> <artifact-digest>` | Verifies distinct internal and external copies | JSON receipt on stdout | Full read of both copies; performs no copy |
+| `just transfer-retention-check ...` | Re-verifies backups and evaluates exact authorization | JSON decision on stdout | Decision only; never deletes data |
 
 For remote runs, start the fixed localhost-only server on the remote host, then
 open an SSH tunnel from the local machine:

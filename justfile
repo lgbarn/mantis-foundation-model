@@ -57,6 +57,27 @@ runpod-plan platform local experiment intent inventory ledger evaluated_at outpu
 runpod-plan-authorized platform local experiment intent inventory ledger authorization evaluated_at output:
     uv run mantis-v2 runpod-plan --platform {{quote(platform)}} --local {{quote(local)}} --experiment {{quote(experiment)}} --intent {{quote(intent)}} --inventory {{quote(inventory)}} --ledger {{quote(ledger)}} --authorization {{quote(authorization)}} --evaluated-at {{quote(evaluated_at)}} --output {{quote(output)}}
 
+transfer-bundle config:
+    uv run mantis-v2 transfer-bundle --config {{quote(config)}}
+
+transfer-stage-dry-run config remote_inventory:
+    uv run mantis-v2 transfer-stage-dry-run --config {{quote(config)}} --remote-inventory {{quote(remote_inventory)}}
+
+transfer-manifest-inspect manifest:
+    uv run mantis-v2 transfer-manifest-inspect --manifest {{quote(manifest)}}
+
+transfer-promote config:
+    uv run mantis-v2 transfer-promote --config {{quote(config)}}
+
+transfer-backup-verify config completed_artifact_digest:
+    uv run mantis-v2 transfer-backup-verify --config {{quote(config)}} --completed-artifact-digest {{quote(completed_artifact_digest)}}
+
+transfer-retention-check config completed_artifact_digest run_state:
+    uv run mantis-v2 transfer-retention-check --config {{quote(config)}} --completed-artifact-digest {{quote(completed_artifact_digest)}} --run-state {{quote(run_state)}}
+
+transfer-retention-check-authorized config completed_artifact_digest run_state authorization:
+    uv run mantis-v2 transfer-retention-check --config {{quote(config)}} --completed-artifact-digest {{quote(completed_artifact_digest)}} --run-state {{quote(run_state)}} --authorization {{quote(authorization)}}
+
 runpod-terraform-fmt:
     tofu -chdir=infra/runpod/terraform fmt -check
 

@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import stat
+import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
@@ -116,6 +117,22 @@ class S3TransferAdapter(Protocol):
     def put_file(self, key: str, source: Path) -> None: ...
 
     def put_bytes(self, key: str, value: bytes) -> None: ...
+
+
+class DryRunS3Adapter:
+    """Injected S3 seam that records planned writes and performs no I/O."""
+
+    def __init__(self, objects: dict[str, RemoteObject]) -> None:
+        self._objects = dict(objects)
+
+    def head_object(self, key: str) -> RemoteObject | None:
+        return self._objects.get(key)
+
+    def put_file(self, key: str, source: Path) -> None:
+        del key, source
+
+    def put_bytes(self, key: str, value: bytes) -> None:
+        del key, value
 
 
 @dataclass(frozen=True)
@@ -255,6 +272,38 @@ def build_bundle(
     )
 
 
+def load_bundle_manifest(path: Path) -> BundleManifest:
+    """Load one canonical manifest from an explicit path."""
+    try:
+        value = path.read_bytes()
+    except FileNotFoundError as exc:
+        raise TransferBundleError(str(path), "manifest_not_found") from exc
+    return BundleManifest.from_bytes(value)
+
+
+def write_bundle_manifest(
+    source_root: Path,
+    relative_paths: Iterable[str],
+    manifest_path: Path,
+) -> BundleManifest:
+    """Build and atomically publish one canonical manifest without overwrite."""
+    manifest = build_bundle(source_root, relative_paths)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = manifest_path.parent / f".{manifest_path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(manifest.to_bytes())
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, manifest_path)
+        except FileExistsError as exc:
+            raise TransferBundleError(str(manifest_path), "already_exists") from exc
+    finally:
+        temporary.unlink(missing_ok=True)
+    return manifest
+
+
 def _verify_source_entry(source_root: Path, entry: BundleEntry) -> None:
     path = source_root / entry.path
     try:
@@ -363,7 +412,6 @@ def verify_and_promote(
     manifest: BundleManifest,
 ) -> PromotionReceipt:
     """Verify an incoming mounted bundle before one atomic directory rename."""
-    verify_bundle(incoming_root, manifest)
     final_path = final_parent / manifest.bundle_digest
     if final_path.exists():
         verify_bundle(final_path, manifest)
@@ -372,6 +420,7 @@ def verify_and_promote(
             path=final_path,
             promoted=False,
         )
+    verify_bundle(incoming_root, manifest)
     final_parent.mkdir(parents=True, exist_ok=True)
     os.rename(incoming_root, final_path)
     return PromotionReceipt(
