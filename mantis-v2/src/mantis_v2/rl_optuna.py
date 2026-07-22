@@ -882,7 +882,10 @@ def execute_optuna_trial(config: RlConfig, request: TrialRequest) -> TrialEvalua
 
 
 def _load_validation_intermediates(
-    output: Path, identity: TrialIdentity, contract: Mapping[str, object]
+    output: Path,
+    identity: TrialIdentity,
+    contract: Mapping[str, object],
+    manifests: StudyManifests,
 ) -> tuple[SeedValidationOutcome, ...]:
     directory = output / "intermediates" / f"trial-{identity.trial_number:04d}"
     outcomes = []
@@ -903,6 +906,66 @@ def _load_validation_intermediates(
         outcome = _seed_validation_outcome(outcome_raw)
         if outcome.seed != identity.seeds[seed_index]:
             raise OptunaSearchError("validation intermediate seed mismatch")
+        if contract.get("production_evaluator") is True:
+            outcome.require_production_evidence()
+            run_output = (
+                output / "trials" / f"trial-{identity.trial_number:04d}" / f"seed-{seed_index}"
+            )
+            validation_path = (
+                output
+                / "trials"
+                / f"trial-{identity.trial_number:04d}"
+                / "validation"
+                / f"seed-{seed_index}.json"
+            )
+            try:
+                state = json.loads((run_output / "state.json").read_text())
+                checkpoint = run_output / cast(str, state["checkpoint"]) / "checkpoint.pt"
+                validation_core = _load_trial_ledger(validation_path)
+                backing_digests = (
+                    hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+                    hashlib.sha256((run_output / "manifest.json").read_bytes()).hexdigest(),
+                    hashlib.sha256(manifests.validation.read_bytes()).hexdigest(),
+                    hashlib.sha256(validation_path.read_bytes()).hexdigest(),
+                )
+            except (KeyError, OSError, json.JSONDecodeError, TypeError, OptunaSearchError) as exc:
+                raise OptunaSearchError(
+                    "validation intermediate backing evidence is unavailable"
+                ) from exc
+            if backing_digests != (
+                outcome.checkpoint_sha256,
+                outcome.training_manifest_sha256,
+                outcome.validation_manifest_sha256,
+                outcome.validation_artifact_sha256,
+            ):
+                raise OptunaSearchError("validation intermediate backing digest mismatch")
+            if (
+                validation_core.get("stage") != "rl-optuna-seed-validation"
+                or validation_core.get("study_name") != identity.study_name
+                or validation_core.get("trial_number") != identity.trial_number
+                or validation_core.get("seed_index") != seed_index
+                or validation_core.get("seed") != outcome.seed
+                or validation_core.get("checkpoint_sha256") != outcome.checkpoint_sha256
+                or validation_core.get("training_manifest_sha256")
+                != outcome.training_manifest_sha256
+                or validation_core.get("validation_manifest_sha256")
+                != outcome.validation_manifest_sha256
+                or validation_core.get("completed_timesteps") != outcome.completed_timesteps
+                or validation_core.get("timestep_overshoot") != outcome.timestep_overshoot
+                or validation_core.get("outcome")
+                != asdict(
+                    replace(
+                        outcome,
+                        completed_timesteps=None,
+                        timestep_overshoot=None,
+                        checkpoint_sha256=None,
+                        training_manifest_sha256=None,
+                        validation_manifest_sha256=None,
+                        validation_artifact_sha256=None,
+                    )
+                )
+            ):
+                raise OptunaSearchError("validation intermediate backing identity mismatch")
         outcomes.append(outcome)
     return tuple(outcomes)
 
@@ -946,7 +1009,9 @@ def _finish_running_trial(
     if ledger_path.exists():
         _tell_from_ledger(study, trial, _load_trial_ledger(ledger_path))
         return
-    reported_validation = list(_load_validation_intermediates(output, identity, contract))
+    reported_validation = list(
+        _load_validation_intermediates(output, identity, contract, manifests)
+    )
 
     def report_validation(outcome: SeedValidationOutcome) -> None:
         index = len(reported_validation)
@@ -1063,12 +1128,13 @@ def _run_optuna_study_locked(
         study = optuna.load_study(study_name=study_name, storage=storage)
         if study.user_attrs != contract:
             raise OptunaSearchError("persistent study identity mismatch")
-        attempted = len(study.trials)
-        if attempted >= config.training.maximum_search_trials:
-            raise OptunaSearchError("persistent study already reached the 30-trial ceiling")
         running = study.get_trials(deepcopy=False, states=(TrialState.RUNNING,))
         if len(running) > 1:
             raise OptunaSearchError("persistent study has multiple RUNNING trials")
+        attempted = len(study.trials)
+        ceiling = config.training.maximum_search_trials
+        if attempted > ceiling or (attempted == ceiling and not running):
+            raise OptunaSearchError("persistent study already reached the 30-trial ceiling")
         if running:
             frozen = running[0]
             identity = derive_trial_identity(config, study_name, frozen.number)

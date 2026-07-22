@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import Counter
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
@@ -22,6 +24,7 @@ from mantis_v2.rl_optuna import (
     _canonical_sha256,
     _completed_evaluations,
     _completed_search_seed,
+    _load_validation_intermediates,
     _search_space_payload,
     _storage_url,
     _study_contract,
@@ -772,7 +775,7 @@ def test_terminal_ledger_resumes_tell_without_reexecuting_evaluator(
     assert result["attempted_trials"] == 1
 
 
-def test_full_state_cap_refuses_before_mutating_running_pruned_or_failed_trials(
+def test_full_state_cap_resumes_running_30th_then_refuses_31st_before_mutation(
     tmp_path: Path,
 ) -> None:
     config = load_rl_config(ROOT / "configs" / "rl-entry-topstep-100k.toml")
@@ -780,33 +783,42 @@ def test_full_state_cap_refuses_before_mutating_running_pruned_or_failed_trials(
     validation = tmp_path / "validation.json"
     _schedule(training, config.digest, "training", "2025-06-01T00:00:00+00:00")
     _schedule(validation, config.digest, "validation", "2025-12-31T23:59:59+00:00")
-    manifests = validate_study_manifests(config, training, validation)
     output = tmp_path / "mixed-cap"
-    output.mkdir()
     study_name = "mixed-cap-v1"
-    study = optuna.create_study(
+
+    def evaluate(request: TrialRequest) -> TrialEvaluation:
+        outcomes = tuple(
+            SeedValidationOutcome("validation", seed, 10, 5, 0, 8.0)
+            for seed in request.identity.seeds
+        )
+        return TrialEvaluation(request.identity.trial_number, outcomes)
+
+    first = run_optuna_study(
+        config,
+        training,
+        validation,
+        output,
         study_name=study_name,
-        storage=_storage_url(output / "study.sqlite3"),
-        direction="maximize",
+        variant="shared_ticker_value",
+        evaluator=evaluate,
+        maximum_trials_this_run=29,
     )
-    contract = _study_contract(
-        config, manifests, study_name, PolicyVariant.SHARED_TICKER_VALUE, False
+    assert first["attempted_trials"] == 29
+    study = optuna.load_study(study_name=study_name, storage=_storage_url(output / "study.sqlite3"))
+    running = study.ask()
+    assert running.number == 29
+
+    resumed = run_optuna_study(
+        config,
+        training,
+        validation,
+        output,
+        study_name=study_name,
+        variant="shared_ticker_value",
+        evaluator=evaluate,
     )
-    for key, value in contract.items():
-        study.set_user_attr(key, value)
-    for number in range(30):
-        trial = study.ask()
-        if number == 29:
-            continue
-        state = (
-            optuna.trial.TrialState.COMPLETE,
-            optuna.trial.TrialState.PRUNED,
-            optuna.trial.TrialState.FAIL,
-        )[number % 3]
-        if state is optuna.trial.TrialState.COMPLETE:
-            study.tell(trial, 0.5)
-        else:
-            study.tell(trial, state=state)
+    assert resumed["attempted_trials"] == 30
+    assert resumed["status"] == "complete"
 
     before = {path: path.read_bytes() for path in output.rglob("*") if path.is_file()}
     with pytest.raises(Exception, match="30-trial ceiling"):
@@ -817,10 +829,92 @@ def test_full_state_cap_refuses_before_mutating_running_pruned_or_failed_trials(
             output,
             study_name=study_name,
             variant="shared_ticker_value",
-            evaluator=lambda _request: pytest.fail("30th RUNNING trial must not resume"),
+            evaluator=lambda _request: pytest.fail("31st trial must not be created"),
         )
     after = {path: path.read_bytes() for path in output.rglob("*") if path.is_file()}
     assert after == before
+
+
+@pytest.mark.parametrize(
+    "backing",
+    ("checkpoint", "training_manifest", "validation_manifest", "validation_artifact"),
+)
+def test_validation_intermediate_rehashes_all_production_backing_evidence(
+    tmp_path: Path, backing: str
+) -> None:
+    config = load_rl_config(ROOT / "configs" / "rl-entry-topstep-100k.toml")
+    training = tmp_path / "training.json"
+    validation = tmp_path / "validation.json"
+    _schedule(training, config.digest, "training", "2025-06-01T00:00:00+00:00")
+    _schedule(validation, config.digest, "validation", "2025-12-31T23:59:59+00:00")
+    manifests = validate_study_manifests(config, training, validation)
+    identity = derive_trial_identity(config, "backing-evidence-v1", 0)
+    output = tmp_path / "search"
+    run_output = output / "trials" / "trial-0000" / "seed-0"
+    checkpoint = run_output / "checkpoint-1" / "checkpoint.pt"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"checkpoint")
+    (run_output / "state.json").write_text(json.dumps({"checkpoint": "checkpoint-1"}))
+    training_run_manifest = run_output / "manifest.json"
+    training_run_manifest.write_text('{"stage":"training"}')
+    base_outcome = SeedValidationOutcome("validation", identity.seeds[0], 10, 5, 0, 8.0)
+    validation_path = output / "trials" / "trial-0000" / "validation" / "seed-0.json"
+    validation_core = {
+        "schema_version": 1,
+        "stage": "rl-optuna-seed-validation",
+        "study_name": identity.study_name,
+        "trial_number": 0,
+        "seed_index": 0,
+        "seed": identity.seeds[0],
+        "checkpoint_sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+        "training_manifest_sha256": hashlib.sha256(training_run_manifest.read_bytes()).hexdigest(),
+        "validation_manifest_sha256": manifests.validation_sha256,
+        "completed_timesteps": 500_001,
+        "timestep_overshoot": 1,
+        "outcome": asdict(base_outcome),
+        "sealed_holdout_accessed": False,
+    }
+    _atomic_json_idempotent(validation_path, validation_core)
+    outcome = replace(
+        base_outcome,
+        completed_timesteps=500_001,
+        timestep_overshoot=1,
+        checkpoint_sha256=str(validation_core["checkpoint_sha256"]),
+        training_manifest_sha256=str(validation_core["training_manifest_sha256"]),
+        validation_manifest_sha256=str(validation_core["validation_manifest_sha256"]),
+        validation_artifact_sha256=hashlib.sha256(validation_path.read_bytes()).hexdigest(),
+    )
+    intermediate = output / "intermediates" / "trial-0000" / "seed-0.json"
+    _atomic_json_idempotent(
+        intermediate,
+        {
+            "schema_version": 1,
+            "stage": "rl-optuna-validation-intermediate",
+            "study_identity_sha256": "identity",
+            "trial_number": 0,
+            "seed_index": 0,
+            "outcome": asdict(outcome),
+            "sealed_holdout_accessed": False,
+        },
+    )
+    assert _load_validation_intermediates(
+        output, identity, {"identity_sha256": "identity", "production_evaluator": True}, manifests
+    ) == (outcome,)
+
+    paths = {
+        "checkpoint": checkpoint,
+        "training_manifest": training_run_manifest,
+        "validation_manifest": validation,
+        "validation_artifact": validation_path,
+    }
+    paths[backing].write_bytes(paths[backing].read_bytes() + b"tampered")
+    with pytest.raises(Exception, match="backing"):
+        _load_validation_intermediates(
+            output,
+            identity,
+            {"identity_sha256": "identity", "production_evaluator": True},
+            manifests,
+        )
 
 
 @pytest.mark.parametrize(
