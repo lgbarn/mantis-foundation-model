@@ -291,11 +291,25 @@ if [[ "$destination" != root@* && "$*" == *"root@127.0.0.1:"* ]]; then
       "$destination/provenance.json" > "$destination/provenance.json.tmp"
     mv "$destination/provenance.json.tmp" "$destination/provenance.json"
   fi
+  jq --slurpfile provenance "$destination/provenance.json" \
+    '. + {{provenance: $provenance[0]}}' "$destination/evaluation.json" \
+    > "$destination/evaluation.json.tmp"
+  mv "$destination/evaluation.json.tmp" "$destination/evaluation.json"
+  cp "$destination/evaluation.json" "$destination/export/evaluation.json"
   weights_sha="$(shasum -a 256 "$destination/export/model.safetensors" | awk '{{print $1}}')"
   evaluation_sha="$(shasum -a 256 "$destination/export/evaluation.json" | awk '{{print $1}}')"
   checkpoint_sha="$(shasum -a 256 "$destination/checkpoints/best.pt" | awk '{{print $1}}')"
   printf '{{"config":{{"run":{{"name":"mantis-smoke"}}}},"weights_sha256":"%s","validation_gate":{{"verified":true,"evaluation_sha256":"%s","checkpoint_sha256":"%s"}},"parity":{{"verified":true}}}}\\n' \
     "$weights_sha" "$evaluation_sha" "$checkpoint_sha" > "$destination/export/manifest.json"
+  jq --slurpfile provenance "$destination/provenance.json" \
+    '. + {{provenance: $provenance[0]}}' "$destination/export/manifest.json" \
+    > "$destination/export/manifest.json.tmp"
+  mv "$destination/export/manifest.json.tmp" "$destination/export/manifest.json"
+  if [[ "${{STALE_EXPORT_PROVENANCE:-0}}" == 1 ]]; then
+    jq '.provenance.source_revision = "0000000000000000000000000000000000000000"' \
+      "$destination/export/manifest.json" > "$destination/export/manifest.json.tmp"
+    mv "$destination/export/manifest.json.tmp" "$destination/export/manifest.json"
+  fi
   if [[ "${{CORRUPT_ARTIFACT:-0}}" == 1 ]]; then printf 'corrupt' >> "$destination/export/model.safetensors"; fi
 fi
 """,
@@ -501,6 +515,26 @@ def test_train_rejects_complete_artifacts_from_different_provenance(tmp_path: Pa
 
     assert completed.returncode != 0
     assert "artifact_provenance_mismatch" in completed.stderr
+    assert "runpodctl pod delete pod-123" in call_log.read_text()
+
+
+def test_train_rejects_export_manifest_mixed_with_current_provenance(tmp_path: Path) -> None:
+    experiment = _experiment(tmp_path)
+    runtime = _runtime(tmp_path)
+    env, call_log = _success_environment(tmp_path)
+    env["STALE_EXPORT_PROVENANCE"] = "1"
+
+    completed = subprocess.run(
+        ["just", "runpod-train", str(experiment), str(runtime)],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "export_provenance_mismatch" in completed.stderr
     assert "runpodctl pod delete pod-123" in call_log.read_text()
 
 
@@ -1320,6 +1354,7 @@ esac
 def test_recover_ambiguous_create_reconciles_by_unique_name_without_create(
     tmp_path: Path,
 ) -> None:
+    experiment = _experiment(tmp_path)
     runtime = _runtime(tmp_path)
     env, call_log = _success_environment(tmp_path)
     (tmp_path / "created").touch()
@@ -1351,6 +1386,20 @@ def test_recover_ambiguous_create_reconciles_by_unique_name_without_create(
     calls = call_log.read_text()
     assert "pod create" not in calls
     assert "runpodctl pod delete pod-123" in calls
+    assert not receipt.exists()
+    assert (tmp_path / "ambiguous-resolved.json").is_file()
+
+    retried = subprocess.run(
+        ["just", "runpod-train", str(experiment), str(runtime)],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert retried.returncode == 0, retried.stderr
+    assert call_log.read_text().count("runpodctl pod create") == 1
 
 
 def test_recover_ambiguous_known_pod_already_absent_is_success(tmp_path: Path) -> None:

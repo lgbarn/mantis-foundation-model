@@ -223,6 +223,14 @@ RUNPOD_API_KEY_VALUE=""
 RUNPOD_TERMINATION_DEADLINE=""
 RUNPOD_LOCK_DIR=""
 RUNPOD_SNAPSHOT_DIR=""
+RUNPOD_AMBIGUOUS_EVIDENCE=""
+
+resolve_ambiguous_evidence() {
+  local evidence="$1" resolved
+  resolved="${evidence%.json}-resolved.json"
+  [[ ! -e "$resolved" ]] || return 1
+  mv "$evidence" "$resolved"
+}
 
 acquire_run_lock() {
   local config="$1" run_id receipt_root
@@ -296,6 +304,12 @@ cleanup_pod() {
     elif [[ $absence_status -ne 0 ]]; then
       printf 'pod_absence_not_verified:%s\n' "$RUNPOD_POD_ID" >&2
       cleanup_failed=1
+    fi
+    if [[ $absence_status -eq 0 && -n "$RUNPOD_AMBIGUOUS_EVIDENCE" ]]; then
+      if ! resolve_ambiguous_evidence "$RUNPOD_AMBIGUOUS_EVIDENCE"; then
+        printf 'ambiguous_resolution_failed:%s\n' "$RUNPOD_AMBIGUOUS_EVIDENCE" >&2
+        cleanup_failed=1
+      fi
     fi
     receipt_root="$(jq -r '.paths.receipt_root' "$RUNPOD_CONFIG")"
     if ! RUNPOD_API_KEY="$RUNPOD_API_KEY_VALUE" runpodctl billing pods \
@@ -392,6 +406,12 @@ verify_pulled_artifacts() {
       .config_digest == $config_digest and
       .lock_digest == $lock_digest
     ' "$root/provenance.json" >/dev/null 2>&1 || die "artifact_provenance_mismatch"
+  jq -e --slurpfile provenance "$root/provenance.json" \
+    '.provenance == $provenance[0]' "$root/evaluation.json" >/dev/null 2>&1 ||
+    die "evaluation_provenance_mismatch"
+  jq -e --slurpfile provenance "$root/provenance.json" \
+    '.provenance == $provenance[0]' "$root/export/manifest.json" >/dev/null 2>&1 ||
+    die "export_provenance_mismatch"
 
   expected="$(jq -r '.weights_sha256' "$root/export/manifest.json")"
   actual="$(sha256_file "$root/export/model.safetensors")"
@@ -746,7 +766,7 @@ validate_ambiguous_evidence() {
 }
 
 recover_ambiguous_create() {
-  local evidence="$1" config="$2" pod_id status observation resolved
+  local evidence="$1" config="$2" pod_id status observation
   validate_ambiguous_evidence "$evidence" "$config"
   pod_id="$(jq -r '.pod_id' "$evidence")"
   if [[ ! "$pod_id" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$ ]]; then
@@ -757,9 +777,7 @@ recover_ambiguous_create() {
     case "$status" in
       0) ;;
       1)
-        resolved="${evidence%.json}-resolved.json"
-        [[ ! -e "$resolved" ]] || die "ambiguous_resolution_exists:$resolved"
-        mv "$evidence" "$resolved"
+        resolve_ambiguous_evidence "$evidence" || die "ambiguous_resolution_failed:$evidence"
         printf 'ambiguous_create_resolved_absent\n'
         return 0
         ;;
@@ -773,9 +791,7 @@ recover_ambiguous_create() {
     set -e
     case "$status" in
       0)
-        resolved="${evidence%.json}-resolved.json"
-        [[ ! -e "$resolved" ]] || die "ambiguous_resolution_exists:$resolved"
-        mv "$evidence" "$resolved"
+        resolve_ambiguous_evidence "$evidence" || die "ambiguous_resolution_failed:$evidence"
         printf 'ambiguous_create_resolved_absent\n'
         return 0
         ;;
@@ -792,6 +808,7 @@ recover_ambiguous_create() {
   jq -e --arg id "$pod_id" --arg name "$(jq -r '.pod.name' "$config")" \
     '.id == $id and .name == $name' <<<"$observation" >/dev/null 2>&1 ||
     die "ambiguous_pod_identity_mismatch"
+  RUNPOD_AMBIGUOUS_EVIDENCE="$evidence"
 }
 
 run_recover() {
