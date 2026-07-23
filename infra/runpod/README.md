@@ -216,8 +216,8 @@ fleet:
 - at least 8 vCPU and 32 GiB host RAM
 - 50 GB container disk
 - 150 GB network volume
-- 7,200-second smoke workload plus 600 seconds of startup allowance and 120
-  seconds of shutdown grace, capped at 7,920 wall-clock seconds
+- 7,200-second smoke workload plus 1,800 seconds of startup allowance and 120
+  seconds of shutdown grace, capped at 9,120 wall-clock seconds
 - no automatic retry that can create a second Pod
 
 This is a benchmark envelope, not a final production size or authorization to
@@ -403,11 +403,12 @@ The static image receipt binds architecture, dependencies, source, and lock but
 does not claim local CUDA availability. The Pod executor performs the CUDA and
 driver allocation self-check as its first operation and starts training only on
 success. The supervisor verifies S3 staging before create, requires the first signed
-heartbeat within 600 seconds, terminates after four missed 30-second polls or
+heartbeat within the configured startup allowance (1,800 seconds for the
+current cold-image qualification), terminates after four missed 30-second polls or
 the hard deadline, captures diagnostics and an emergency checkpoint, verifies
 provider absence, reconciles billing, and copies completed artifacts to both
 declared backup roots. TensorBoard is reached only through an SSH tunnel.
-Image pulling and extraction are part of the 600-second startup allowance. A
+Image pulling and extraction are part of the startup allowance. A
 provider state such as `RUNNING` does not prove workload execution: require a
 nonnegative runtime plus the signed heartbeat. If either is absent at the limit,
 terminate the Pod and preserve the network volume rather than extending paid
@@ -499,10 +500,10 @@ parity mismatch, resume mismatch, export mismatch, or precision-record mismatch
 selects FP32 with no retry and no tolerance change. CPU fake evidence tests do
 not promote BF16; promotion requires reviewed real-CUDA evidence.
 
-Run the H100 SXM alone first with a 7,200-second workload, 600-second startup
-allowance, and 120-second shutdown grace. The wall-clock cap is 7,920 seconds.
+Run the H100 SXM alone first with a 7,200-second workload, 1,800-second startup
+allowance, and 120-second shutdown grace. The wall-clock cap is 9,120 seconds.
 At the observed $2.99/hour Secure Cloud price, its maximum projected
-qualification spend is $6.60. L40S and A40 are explicit sequential fallbacks
+qualification spend is $7.60. L40S and A40 are explicit sequential fallbacks
 only, each requiring a fresh inventory, price, and launch decision after a
 failed allocation. Total qualification compute and container-disk overhead must
 remain below the $10 allocation. Never launch a fallback automatically.

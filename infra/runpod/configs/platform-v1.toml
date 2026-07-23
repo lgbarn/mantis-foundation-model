@@ -22,6 +22,7 @@ minimum_free_bytes = 30000000000
 [lifecycle]
 maximum_inventory_age_seconds = 300
 maximum_duration_seconds = 7200
+startup_allowance_seconds = 1800
 
 [billing]
 container_disk_usd_per_gb_month = "0.10"

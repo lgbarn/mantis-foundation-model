@@ -103,6 +103,7 @@ def _validate_launch_decision(decision: Mapping[str, object], evaluated_at: date
         "ram_gb",
         "container_disk_gb",
         "maximum_duration_seconds",
+        "startup_allowance_seconds",
     ):
         _required_int(decision.get(field), field)
     image_ref = str(decision["image_ref"])
@@ -428,7 +429,10 @@ def launch_pod(
         duration = _required_int(
             decision.get("maximum_duration_seconds"), "maximum_duration_seconds"
         )
-        deadline = started_at + timedelta(seconds=duration + 600 + 120)
+        startup_allowance = _required_int(
+            decision.get("startup_allowance_seconds"), "startup_allowance_seconds"
+        )
+        deadline = started_at + timedelta(seconds=duration + startup_allowance + 120)
         reserved_spend = _required_decimal(
             decision.get("projected_spend_usd"), "projected_spend_usd"
         )

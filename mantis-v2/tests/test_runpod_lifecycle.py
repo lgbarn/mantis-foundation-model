@@ -35,6 +35,7 @@ def _approved_decision() -> dict[str, object]:
         "datacenter_id": "US-CA-2",
         "container_disk_gb": 50,
         "maximum_duration_seconds": 7200,
+        "startup_allowance_seconds": 600,
         "projected_spend_usd": "0.88",
         "stage": "qualification",
         "authorization_digest": "b" * 64,

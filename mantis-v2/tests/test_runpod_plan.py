@@ -48,6 +48,7 @@ minimum_free_bytes = 30000000000
 [lifecycle]
 maximum_inventory_age_seconds = 300
 maximum_duration_seconds = 7200
+startup_allowance_seconds = 600
 
 [billing]
 container_disk_usd_per_gb_month = "0.10"
@@ -303,7 +304,8 @@ def test_committed_h100_qualification_inputs_are_coherent(
     assert decision["datacenter_id"] == "US-MO-1"
     assert decision["provider_price_usd_per_gpu_hour"] == "2.99"
     assert decision["maximum_duration_seconds"] == 7200
-    assert decision["projected_spend_usd"] == "6.60"
+    assert decision["startup_allowance_seconds"] == 1800
+    assert decision["projected_spend_usd"] == "7.60"
 
 
 def test_plan_command_without_authorization_writes_canonical_rejection(
@@ -446,6 +448,7 @@ def test_plan_command_with_exact_authorization_binds_terms_and_approves(
     assert decision["provider_price_usd_per_gpu_hour"] == "0.44"
     assert decision["inventory_observed_at"] == "2026-07-21T12:00:00Z"
     assert decision["maximum_duration_seconds"] == 7200
+    assert decision["startup_allowance_seconds"] == 600
     assert decision["projected_spend_usd"] == "0.99"
     assert decision["authorization_digest"]
     assert decision["authorization_expires_at"] == "2026-07-21T12:10:00Z"

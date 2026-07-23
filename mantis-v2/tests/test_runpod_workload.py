@@ -468,6 +468,7 @@ def _decision(manifest: dict[str, object]) -> dict[str, object]:
         "ledger_digest": load_spend_ledger(manifest["spend_ledger"]["controller_path"]).digest,
         "authorization_expires_at": manifest["authorization"]["expires_at"],
         "maximum_duration_seconds": 7200,
+        "startup_allowance_seconds": manifest["monitor"]["first_heartbeat_seconds"],
         "workload": {
             "manifest_digest": manifest["manifest_digest"],
             "docker_args": "uv run mantis-v2 workload-execute --manifest /workspace/launch.json",
@@ -549,6 +550,43 @@ def test_supervisor_starts_before_create_and_deletes_after_verified_completion(
     assert all(event["quoted_rates"] == manifest["quoted_rates"] for event in events)
     assert all(event["storage_size_gb"] == 150 for event in events)
     assert events[-1]["billing"]["pod_id"] == "pod-123"
+
+
+def test_supervisor_honors_extended_cold_start_allowance(tmp_path: Path) -> None:
+    spec = _spec(tmp_path)
+    spec["monitor"]["first_heartbeat_seconds"] = 1800  # type: ignore[index]
+    spec["budget_guard"]["next_cell_maximum_usd"] = "1.05"  # type: ignore[index]
+    manifest_path = seal_workload_manifest(spec, tmp_path / "sealed")
+    manifest = validate_workload_manifest(manifest_path)
+    adapter = FakeAdapter()
+    clock = FakeClock()
+
+    def heartbeat_source(run_id: str, pod_id: str) -> dict | None:
+        del run_id, pod_id
+        if clock.value < datetime(2026, 7, 22, 12, 29, 30, tzinfo=UTC):
+            return None
+        payload = _heartbeat(manifest, "complete", 200, "token")
+        payload["timestamp"] = clock.value.isoformat().replace("+00:00", "Z")
+        return sign_heartbeat(
+            {key: value for key, value in payload.items() if key != "signature"}, "token"
+        )
+
+    result = supervise_workload(
+        manifest_path=manifest_path,
+        decision=_decision(manifest),
+        state_root=tmp_path / "state",
+        adapter=adapter,
+        heartbeat_token="token",
+        heartbeat_source=heartbeat_source,
+        collect_diagnostics=lambda pod_id, deadline: {},
+        checkpoint=lambda pod_id, deadline: None,
+        replicate=lambda _: None,
+        now=clock.now,
+        sleep=clock.sleep,
+    )
+
+    assert result["status"] == "complete"
+    assert clock.value == datetime(2026, 7, 22, 12, 29, 30, tzinfo=UTC)
 
 
 def test_uncertain_create_polls_and_deletes_late_visible_pod(tmp_path: Path) -> None:

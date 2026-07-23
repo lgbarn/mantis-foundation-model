@@ -168,6 +168,7 @@ class StorageConfig:
 class LifecycleConfig:
     maximum_inventory_age_seconds: int
     maximum_duration_seconds: int
+    startup_allowance_seconds: int
 
 
 @dataclass(frozen=True)
@@ -378,7 +379,11 @@ def load_platform_config(path: str | Path) -> PlatformConfig:
     )
     lifecycle = _exact(
         raw["lifecycle"],
-        {"maximum_inventory_age_seconds", "maximum_duration_seconds"},
+        {
+            "maximum_inventory_age_seconds",
+            "maximum_duration_seconds",
+            "startup_allowance_seconds",
+        },
         "[lifecycle]",
     )
     billing = _exact(
@@ -431,6 +436,9 @@ def load_platform_config(path: str | Path) -> PlatformConfig:
             maximum_duration_seconds=_integer(
                 lifecycle["maximum_duration_seconds"], "lifecycle.maximum_duration_seconds"
             ),
+            startup_allowance_seconds=_integer(
+                lifecycle["startup_allowance_seconds"], "lifecycle.startup_allowance_seconds"
+            ),
         ),
         billing=BillingConfig(
             container_disk_usd_per_gb_month=_decimal(
@@ -457,6 +465,8 @@ def load_platform_config(path: str | Path) -> PlatformConfig:
     )
     if not config.provider.secure_cloud:
         raise RunpodConfigError("provider.secure_cloud must be true")
+    if not 600 <= config.lifecycle.startup_allowance_seconds <= 1800:
+        raise RunpodConfigError("lifecycle.startup_allowance_seconds must be between 600 and 1800")
     expected_adapter = {
         "base_url": REST_V1_BASE_URL,
         "openapi_identity": OPENAPI_IDENTITY,

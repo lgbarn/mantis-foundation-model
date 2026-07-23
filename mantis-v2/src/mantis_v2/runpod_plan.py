@@ -55,6 +55,7 @@ class LaunchDecision:
     inventory_observed_at: datetime
     provider_price_usd_per_gpu_hour: Decimal | None
     maximum_duration_seconds: int
+    startup_allowance_seconds: int
     projected_spend_usd: Decimal | None
     authorization_expires_at: datetime | None
     run_name: str
@@ -129,7 +130,9 @@ def _matching_volume(intent: LaunchIntent, inventory: InventorySnapshot) -> Inve
 def _projected_spend(
     platform: PlatformConfig, intent: LaunchIntent, price_per_gpu_hour: Decimal
 ) -> Decimal:
-    hours = Decimal(intent.maximum_duration_seconds + 600 + 120) / Decimal(3600)
+    hours = Decimal(
+        intent.maximum_duration_seconds + platform.lifecycle.startup_allowance_seconds + 120
+    ) / Decimal(3600)
     compute = price_per_gpu_hour * Decimal(intent.gpu_count) * hours
     container = (
         platform.billing.container_disk_usd_per_gb_month
@@ -290,6 +293,7 @@ def plan_launch(
         inventory_observed_at=inventory.observed_at,
         provider_price_usd_per_gpu_hour=price,
         maximum_duration_seconds=intent.maximum_duration_seconds,
+        startup_allowance_seconds=platform.lifecycle.startup_allowance_seconds,
         projected_spend_usd=projected_spend,
         authorization_expires_at=authorization.expires_at if authorization else None,
         run_name=intent.run_name,

@@ -315,9 +315,12 @@ def _validate_core(core: dict[str, Any], *, now: datetime, path_role: str) -> No
     if heartbeat_path != expected_pod_artifacts / "heartbeat.json":
         raise WorkloadError("monitor.heartbeat must be inside artifacts.pod")
     _file_record(monitor["token"], "monitor.token", path_role=path_role)
+    startup_allowance = monitor["first_heartbeat_seconds"]
     if (
         monitor["poll_seconds"] != 30
-        or monitor["first_heartbeat_seconds"] != 600
+        or not isinstance(startup_allowance, int)
+        or isinstance(startup_allowance, bool)
+        or not 600 <= startup_allowance <= 1800
         or monitor["miss_limit"] != 4
     ):
         raise WorkloadError("monitor timing differs from the accepted watchdog contract")
@@ -349,7 +352,7 @@ def _validate_core(core: dict[str, Any], *, now: datetime, path_role: str) -> No
         ledger = load_spend_ledger(ledger_record[f"{path_role}_path"])
     except RunpodConfigError as exc:
         raise WorkloadError("spend ledger is invalid") from exc
-    provider_billed_allowance_seconds = maximum_duration + 600 + 120
+    provider_billed_allowance_seconds = maximum_duration + startup_allowance + 120
     maximum_cell = (
         (compute_rate + storage_rate * Decimal(rates["storage_gb"]))
         * Decimal(provider_billed_allowance_seconds)
@@ -564,6 +567,8 @@ def bind_workload_decision(
         or decision.get("image_ref") != manifest["image"]["ref"]
         or decision.get("stage") != manifest["budget_guard"]["stage"]
         or decision.get("maximum_duration_seconds") != manifest["maximum_duration_seconds"]
+        or decision.get("startup_allowance_seconds")
+        != manifest["monitor"]["first_heartbeat_seconds"]
         or str(decision.get("observed_price_usd_per_gpu_hour"))
         != manifest["quoted_rates"]["compute_usd_per_hour"]
         or decision.get("authorization_digest") != authorization.digest
@@ -1067,7 +1072,10 @@ def _monitor_created_pod(
                 missed += 1
         elif first_seen:
             missed += 1
-        if not first_seen and observed_at >= provider_started + timedelta(seconds=600):
+        startup_allowance = int(manifest["monitor"]["first_heartbeat_seconds"])
+        if not first_seen and observed_at >= provider_started + timedelta(
+            seconds=startup_allowance
+        ):
             return "startup_heartbeat_timeout", provider_started
         if first_seen and missed >= 4:
             return "heartbeat_missed", provider_started

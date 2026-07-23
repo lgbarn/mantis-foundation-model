@@ -169,10 +169,10 @@ environment/I-O inventory
   -> Pod termination
 ```
 
-The first H100 SXM Pod has a 7,200-second workload, a 600-second startup
-allowance, and 120 seconds of shutdown grace, for a 7,920-second wall-clock cap.
+The first H100 SXM Pod has a 7,200-second workload, a 1,800-second startup
+allowance, and 120 seconds of shutdown grace, for a 9,120-second wall-clock cap.
 At the observed $2.99/hour Secure Cloud price, its maximum projected
-qualification spend is $6.60. Sequential L40S or A40 fallback probes are manual
+qualification spend is $7.60. Sequential L40S or A40 fallback probes are manual
 only and require a fresh exact decision. Total qualification compute plus
 container-disk overhead remains below $10.
 
