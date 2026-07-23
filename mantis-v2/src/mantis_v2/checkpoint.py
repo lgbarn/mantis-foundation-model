@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pickle
 import random
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -25,6 +26,7 @@ def save_checkpoint(
     epoch: int,
     global_step: int,
     provenance: Provenance,
+    adaptation_state: Mapping[str, object] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     numpy_state = cast(tuple[str, np.ndarray[Any, Any], int, int, float], np.random.get_state())
@@ -52,6 +54,7 @@ def save_checkpoint(
             ),
         },
         "provenance": provenance.to_dict(),
+        "adaptation": dict(adaptation_state) if adaptation_state is not None else None,
     }
     temporary = path.with_suffix(path.suffix + ".tmp")
     torch.save(payload, temporary)
@@ -63,6 +66,7 @@ def load_checkpoint(
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
     provenance: Provenance,
+    adaptation_state: Mapping[str, object] | None = None,
 ) -> tuple[int, int]:
     try:
         payload: Any = torch.load(path, map_location="cpu", weights_only=True)
@@ -94,6 +98,10 @@ def load_checkpoint(
         ):
             if not isinstance(recorded, dict) or recorded.get(key) != expected[key]:
                 raise CheckpointError(f"checkpoint provenance mismatch: {key}")
+        if payload.get("adaptation") != (
+            dict(adaptation_state) if adaptation_state is not None else None
+        ):
+            raise CheckpointError("checkpoint adaptation state mismatch")
         model.load_state_dict(payload["model"], strict=True)
         optimizer.load_state_dict(payload["optimizer"])
         rng = payload["rng"]
@@ -118,3 +126,75 @@ def load_checkpoint(
         raise
     except (AttributeError, KeyError, TypeError, RuntimeError, ValueError) as exc:
         raise CheckpointError(f"malformed checkpoint {path}: {exc}") from exc
+
+
+def checkpoint_adaptation_state(path: Path, provenance: Provenance) -> dict[str, object] | None:
+    """Read phase identity before optimizer construction without restoring mutable state."""
+    try:
+        payload: Any = torch.load(path, map_location="cpu", weights_only=True)
+    except (OSError, RuntimeError, ValueError, pickle.UnpicklingError) as exc:
+        raise CheckpointError(f"cannot load checkpoint {path}: {exc}") from exc
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise CheckpointError("unsupported checkpoint schema")
+    recorded = payload.get("provenance")
+    expected = provenance.to_dict()
+    if not isinstance(recorded, dict) or any(
+        recorded.get(key) != expected[key]
+        for key in (
+            "precision",
+            "config_digest",
+            "dataset_digest",
+            "source_digest",
+            "lock_digest",
+            "upstream_source_revision",
+            "upstream_hub_revision",
+            "upstream_weights_sha256",
+            "contamination_digest",
+        )
+    ):
+        raise CheckpointError("checkpoint provenance mismatch")
+    adaptation = payload.get("adaptation")
+    if adaptation is None:
+        return None
+    if not isinstance(adaptation, dict):
+        raise CheckpointError("checkpoint adaptation state must be a mapping")
+    required = {
+        "phase",
+        "phase_updates",
+        "total_updates",
+        "warm_start_updates",
+        "lora_updates",
+        "transition_parent",
+        "optimizer_identity",
+        "trainable_parameters",
+        "frozen_parameters",
+    }
+    if set(adaptation) != required:
+        raise CheckpointError("checkpoint adaptation state schema mismatch")
+    if adaptation["phase"] not in {"warm_start", "lora"}:
+        raise CheckpointError("checkpoint adaptation phase is invalid")
+    for key in ("phase_updates", "total_updates", "warm_start_updates", "lora_updates"):
+        value = adaptation[key]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise CheckpointError(f"checkpoint adaptation {key} is invalid")
+    for key in ("trainable_parameters", "frozen_parameters"):
+        value = adaptation[key]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise CheckpointError(f"checkpoint adaptation {key} is invalid")
+    warm_updates = cast(int, adaptation["warm_start_updates"])
+    lora_updates = cast(int, adaptation["lora_updates"])
+    phase_updates = cast(int, adaptation["phase_updates"])
+    if adaptation["total_updates"] != warm_updates + lora_updates:
+        raise CheckpointError("checkpoint adaptation total_updates is inconsistent")
+    if phase_updates != (warm_updates if adaptation["phase"] == "warm_start" else lora_updates):
+        raise CheckpointError("checkpoint adaptation phase_updates is inconsistent")
+    transition_parent = adaptation["transition_parent"]
+    if adaptation["phase"] == "warm_start":
+        if lora_updates != 0 or transition_parent is not None:
+            raise CheckpointError("warm-start checkpoint has invalid transition identity")
+    elif not isinstance(transition_parent, str) or len(transition_parent) != 64:
+        raise CheckpointError("LoRA checkpoint transition parent is invalid")
+    optimizer_identity = adaptation["optimizer_identity"]
+    if not isinstance(optimizer_identity, str) or len(optimizer_identity) != 64:
+        raise CheckpointError("checkpoint optimizer identity is invalid")
+    return cast(dict[str, object], adaptation)

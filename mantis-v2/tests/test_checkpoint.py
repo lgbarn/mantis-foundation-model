@@ -8,7 +8,12 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
-from mantis_v2.checkpoint import CheckpointError, load_checkpoint, save_checkpoint
+from mantis_v2.checkpoint import (
+    CheckpointError,
+    checkpoint_adaptation_state,
+    load_checkpoint,
+    save_checkpoint,
+)
 from mantis_v2.provenance import FileIdentity, Provenance
 from torch import nn
 
@@ -103,6 +108,29 @@ def test_checkpoint_rejects_executable_pickle(tmp_path: Path) -> None:
     else:
         raise AssertionError("unsafe checkpoint was accepted")
     assert not marker.exists()
+
+
+def test_checkpoint_round_trips_and_binds_adaptation_state(tmp_path: Path) -> None:
+    model = nn.Linear(3, 2)
+    optimizer = torch.optim.AdamW(model.parameters())
+    state: dict[str, object] = {
+        "phase": "lora",
+        "phase_updates": 6,
+        "total_updates": 10,
+        "warm_start_updates": 4,
+        "lora_updates": 6,
+        "transition_parent": "a" * 64,
+        "optimizer_identity": "b" * 64,
+        "trainable_parameters": 8,
+        "frozen_parameters": 12,
+    }
+    path = tmp_path / "adaptation.pt"
+    save_checkpoint(path, model, optimizer, 3, 10, provenance(), state)
+
+    assert checkpoint_adaptation_state(path, provenance()) == state
+    assert load_checkpoint(path, model, optimizer, provenance(), state) == (4, 10)
+    with pytest.raises(CheckpointError, match="adaptation state mismatch"):
+        load_checkpoint(path, model, optimizer, provenance(), {**state, "total_updates": 11})
 
 
 def test_checkpoint_wraps_structurally_malformed_safe_payload(tmp_path: Path) -> None:

@@ -11,7 +11,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-
 from mantis_v2.config import load_config
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -239,7 +238,8 @@ case "${{1:-}} ${{2:-}}" in
     printf '%s\\n' '{{"id":"pod-123"}}'
     ;;
   "ssh info")
-    printf '%s\\n' '{{"id":"pod-123","ip":"127.0.0.1","port":2222,"ssh_command":"ssh root@127.0.0.1 -p 2222"}}'
+    printf '%s%s\\n' '{{"id":"pod-123","ip":"127.0.0.1","port":2222,' \
+      '"ssh_command":"ssh root@127.0.0.1 -p 2222"}}'
     ;;
   "pod delete")
     if [[ "${{DELETE_FAIL:-0}}" == 1 ]]; then exit 7; fi
@@ -299,8 +299,12 @@ if [[ "$destination" != root@* && "$*" == *"root@127.0.0.1:"* ]]; then
   weights_sha="$(shasum -a 256 "$destination/export/model.safetensors" | awk '{{print $1}}')"
   evaluation_sha="$(shasum -a 256 "$destination/export/evaluation.json" | awk '{{print $1}}')"
   checkpoint_sha="$(shasum -a 256 "$destination/checkpoints/best.pt" | awk '{{print $1}}')"
-  printf '{{"config":{{"run":{{"name":"mantis-smoke"}}}},"weights_sha256":"%s","validation_gate":{{"verified":true,"evaluation_sha256":"%s","checkpoint_sha256":"%s"}},"parity":{{"verified":true}}}}\\n' \
-    "$weights_sha" "$evaluation_sha" "$checkpoint_sha" > "$destination/export/manifest.json"
+  jq -n --arg weights "$weights_sha" --arg evaluation "$evaluation_sha" \
+    --arg checkpoint "$checkpoint_sha" \
+    '{{config:{{run:{{name:"mantis-smoke"}}}},weights_sha256:$weights,
+      validation_gate:{{verified:true,evaluation_sha256:$evaluation,
+      checkpoint_sha256:$checkpoint}},parity:{{verified:true}}}}' \
+    > "$destination/export/manifest.json"
   jq --slurpfile provenance "$destination/provenance.json" \
     '. + {{provenance: $provenance[0]}}' "$destination/export/manifest.json" \
     > "$destination/export/manifest.json.tmp"
@@ -310,7 +314,9 @@ if [[ "$destination" != root@* && "$*" == *"root@127.0.0.1:"* ]]; then
       "$destination/export/manifest.json" > "$destination/export/manifest.json.tmp"
     mv "$destination/export/manifest.json.tmp" "$destination/export/manifest.json"
   fi
-  if [[ "${{CORRUPT_ARTIFACT:-0}}" == 1 ]]; then printf 'corrupt' >> "$destination/export/model.safetensors"; fi
+  if [[ "${{CORRUPT_ARTIFACT:-0}}" == 1 ]]; then
+    printf 'corrupt' >> "$destination/export/model.safetensors"
+  fi
 fi
 """,
     )
@@ -1050,7 +1056,8 @@ case "${{1:-}} ${{2:-}}" in
       '"volumeMountPath":"/workspace","desiredStatus":"RUNNING","costPerHr":"1.5"}}'
     ;;
   "ssh info")
-    printf '%s\\n' '{{"id":"pod-123","ip":"127.0.0.1","port":2222,"ssh_command":"ssh root@127.0.0.1 -p 2222"}}'
+    printf '%s%s\\n' '{{"id":"pod-123","ip":"127.0.0.1","port":2222,' \
+      '"ssh_command":"ssh root@127.0.0.1 -p 2222"}}'
     ;;
   "pod delete") touch {deleted}; printf '%s\\n' '{{"id":"pod-123","deleted":true}}' ;;
   "pod list")

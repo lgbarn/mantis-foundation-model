@@ -17,7 +17,11 @@ import torch
 from safetensors.torch import load_file, save_file
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 
-from mantis_v2.checkpoint import load_checkpoint, save_checkpoint
+from mantis_v2.checkpoint import (
+    checkpoint_adaptation_state,
+    load_checkpoint,
+    save_checkpoint,
+)
 from mantis_v2.config import PipelineConfig
 from mantis_v2.data import (
     Anchor,
@@ -63,6 +67,7 @@ class _LoadedTrained:
     checkpoint_epoch: int
     global_step: int
     checkpoint_sha256: str
+    adaptation: dict[str, object] | None
 
 
 _PROVENANCE_IDENTITY_KEYS = (
@@ -233,16 +238,12 @@ def _stratified_validation_indices(anchors: list[Anchor], num_samples: int) -> l
 
 def _validation_state(history: list[dict[str, Any]]) -> tuple[float, int]:
     """Recover best validation loss and patience count from durable history."""
-    best = min(
-        (float(record["validation"]["total"]) for record in history),
-        default=float("inf"),
-    )
-    without_improvement = 0
-    for record in reversed(history):
-        if float(record["validation"]["total"]) <= best:
-            break
-        without_improvement += 1
-    return best, without_improvement
+    losses = [float(record["validation"]["total"]) for record in history]
+    if not losses:
+        return float("inf"), 0
+    best = min(losses)
+    first_best = losses.index(best)
+    return best, len(losses) - first_best - 1
 
 
 def _emit_training_event(
@@ -305,6 +306,46 @@ def _optimizer(model: NextLegModel, config: PipelineConfig) -> torch.optim.Optim
     )
 
 
+def _model_state_digest(model: NextLegModel) -> str:
+    digest = hashlib.sha256()
+    for name, tensor in sorted(model.state_dict().items()):
+        digest.update(name.encode())
+        digest.update(tensor.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
+
+
+def _optimizer_identity(model: NextLegModel, phase: str) -> str:
+    names = sorted(name for name, parameter in model.named_parameters() if parameter.requires_grad)
+    return hashlib.sha256(
+        json.dumps({"phase": phase, "parameters": names}, sort_keys=True).encode()
+    ).hexdigest()
+
+
+def _adaptation_state(
+    model: NextLegModel,
+    phase: str,
+    warm_start_updates: int,
+    lora_updates: int,
+    transition_parent: str | None,
+) -> dict[str, object]:
+    phase_updates = warm_start_updates if phase == "warm_start" else lora_updates
+    return {
+        "phase": phase,
+        "phase_updates": phase_updates,
+        "total_updates": warm_start_updates + lora_updates,
+        "warm_start_updates": warm_start_updates,
+        "lora_updates": lora_updates,
+        "transition_parent": transition_parent,
+        "optimizer_identity": _optimizer_identity(model, phase),
+        "trainable_parameters": sum(
+            parameter.numel() for parameter in model.parameters() if parameter.requires_grad
+        ),
+        "frozen_parameters": sum(
+            parameter.numel() for parameter in model.parameters() if not parameter.requires_grad
+        ),
+    }
+
+
 def _move(batch: dict[str, torch.Tensor], device: torch.device) -> dict[str, torch.Tensor]:
     return {key: value.to(device, non_blocking=True) for key, value in batch.items()}
 
@@ -328,7 +369,7 @@ def _run_epoch(
     batches = 0
     data_wait_seconds = 0.0
     epoch_started = time.perf_counter()
-    steps_per_epoch = max_steps or len(loader)
+    steps_per_epoch = config.training.max_steps_per_epoch or len(loader)
     context = torch.enable_grad() if training else torch.inference_mode()
     synchronize_device(device)
     with context:
@@ -509,23 +550,68 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
     _write_json(root / "provenance.json", provenance.to_dict())
     model = _model(config, device)
     optimizer = _optimizer(model, config)
+    bundled = config.adaptation is not None
+    phase = "warm_start" if bundled else "standard"
+    warm_start_updates = 0
+    lora_updates = 0
+    transition_parent: str | None = None
     checkpoint_path = root / "checkpoints" / "latest.pt"
     pending_checkpoint = checkpoint_path.with_name("pending.pt")
     start_epoch = 0
     global_step = 0
     resume_source: str | None = None
     history: list[dict[str, Any]] = []
+
+    def restore(path: Path) -> tuple[int, int, torch.optim.Optimizer]:
+        nonlocal phase, warm_start_updates, lora_updates, transition_parent
+        state = checkpoint_adaptation_state(path, provenance)
+        if bundled:
+            if state is None:
+                raise PipelineError("bundled checkpoint has no adaptation state")
+            phase = cast(str, state["phase"])
+            warm_start_updates = cast(int, state["warm_start_updates"])
+            lora_updates = cast(int, state["lora_updates"])
+            transition_parent = cast(str | None, state["transition_parent"])
+            model.set_adaptation_phase(phase)
+            if config.adaptation is None:
+                raise PipelineError("bundled checkpoint has no adaptation config")
+            if (
+                warm_start_updates > config.adaptation.warm_start_updates
+                or warm_start_updates + lora_updates > config.adaptation.total_updates
+            ):
+                raise PipelineError("checkpoint adaptation update budget exceeds config")
+            reconstructed = _adaptation_state(
+                model,
+                phase,
+                warm_start_updates,
+                lora_updates,
+                transition_parent,
+            )
+            if state != reconstructed:
+                raise PipelineError("checkpoint adaptation identity mismatch")
+        elif state is not None:
+            raise PipelineError("standard checkpoint contains adaptation state")
+        restored_optimizer = _optimizer(model, config)
+        next_epoch, restored_step = load_checkpoint(
+            path,
+            model,
+            restored_optimizer,
+            provenance,
+            state,
+        )
+        if bundled and restored_step != warm_start_updates + lora_updates:
+            raise PipelineError("checkpoint total update count is inconsistent")
+        return next_epoch, restored_step, restored_optimizer
+
     if config.training.resume and pending_checkpoint.is_file():
         resume_source = str(pending_checkpoint.resolve())
-        start_epoch, global_step = load_checkpoint(pending_checkpoint, model, optimizer, provenance)
+        start_epoch, global_step, optimizer = restore(pending_checkpoint)
         try:
             history = _load_history(root, start_epoch)
         except PipelineError:
             if checkpoint_path.is_file():
                 resume_source = str(checkpoint_path.resolve())
-                start_epoch, global_step = load_checkpoint(
-                    checkpoint_path, model, optimizer, provenance
-                )
+                start_epoch, global_step, optimizer = restore(checkpoint_path)
                 history = _load_history(root, start_epoch)
             elif not (root / "metrics.json").exists():
                 seed_everything(config.run.seed)
@@ -533,6 +619,10 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
                 optimizer = _optimizer(model, config)
                 start_epoch = 0
                 global_step = 0
+                phase = "warm_start" if bundled else "standard"
+                warm_start_updates = 0
+                lora_updates = 0
+                transition_parent = None
                 resume_source = None
             else:
                 raise
@@ -540,7 +630,7 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
             pending_checkpoint.replace(checkpoint_path)
     elif config.training.resume and checkpoint_path.is_file():
         resume_source = str(checkpoint_path.resolve())
-        start_epoch, global_step = load_checkpoint(checkpoint_path, model, optimizer, provenance)
+        start_epoch, global_step, optimizer = restore(checkpoint_path)
         history = _load_history(root, start_epoch)
     trainable_parameters = sum(
         parameter.numel() for parameter in model.parameters() if parameter.requires_grad
@@ -598,7 +688,12 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
             and historical_record["global_step"] > last_event_step
         ):
             _emit_training_event(instrumentation, historical_record, historical_telemetry)
-    best_validation, epochs_without_improvement = _validation_state(history)
+    selection_history = history
+    if bundled:
+        selection_history = [
+            record for record in history if record.get("adaptation", {}).get("phase") == phase
+        ]
+    best_validation, epochs_without_improvement = _validation_state(selection_history)
     stopped_early = bool(
         config.training.early_stopping_patience
         and epochs_without_improvement >= config.training.early_stopping_patience
@@ -607,10 +702,35 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
     if process_epoch_limit is not None:
         end_epoch = min(end_epoch, start_epoch + process_epoch_limit)
     for epoch in range(start_epoch, end_epoch):
+        if bundled and config.adaptation is not None:
+            if global_step >= config.adaptation.total_updates:
+                break
+            if phase == "warm_start" and (
+                warm_start_updates >= config.adaptation.warm_start_updates or stopped_early
+            ):
+                transition_parent = _model_state_digest(model)
+                phase = "lora"
+                model.set_adaptation_phase(phase)
+                optimizer = _optimizer(model, config)
+                best_validation = math.inf
+                epochs_without_improvement = 0
+                stopped_early = False
         if stopped_early:
             break
         train_loader = _loader(train_dataset, config, shuffle=True, epoch=epoch)
         validation_loader = _loader(validation_dataset, config, shuffle=False, epoch=epoch)
+        max_steps = config.training.max_steps_per_epoch
+        completed_steps = global_step
+        if bundled and config.adaptation is not None:
+            configured_steps = max_steps or len(train_loader)
+            total_remaining = config.adaptation.total_updates - global_step
+            phase_remaining = (
+                config.adaptation.warm_start_updates - warm_start_updates
+                if phase == "warm_start"
+                else total_remaining
+            )
+            max_steps = min(configured_steps, total_remaining, phase_remaining)
+            completed_steps = warm_start_updates if phase == "warm_start" else lora_updates
         train_telemetry: dict[str, float] = {}
         validation_telemetry: dict[str, float] = {}
         train_metrics, steps = _run_epoch(
@@ -619,8 +739,8 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
             config,
             device,
             optimizer,
-            config.training.max_steps_per_epoch,
-            completed_steps=global_step,
+            max_steps,
+            completed_steps=completed_steps,
             telemetry=train_telemetry,
         )
         validation_metrics, _ = _run_epoch(
@@ -633,6 +753,11 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
             telemetry=validation_telemetry,
         )
         global_step += steps
+        if bundled:
+            if phase == "warm_start":
+                warm_start_updates += steps
+            else:
+                lora_updates += steps
         learning_rate = float(optimizer.param_groups[0]["lr"])
         improved = validation_metrics["total"] < best_validation
         if improved:
@@ -647,6 +772,19 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
             "train": train_metrics,
             "validation": validation_metrics,
         }
+        current_adaptation = (
+            _adaptation_state(
+                model,
+                phase,
+                warm_start_updates,
+                lora_updates,
+                transition_parent,
+            )
+            if bundled
+            else None
+        )
+        if current_adaptation is not None:
+            record["adaptation"] = current_adaptation
         stopped_early = bool(
             config.training.early_stopping_patience
             and epochs_without_improvement >= config.training.early_stopping_patience
@@ -657,6 +795,17 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
             or epoch + 1 == config.training.epochs
             or stopped_early
             or process_stop
+            or (
+                bundled
+                and config.adaptation is not None
+                and global_step >= config.adaptation.total_updates
+            )
+            or (
+                bundled
+                and config.adaptation is not None
+                and phase == "warm_start"
+                and warm_start_updates >= config.adaptation.warm_start_updates
+            )
         )
         checkpoint_started = time.perf_counter()
         synchronize_device(device)
@@ -668,9 +817,18 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
                 epoch,
                 global_step,
                 provenance,
+                current_adaptation,
             )
         if checkpoint_due:
-            save_checkpoint(pending_checkpoint, model, optimizer, epoch, global_step, provenance)
+            save_checkpoint(
+                pending_checkpoint,
+                model,
+                optimizer,
+                epoch,
+                global_step,
+                provenance,
+                current_adaptation,
+            )
         synchronize_device(device)
         checkpoint_duration_seconds = time.perf_counter() - checkpoint_started
         checkpoint_size_path = (
@@ -704,6 +862,22 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
         _emit_training_event(instrumentation, record, telemetry_record)
     _write_json(root / "provenance.json", provenance.to_dict())
     _write_json(root / "contamination.json", contamination)
+    final_adaptation = (
+        _adaptation_state(
+            model,
+            phase,
+            warm_start_updates,
+            lora_updates,
+            transition_parent,
+        )
+        if bundled
+        else None
+    )
+    if final_adaptation is not None:
+        metadata["adaptation"] = final_adaptation
+        metadata["trainable_parameters"] = final_adaptation["trainable_parameters"]
+        metadata["frozen_parameters"] = final_adaptation["frozen_parameters"]
+        _write_json(root / "run-metadata.json", metadata)
     result = {
         "device": str(device),
         "train_anchors": len(train_dataset),
@@ -716,6 +890,8 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
         "telemetry": telemetry_history[-1] if telemetry_history else None,
         "metadata": metadata,
         "precision": config.training.precision,
+        "adaptation": final_adaptation,
+        "provenance": provenance.to_dict(),
     }
     _write_json(root / "train-result.json", result)
     instrumentation.close()
@@ -753,7 +929,21 @@ def _load_trained(
             for block in iter(lambda: source.read(4 * 1024 * 1024), b""):
                 digest.update(block)
                 snapshot.write(block)
-        next_epoch, global_step = load_checkpoint(snapshot_path, model, optimizer, provenance)
+        adaptation = checkpoint_adaptation_state(snapshot_path, provenance)
+        if config.adaptation is not None:
+            if adaptation is None or adaptation.get("phase") != "lora":
+                raise PipelineError("validated export requires a completed LoRA-phase checkpoint")
+            model.set_adaptation_phase("lora")
+            optimizer = _optimizer(model, config)
+        elif adaptation is not None:
+            raise PipelineError("standard checkpoint contains adaptation state")
+        next_epoch, global_step = load_checkpoint(
+            snapshot_path,
+            model,
+            optimizer,
+            provenance,
+            adaptation,
+        )
     finally:
         if snapshot_path is not None:
             snapshot_path.unlink(missing_ok=True)
@@ -766,6 +956,7 @@ def _load_trained(
         checkpoint_epoch=next_epoch - 1,
         global_step=global_step,
         checkpoint_sha256=digest.hexdigest(),
+        adaptation=adaptation,
     )
 
 
@@ -805,6 +996,7 @@ def _evaluate_loaded(config: PipelineConfig, loaded: _LoadedTrained) -> dict[str
         "provenance": loaded.provenance.to_dict(),
         "config_digest": loaded.provenance.config_digest,
         "dataset_digest": loaded.provenance.dataset_digest,
+        "adaptation": loaded.adaptation,
     }
     _write_json(artifact_root(config) / "evaluation.json", result)
     return result
@@ -864,12 +1056,20 @@ def _validated_evaluation(
                 f"evaluation provenance mismatch: {key}; run evaluate before export"
             )
 
+    if evaluation.get("adaptation") != loaded.adaptation:
+        raise PipelineError("evaluation adaptation state mismatch; run evaluate again")
+
     metrics_path = root / "metrics.json"
     try:
         history = json.loads(metrics_path.read_text())
         selected = history[loaded.checkpoint_epoch]
+        eligible_epochs = [
+            epoch
+            for epoch, record in enumerate(history)
+            if config.adaptation is None or record.get("adaptation", {}).get("phase") == "lora"
+        ]
         best_epoch = min(
-            range(len(history)),
+            eligible_epochs,
             key=lambda epoch: float(history[epoch]["validation"]["total"]),
         )
     except (
@@ -971,6 +1171,7 @@ def _export_loaded(config: PipelineConfig, loaded: _LoadedTrained) -> dict[str, 
         "weights_sha256": sha256_file(weights_path),
         "config": asdict(config),
         "provenance": loaded.provenance.to_dict(),
+        "adaptation": loaded.adaptation,
         "validation_gate": {
             "verified": True,
             "evaluation": str(bundled_evaluation_path),

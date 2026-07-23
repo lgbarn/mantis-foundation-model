@@ -120,6 +120,10 @@ class MantisV2Adapter(nn.Module):
                 module.lora_A.requires_grad = True
                 module.lora_B.requires_grad = True
 
+    def freeze_all(self) -> None:
+        for parameter in self.backbone.parameters():
+            parameter.requires_grad = False
+
 
 class NextLegModel(nn.Module):
     """MantisV2 encoder with candle and two-leg prediction heads."""
@@ -158,11 +162,27 @@ class NextLegModel(nn.Module):
                 parameter.requires_grad = False
         elif self.mode == "transformer_finetune":
             self.encoder.freeze_outside_transformer()
+        elif self.mode == "lora_r8_alpha16_head_warmstart":
+            self.set_adaptation_phase("warm_start")
         elif self.mode.startswith("lora_"):
             self.encoder.freeze_for_lora()
         if self.mode != "adapter_head":
             for parameter in self.adapter.parameters():
                 parameter.requires_grad = False
+
+    def set_adaptation_phase(self, phase: str) -> None:
+        if self.mode != "lora_r8_alpha16_head_warmstart":
+            raise ModelContractError("adaptation phases require bundled LoRA mode")
+        if phase not in {"warm_start", "lora"}:
+            raise ModelContractError(f"unsupported adaptation phase: {phase}")
+        for parameter in self.parameters():
+            parameter.requires_grad = False
+        if phase == "lora":
+            self.encoder.freeze_for_lora()
+        for parameter in self.candle_head.parameters():
+            parameter.requires_grad = True
+        for parameter in self.leg_head.parameters():
+            parameter.requires_grad = True
 
     def forward(self, context: torch.Tensor) -> NextLegOutput:
         embedding = self.encoder(context)

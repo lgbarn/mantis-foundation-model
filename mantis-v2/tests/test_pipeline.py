@@ -10,7 +10,7 @@ import pytest
 import torch
 from mantis_v2 import instrumentation as instrumentation_module
 from mantis_v2 import pipeline as pipeline_module
-from mantis_v2.config import load_config
+from mantis_v2.config import AdaptationConfig, load_config
 from mantis_v2.data import Anchor
 from mantis_v2.pipeline import (
     PipelineError,
@@ -32,6 +32,23 @@ from torch.utils.data import DataLoader, Dataset
 ROOT = Path(__file__).resolve().parents[1]
 
 
+class FakeBundledModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.base = torch.nn.Parameter(torch.ones(1), requires_grad=False)
+        self.lora = torch.nn.Parameter(torch.zeros(1), requires_grad=False)
+        self.candle_head = torch.nn.Linear(1, 1)
+        self.leg_head = torch.nn.Linear(1, 1)
+        self.phase = "warm_start"
+
+    def set_adaptation_phase(self, phase: str) -> None:
+        self.phase = phase
+        self.base.requires_grad = False
+        self.lora.requires_grad = phase == "lora"
+        for parameter in (*self.candle_head.parameters(), *self.leg_head.parameters()):
+            parameter.requires_grad = True
+
+
 def test_stream_group_metrics_are_equal_weight_macros_not_row_weighted() -> None:
     metrics = {
         "ES_3min": {"total": 1.0, "candle": 0.4, "leg": 0.6},
@@ -41,6 +58,15 @@ def test_stream_group_metrics_are_equal_weight_macros_not_row_weighted() -> None
     result = _stream_macro_metrics(metrics, ["ES_3min", "NQ_3min"])
 
     assert result == pytest.approx({"total": 2.0, "candle": 0.9, "leg": 1.1})
+
+
+def test_validation_state_counts_tied_best_as_non_improvement() -> None:
+    history = [
+        {"validation": {"total": 2.0}},
+        {"validation": {"total": 1.0}},
+        {"validation": {"total": 1.0}},
+    ]
+    assert _validation_state(history) == (1.0, 1)
 
 
 class IndexDataset(Dataset[dict[str, torch.Tensor]]):
@@ -748,3 +774,136 @@ def test_interrupted_resume_matches_uninterrupted_training(
         json.loads(parsed_events["text"]["run/metadata/text_summary"][-1]["value"])["resume_source"]
         == expected_resume_source
     )
+
+
+@pytest.mark.parametrize(
+    ("partial_epochs", "partial_phase", "partial_updates"),
+    [(1, "warm_start", 3), (3, "lora", 7)],
+)
+def test_bundled_adaptation_resumes_across_transition_and_obeys_total_ceiling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    partial_epochs: int,
+    partial_phase: str,
+    partial_updates: int,
+) -> None:
+    base = load_config(ROOT / "configs" / "smoke.toml")
+    common = replace(
+        base,
+        model=replace(base.model, mode="lora_r8_alpha16_head_warmstart"),
+        training=replace(
+            base.training,
+            epochs=10,
+            max_steps_per_epoch=3,
+            checkpoint_every=1,
+            resume=True,
+            early_stopping_patience=0,
+        ),
+        adaptation=AdaptationConfig(
+            warm_start_updates=4,
+            total_updates=10,
+            lora_rank=8,
+            lora_alpha=16,
+        ),
+    )
+
+    def fake_model(*_: object, **__: object) -> FakeBundledModel:
+        return FakeBundledModel()
+
+    def controlled_epoch(
+        model: torch.nn.Module,
+        loader: object,
+        config: Any,
+        device: object,
+        optimizer: torch.optim.Optimizer | None,
+        max_steps: int,
+        *,
+        completed_steps: int = 0,
+        telemetry: dict[str, float] | None = None,
+    ) -> tuple[dict[str, float], int]:
+        del loader, device
+        if optimizer is not None:
+            steps_per_epoch = config.training.max_steps_per_epoch
+            for offset in range(max_steps):
+                learning_rate = config.training.learning_rate_for_step(
+                    completed_steps + offset + 1,
+                    steps_per_epoch,
+                )
+                for group in optimizer.param_groups:
+                    group["lr"] = learning_rate
+                optimizer.zero_grad(set_to_none=True)
+                loss = sum(
+                    (parameter - 1.0).square().sum()
+                    for parameter in model.parameters()
+                    if parameter.requires_grad
+                )
+                loss.backward()
+                optimizer.step()
+        if telemetry is not None:
+            telemetry.update(
+                gradient_norm=0.0,
+                examples_per_second=1.0,
+                updates_per_second=1.0,
+                data_wait_seconds=0.0,
+                duration_seconds=1.0,
+            )
+        return {"total": 1.0, "candle": 0.5, "leg": 0.5}, max_steps if optimizer else 1
+
+    monkeypatch.setattr(pipeline_module, "_model", fake_model)
+    monkeypatch.setattr(pipeline_module, "_run_epoch", controlled_epoch)
+    interrupted = replace(
+        common,
+        run=replace(
+            common.run,
+            name=f"bundled-resume-{partial_epochs}",
+            artifact_root=tmp_path,
+        ),
+    )
+    partial = train(interrupted, process_epoch_limit=partial_epochs)
+    assert partial["adaptation"]["phase"] == partial_phase
+    assert partial["adaptation"]["total_updates"] == partial_updates
+    resumed = train(interrupted)
+
+    uninterrupted = replace(
+        interrupted,
+        run=replace(interrupted.run, name=f"bundled-uninterrupted-{partial_epochs}"),
+    )
+    complete = train(uninterrupted)
+    assert resumed["adaptation"] == complete["adaptation"]
+    assert resumed["provenance"]["config_digest"] == interrupted.digest
+    assert complete["provenance"]["config_digest"] == uninterrupted.digest
+    assert {
+        key: value for key, value in resumed["provenance"].items() if key != "config_digest"
+    } == {key: value for key, value in complete["provenance"].items() if key != "config_digest"}
+    assert complete["adaptation"]["phase"] == "lora"
+    assert complete["adaptation"]["warm_start_updates"] == 4
+    assert complete["adaptation"]["lora_updates"] == 6
+    assert complete["adaptation"]["total_updates"] == 10
+    resumed_history = json.loads(
+        (tmp_path / f"bundled-resume-{partial_epochs}" / "metrics.json").read_text()
+    )
+    complete_history = json.loads(
+        (tmp_path / f"bundled-uninterrupted-{partial_epochs}" / "metrics.json").read_text()
+    )
+    assert resumed_history == complete_history
+    assert [record["adaptation"]["phase"] for record in complete_history] == [
+        "warm_start",
+        "warm_start",
+        "lora",
+        "lora",
+    ]
+    resumed_checkpoint = torch.load(resumed["checkpoint"], map_location="cpu", weights_only=True)
+    complete_checkpoint = torch.load(complete["checkpoint"], map_location="cpu", weights_only=True)
+    for name, tensor in resumed_checkpoint["model"].items():
+        torch.testing.assert_close(tensor, complete_checkpoint["model"][name], rtol=0, atol=0)
+    assert (
+        resumed_checkpoint["optimizer"]["param_groups"]
+        == complete_checkpoint["optimizer"]["param_groups"]
+    )
+    for key, state in resumed_checkpoint["optimizer"]["state"].items():
+        for name, value in state.items():
+            expected = complete_checkpoint["optimizer"]["state"][key][name]
+            if isinstance(value, torch.Tensor):
+                torch.testing.assert_close(value, expected, rtol=0, atol=0)
+            else:
+                assert value == expected

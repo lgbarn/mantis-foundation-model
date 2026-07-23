@@ -26,6 +26,7 @@ ModelMode = Literal[
     "full_finetune",
     "lora_r8_alpha16",
     "lora_r16_alpha32",
+    "lora_r8_alpha16_head_warmstart",
 ]
 
 
@@ -104,6 +105,14 @@ class TrainingConfig:
 
 
 @dataclass(frozen=True)
+class AdaptationConfig:
+    warm_start_updates: int
+    total_updates: int
+    lora_rank: int
+    lora_alpha: int
+
+
+@dataclass(frozen=True)
 class TargetConfig:
     kind: Literal["nextleg"]
     horizons: tuple[int, ...]
@@ -134,6 +143,7 @@ class PipelineConfig:
     data: DataConfig
     model: ModelConfig
     training: TrainingConfig
+    adaptation: AdaptationConfig | None
     target: TargetConfig
     evaluation: EvaluationConfig
     export: ExportConfig
@@ -230,6 +240,7 @@ def load_config(path: str | Path) -> PipelineConfig:
         "target",
         "evaluation",
         "export",
+        "adaptation",
     }
     unknown_sections = set(raw) - expected_sections
     if unknown_sections:
@@ -324,8 +335,33 @@ def load_config(path: str | Path) -> PipelineConfig:
             "full_finetune",
             "lora_r8_alpha16",
             "lora_r16_alpha32",
+            "lora_r8_alpha16_head_warmstart",
         },
     )
+    adaptation: AdaptationConfig | None = None
+    adaptation_raw = raw.get("adaptation")
+    if mode == "lora_r8_alpha16_head_warmstart":
+        adaptation_values = _section(
+            raw,
+            "adaptation",
+            {"warm_start_updates", "total_updates", "lora_rank", "lora_alpha"},
+        )
+        warm_start_updates = _positive(
+            adaptation_values["warm_start_updates"], "adaptation.warm_start_updates"
+        )
+        total_updates = _positive(adaptation_values["total_updates"], "adaptation.total_updates")
+        if warm_start_updates >= total_updates:
+            raise ConfigError("adaptation.warm_start_updates must be less than total_updates")
+        if adaptation_values["lora_rank"] != 8 or adaptation_values["lora_alpha"] != 16:
+            raise ConfigError("bundled adaptation fixes lora_rank=8 and lora_alpha=16")
+        adaptation = AdaptationConfig(
+            warm_start_updates=warm_start_updates,
+            total_updates=total_updates,
+            lora_rank=8,
+            lora_alpha=16,
+        )
+    elif adaptation_raw is not None:
+        raise ConfigError("[adaptation] requires model.mode lora_r8_alpha16_head_warmstart")
     validation_fraction = _number(data["validation_fraction"], "data.validation_fraction")
     if not 0.0 < validation_fraction < 1.0:
         raise ConfigError("data.validation_fraction must be between 0 and 1")
@@ -409,6 +445,7 @@ def load_config(path: str | Path) -> PipelineConfig:
                 allow_zero=True,
             ),
         ),
+        adaptation=adaptation,
         target=TargetConfig(
             kind=_choice(target["kind"], "target.kind", {"nextleg"}),  # type: ignore[arg-type]
             horizons=_tuple_of(target["horizons"], int, "target.horizons"),
