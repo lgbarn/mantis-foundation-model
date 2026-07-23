@@ -203,6 +203,15 @@ def _success_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
     call_log = tmp_path / "calls.log"
     deleted = tmp_path / "deleted"
     created = tmp_path / "created"
+    identity = _receipt(tmp_path / "runtime.json")
+    provenance = json.dumps(
+        {
+            "source_revision": identity["source_revision"],
+            "source_dirty": False,
+            "config_digest": identity["config_digest"],
+            "lock_digest": identity["lock_sha256"],
+        }
+    )
     catalog = json.dumps(
         {
             "gpus": [
@@ -276,6 +285,12 @@ if [[ "$destination" != root@* && "$*" == *"root@127.0.0.1:"* ]]; then
   cp "$destination/evaluation.json" "$destination/export/evaluation.json"
   printf 'weights' > "$destination/export/model.safetensors"
   printf 'checkpoint' > "$destination/checkpoints/best.pt"
+  printf '%s\n' '{provenance}' > "$destination/provenance.json"
+  if [[ "${{STALE_PROVENANCE:-0}}" == 1 ]]; then
+    jq '.source_revision = "0000000000000000000000000000000000000000"' \
+      "$destination/provenance.json" > "$destination/provenance.json.tmp"
+    mv "$destination/provenance.json.tmp" "$destination/provenance.json"
+  fi
   weights_sha="$(shasum -a 256 "$destination/export/model.safetensors" | awk '{{print $1}}')"
   evaluation_sha="$(shasum -a 256 "$destination/export/evaluation.json" | awk '{{print $1}}')"
   checkpoint_sha="$(shasum -a 256 "$destination/checkpoints/best.pt" | awk '{{print $1}}')"
@@ -412,6 +427,7 @@ def test_train_runs_and_always_deletes_exact_pod(tmp_path: Path) -> None:
     assert "cloud=SECURE" in calls
     assert f"--terminate-after={receipt['termination_deadline']}" in calls
     assert "--from0 --files-from=-" in calls
+    assert "--delete --checksum --partial" in calls
     assert f"{tmp_path / 'source'}/.git/ root@127.0.0.1:/workspace/mantis/repo/.git/" in calls
     assert "nvidia-smi --query-gpu=memory.total" in calls
     assert "git status --porcelain" in calls
@@ -425,6 +441,67 @@ def test_train_runs_and_always_deletes_exact_pod(tmp_path: Path) -> None:
     assert "runpodctl pod list --all --output=json" in calls
     assert calls.index("runpodctl pod create") < calls.index("runpodctl pod delete pod-123")
     assert (tmp_path / "artifacts" / "train-result.json").is_file()
+
+
+def test_train_uses_immutable_runtime_snapshot_after_catalog(tmp_path: Path) -> None:
+    experiment = _experiment(tmp_path)
+    runtime = _runtime(tmp_path)
+    env, call_log = _success_environment(tmp_path)
+    catalog = json.dumps(
+        {
+            "gpus": [
+                {
+                    "id": "NVIDIA A100 80GB PCIe",
+                    "memory": 80,
+                    "price": {"secure": 1.5, "community": 1.0},
+                    "availability": "HIGH",
+                }
+            ]
+        }
+    )
+    _write_executable(
+        tmp_path / "bin" / "curl",
+        f"""
+printf 'curl %s\\n' "$*" >> {call_log}
+jq '.gpu.count = 2 | .gpu.max_hourly_price_usd = 99' {runtime} > {runtime}.tmp
+mv {runtime}.tmp {runtime}
+printf '%s' '{catalog}'
+""",
+    )
+
+    completed = subprocess.run(
+        ["just", "runpod-train", str(experiment), str(runtime)],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    calls = call_log.read_text()
+    assert "count=1" in calls
+    assert "count=2" not in calls
+
+
+def test_train_rejects_complete_artifacts_from_different_provenance(tmp_path: Path) -> None:
+    experiment = _experiment(tmp_path)
+    runtime = _runtime(tmp_path)
+    env, call_log = _success_environment(tmp_path)
+    env["STALE_PROVENANCE"] = "1"
+
+    completed = subprocess.run(
+        ["just", "runpod-train", str(experiment), str(runtime)],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "artifact_provenance_mismatch" in completed.stderr
+    assert "runpodctl pod delete pod-123" in call_log.read_text()
 
 
 def test_recover_never_creates_and_deletes_receipted_pod(tmp_path: Path) -> None:
@@ -1277,6 +1354,7 @@ def test_recover_ambiguous_create_reconciles_by_unique_name_without_create(
 
 
 def test_recover_ambiguous_known_pod_already_absent_is_success(tmp_path: Path) -> None:
+    experiment = _experiment(tmp_path)
     runtime = _runtime(tmp_path)
     env, call_log = _success_environment(tmp_path)
     receipt = tmp_path / "ambiguous.json"
@@ -1309,6 +1387,20 @@ def test_recover_ambiguous_known_pod_already_absent_is_success(tmp_path: Path) -
     assert "pod create" not in calls
     assert "runpodctl pod get pod-123" not in calls
     assert "runpodctl pod delete pod-123" not in calls
+    assert not receipt.exists()
+    assert (tmp_path / "ambiguous-resolved.json").is_file()
+
+    retried = subprocess.run(
+        ["just", "runpod-train", str(experiment), str(runtime)],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert retried.returncode == 0, retried.stderr
+    assert call_log.read_text().count("runpodctl pod create") == 1
 
 
 def test_train_rejects_corrupted_download_and_preserves_staging(tmp_path: Path) -> None:

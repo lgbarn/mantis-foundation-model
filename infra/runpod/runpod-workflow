@@ -222,6 +222,7 @@ RUNPOD_POD_ID=""
 RUNPOD_API_KEY_VALUE=""
 RUNPOD_TERMINATION_DEADLINE=""
 RUNPOD_LOCK_DIR=""
+RUNPOD_SNAPSHOT_DIR=""
 
 acquire_run_lock() {
   local config="$1" run_id receipt_root
@@ -311,6 +312,10 @@ cleanup_pod() {
     rm -f "$RUNPOD_LOCK_DIR/pid"
     rmdir "$RUNPOD_LOCK_DIR" 2>/dev/null || true
   fi
+  if [[ -n "$RUNPOD_SNAPSHOT_DIR" ]]; then
+    rm -f "$RUNPOD_SNAPSHOT_DIR/runtime.json" "$RUNPOD_SNAPSHOT_DIR/experiment.toml"
+    rmdir "$RUNPOD_SNAPSHOT_DIR" 2>/dev/null || true
+  fi
   exit "$original_status"
 }
 
@@ -357,13 +362,15 @@ wait_for_ssh() {
 }
 
 verify_pulled_artifacts() {
-  local root="$1" run_id="$2" expected actual
+  local root="$1" run_id="$2" expected_source_revision="$3"
+  local expected_config_digest="$4" expected_lock_digest="$5" expected actual
   require_file "$root/train-result.json"
   require_file "$root/evaluation.json"
   require_file "$root/export/evaluation.json"
   require_file "$root/export/manifest.json"
   require_file "$root/export/model.safetensors"
   require_file "$root/checkpoints/best.pt"
+  require_file "$root/provenance.json"
   jq -e '.device == "cuda" and (.epochs_completed | type == "number" and . > 0)' \
     "$root/train-result.json" >/dev/null 2>&1 || die "train_result_invalid"
   jq -e '.passed == true' "$root/evaluation.json" >/dev/null 2>&1 ||
@@ -376,6 +383,15 @@ verify_pulled_artifacts() {
     (.validation_gate.evaluation_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
     (.validation_gate.checkpoint_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
   ' "$root/export/manifest.json" >/dev/null 2>&1 || die "export_manifest_invalid"
+  jq -e \
+    --arg source_revision "$expected_source_revision" \
+    --arg config_digest "$expected_config_digest" \
+    --arg lock_digest "$expected_lock_digest" '
+      .source_revision == $source_revision and
+      .source_dirty == false and
+      .config_digest == $config_digest and
+      .lock_digest == $lock_digest
+    ' "$root/provenance.json" >/dev/null 2>&1 || die "artifact_provenance_mismatch"
 
   expected="$(jq -r '.weights_sha256' "$root/export/manifest.json")"
   actual="$(sha256_file "$root/export/model.safetensors")"
@@ -468,13 +484,14 @@ retrieve_verified_artifacts() {
   mkdir -p "$parent"
   staging="$parent/.${run_id}.download"
   mkdir -p "$staging"
-  rsync -az --checksum --partial --partial-dir=.rsync-partial -e "$rsync_ssh" \
+  rsync -az --delete --checksum --partial --partial-dir=.rsync-partial -e "$rsync_ssh" \
     "$ssh_target:$remote_root/" "$staging/"
   if [[ "$purpose" == "recovery" && ! -f "$staging/train-result.json" ]]; then
     verify_recovered_checkpoint "$staging" "$expected_source_revision" \
       "$expected_config_digest" "$expected_lock_digest"
   else
-    verify_pulled_artifacts "$staging" "$run_id"
+    verify_pulled_artifacts "$staging" "$run_id" "$expected_source_revision" \
+      "$expected_config_digest" "$expected_lock_digest"
   fi
   mv "$staging" "$local_root"
 }
@@ -484,6 +501,11 @@ run_train() {
   validate_runtime_config "$config"
   validate_train_prerequisites "$config"
   validate_experiment_binding "$experiment" "$config"
+  RUNPOD_SNAPSHOT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mantis-runpod.XXXXXX")"
+  cp "$config" "$RUNPOD_SNAPSHOT_DIR/runtime.json"
+  cp "$experiment" "$RUNPOD_SNAPSHOT_DIR/experiment.toml"
+  config="$RUNPOD_SNAPSHOT_DIR/runtime.json"
+  experiment="$RUNPOD_SNAPSHOT_DIR/experiment.toml"
   local catalog cli_version api_key_name config_digest lock_sha256 source_revision source_root
   source_root="$(jq -r '.paths.source_root' "$config")"
   config_digest="$(${UV:-uv} run --no-sync python -c \
@@ -494,9 +516,9 @@ run_train() {
   api_key_name="$(jq -r '.api_key_env' "$config")"
   RUNPOD_API_KEY_VALUE="${!api_key_name}"
   RUNPOD_CONFIG="$config"
-  acquire_run_lock "$config"
   trap cleanup_pod EXIT
   trap 'exit 130' INT TERM
+  acquire_run_lock "$config"
   [[ ! -e "$(jq -r '.paths.local_artifact_root' "$config")" ]] ||
     die "local_artifact_root_exists:$(jq -r '.paths.local_artifact_root' "$config")"
   cli_version="$(runpodctl_identity "$config")"
@@ -653,7 +675,8 @@ run_train() {
     "$ssh_target" \
     "set -euo pipefail; command -v nvidia-smi >/dev/null; command -v python3 >/dev/null; command -v uv >/dev/null; test \"\$(nvidia-smi -L | wc -l | tr -d ' ')\" -eq $gpu_count; nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | awk -v minimum=$minimum_gpu_memory_mb '\$1 + 0 < minimum {exit 1}'; test \"\$(df -Pk / | awk 'NR==2 {print \$4}')\" -ge $minimum_free_kb; test -d $volume_mount_q; test -w $volume_mount_q; test \"\$(df -Pk $volume_mount_q | awk 'NR==2 {print \$4}')\" -ge $minimum_free_kb; test -f $remote_manifest_q; test \"\$(sha256sum $remote_manifest_q | awk '{print \$1}')\" = $corpus_sha_q; cd $remote_repo_q; test \"\$(git rev-parse HEAD)\" = $source_revision_q; test -z \"\$(git status --porcelain)\"; uv sync --frozen; just inspect-data $remote_experiment_q; uv run python -c 'import torch; assert torch.cuda.is_available(); assert torch.cuda.device_count() == $gpu_count; torch.zeros(1, device=\"cuda\")'; just train $remote_experiment_q; just validated-export $remote_experiment_q"
 
-  retrieve_verified_artifacts "$config" "$ssh_target" "$rsync_ssh"
+  retrieve_verified_artifacts "$config" "$ssh_target" "$rsync_ssh" complete \
+    "$source_revision" "$config_digest" "$lock_sha256"
 }
 
 validate_receipt() {
@@ -723,7 +746,7 @@ validate_ambiguous_evidence() {
 }
 
 recover_ambiguous_create() {
-  local evidence="$1" config="$2" pod_id status observation
+  local evidence="$1" config="$2" pod_id status observation resolved
   validate_ambiguous_evidence "$evidence" "$config"
   pod_id="$(jq -r '.pod_id' "$evidence")"
   if [[ ! "$pod_id" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$ ]]; then
@@ -733,7 +756,13 @@ recover_ambiguous_create() {
     set -e
     case "$status" in
       0) ;;
-      1) printf 'ambiguous_create_resolved_absent\n'; return 0 ;;
+      1)
+        resolved="${evidence%.json}-resolved.json"
+        [[ ! -e "$resolved" ]] || die "ambiguous_resolution_exists:$resolved"
+        mv "$evidence" "$resolved"
+        printf 'ambiguous_create_resolved_absent\n'
+        return 0
+        ;;
       2) die "ambiguous_create_multiple_matches" ;;
       *) die "ambiguous_create_inventory_invalid" ;;
     esac
@@ -743,7 +772,13 @@ recover_ambiguous_create() {
     status=$?
     set -e
     case "$status" in
-      0) printf 'ambiguous_create_resolved_absent\n'; return 0 ;;
+      0)
+        resolved="${evidence%.json}-resolved.json"
+        [[ ! -e "$resolved" ]] || die "ambiguous_resolution_exists:$resolved"
+        mv "$evidence" "$resolved"
+        printf 'ambiguous_create_resolved_absent\n'
+        return 0
+        ;;
       1) die "ambiguous_create_inventory_invalid" ;;
       2) ;;
     esac
