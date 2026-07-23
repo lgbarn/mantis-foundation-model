@@ -518,14 +518,17 @@ retrieve_verified_artifacts() {
 
 run_train() {
   local experiment="$1" config="$2"
-  validate_runtime_config "$config"
-  validate_train_prerequisites "$config"
-  validate_experiment_binding "$experiment" "$config"
   RUNPOD_SNAPSHOT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mantis-runpod.XXXXXX")"
+  trap cleanup_pod EXIT
+  trap 'exit 130' INT TERM
   cp "$config" "$RUNPOD_SNAPSHOT_DIR/runtime.json"
   cp "$experiment" "$RUNPOD_SNAPSHOT_DIR/experiment.toml"
   config="$RUNPOD_SNAPSHOT_DIR/runtime.json"
   experiment="$RUNPOD_SNAPSHOT_DIR/experiment.toml"
+  RUNPOD_CONFIG="$config"
+  validate_runtime_config "$config"
+  validate_train_prerequisites "$config"
+  validate_experiment_binding "$experiment" "$config"
   local catalog cli_version api_key_name config_digest lock_sha256 source_revision source_root
   source_root="$(jq -r '.paths.source_root' "$config")"
   config_digest="$(${UV:-uv} run --no-sync python -c \
@@ -535,9 +538,6 @@ run_train() {
   lock_sha256="$(sha256_file "$source_root/uv.lock")"
   api_key_name="$(jq -r '.api_key_env' "$config")"
   RUNPOD_API_KEY_VALUE="${!api_key_name}"
-  RUNPOD_CONFIG="$config"
-  trap cleanup_pod EXIT
-  trap 'exit 130' INT TERM
   acquire_run_lock "$config"
   [[ ! -e "$(jq -r '.paths.local_artifact_root' "$config")" ]] ||
     die "local_artifact_root_exists:$(jq -r '.paths.local_artifact_root' "$config")"
