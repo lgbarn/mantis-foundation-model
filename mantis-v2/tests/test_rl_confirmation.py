@@ -174,6 +174,11 @@ def test_paired_effects_preserve_fold_identity_for_repeated_calendar_weeks() -> 
         ((("2025-W01", "2025-W01"),), 1, "strictly ordered"),
         ((("2025-W02", "2025-W01"),), 1, "strictly ordered"),
         ((("2025-W01", "2025-W03"),), 2, "insufficient adjacent source blocks"),
+        (
+            ((*(f"2025-W{week:02d}" for week in range(1, 19)), "2025-W20", "2025-W22"),),
+            2,
+            "does not cover every source week",
+        ),
         ((("not-a-week", "2025-W02"),), 1, "ISO week"),
     ],
 )

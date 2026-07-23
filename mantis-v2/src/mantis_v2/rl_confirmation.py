@@ -1196,6 +1196,9 @@ def _adjacent_week_blocks(
                 blocks.append(list(range(offset + start, offset + start + block_length_weeks)))
         if len(blocks) == prior_block_count:
             raise ConfirmationError("moving-block fold has insufficient adjacent source blocks")
+        covered = {index for block in blocks[prior_block_count:] for index in block}
+        if covered != set(range(offset, offset + len(weeks))):
+            raise ConfirmationError("moving-block fold does not cover every source week")
         offset += len(weeks)
     if not blocks:
         raise ConfirmationError("moving-block contract has insufficient adjacent source blocks")
