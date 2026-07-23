@@ -1,7 +1,7 @@
 schema_version = 1
 
 [upstream]
-source_digest = "53bb40da8ebe2b399fc5cbdf0cccfd7cf1ba5c1d2cfa71af7f2bd0a85c311b9a"
+source_digest = "d161b82917c3055720d9d49fe90459744a4c0a67c893333354e29f1b1d785838"
 lock_digest = "2c93e1dcfd2a929856549b9efb5716679d22fb24d8626154ed63aa0393955ee0"
 rule_contract_path = "mantis-v2/configs/topstep-100k-2026-07-20.toml"
 rule_contract_sha256 = "6e8b0d71716ec7b4c3e40a902b2ba62b4983f614463d1a823ea1dd85a4860db5"
@@ -113,7 +113,8 @@ confirmation_timesteps_per_seed = 5000000
 maximum_timesteps_per_seed = 10000000
 
 [rl.evaluation]
-market_uncertainty = "synchronized_calendar_block_bootstrap"
+market_uncertainty = "synchronized_adjacent_week_moving_block_bootstrap"
+market_block_length_weeks = 2
 sealed_holdout_start = "2026-01-01T00:00:00+00:00"
 minimum_raw_pass_rate = 0.60
 minimum_seed_raw_pass_rate = 0.50

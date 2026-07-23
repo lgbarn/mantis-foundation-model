@@ -137,6 +137,11 @@ def test_rl_config_rejects_unknown_missing_invalid_and_incompatible_values(
             r"promotion gates must match the accepted contract",
         ),
         (
+            "market_block_length_weeks = 2",
+            "market_block_length_weeks = 0",
+            r"rl.evaluation.market_block_length_weeks must be an integer >= 1",
+        ),
+        (
             "cost_limit = 0.01",
             "cost_limit = 0.02",
             r"rl.constraint.cost_limit must be 0.01",

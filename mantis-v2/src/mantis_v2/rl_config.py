@@ -153,7 +153,8 @@ class RlTrainingConfig:
 
 @dataclass(frozen=True)
 class RlEvaluationConfig:
-    market_uncertainty: Literal["synchronized_calendar_block_bootstrap"]
+    market_uncertainty: Literal["synchronized_adjacent_week_moving_block_bootstrap"]
+    market_block_length_weeks: int
     sealed_holdout_start: datetime
     minimum_raw_pass_rate: float
     minimum_seed_raw_pass_rate: float
@@ -309,6 +310,7 @@ _EXPECTED: dict[str, set[str]] = {
     },
     "evaluation": {
         "market_uncertainty",
+        "market_block_length_weeks",
         "sealed_holdout_start",
         "minimum_raw_pass_rate",
         "minimum_seed_raw_pass_rate",
@@ -699,7 +701,12 @@ def load_rl_config(path: str | Path) -> RlConfig:
             market_uncertainty=_choice(
                 evaluation["market_uncertainty"],
                 "rl.evaluation.market_uncertainty",
-                {"synchronized_calendar_block_bootstrap"},
+                {"synchronized_adjacent_week_moving_block_bootstrap"},
+            ),
+            market_block_length_weeks=_int(
+                evaluation["market_block_length_weeks"],
+                "rl.evaluation.market_block_length_weeks",
+                1,
             ),
             sealed_holdout_start=_timestamp(
                 evaluation["sealed_holdout_start"],
@@ -857,7 +864,8 @@ def _validate(config: RlConfig) -> None:
         if value > 1:
             raise ConfigError(f"rl.evaluation.{field} must be <= 1")
     accepted_gates = {
-        "market_uncertainty": "synchronized_calendar_block_bootstrap",
+        "market_uncertainty": "synchronized_adjacent_week_moving_block_bootstrap",
+        "market_block_length_weeks": 2,
         "sealed_holdout_start": datetime.fromisoformat("2026-01-01T00:00:00+00:00"),
         "minimum_raw_pass_rate": 0.60,
         "minimum_seed_raw_pass_rate": 0.50,

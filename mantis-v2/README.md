@@ -205,8 +205,9 @@ its content hash, with the 5 x 2M development, 10 x 5M confirmation, 10M maximum
 continuation, and serving seed 42 protocol frozen before any test access.
 `rl-decide-continuation` consumes only matched 2M/5M validation outcomes and a
 candidate freeze. It writes an immutable decision before any 10M update: all ten
-seeds continue together only when pooled improvement is positive, its weekly
-bootstrap LCB is nonnegative, every ticker/profile point estimate is
+seeds continue together only when pooled improvement is positive, its
+synchronized two-week adjacent moving-block bootstrap LCB is nonnegative, every
+ticker/profile point estimate is
 nonnegative, and no safety or estimability gate regresses. The seed campaign API
 then records immutable attempts, verifies 2M-to-5M lineage and fresh endpoint
 parity, and emits `serving-freeze-v1`; test remains inaccessible throughout.

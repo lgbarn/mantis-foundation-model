@@ -561,8 +561,9 @@ from this validation qualification.
 - Use fixed, non-overlapping chronological episode anchors for headline account
   outcomes when the test interval permits.
 - Report overlapping-start results only as stress coverage.
-- Estimate market uncertainty with synchronized calendar-block bootstrap across
-  all tickers; estimate seed uncertainty separately.
+- Estimate market uncertainty with a synchronized two-week adjacent moving-block
+  bootstrap inside each fold across all tickers; estimate seed uncertainty
+  separately.
 - Count every tried architecture, reward, hyperparameter space, and selection
   rule in the experiment ledger.
 
@@ -611,7 +612,7 @@ raw thresholds:
 - strict pooled pass-rate improvement over matched random-take and take-all
   baselines.
 
-The paired synchronized calendar-block bootstrap must also place the one-sided
+The paired synchronized adjacent-week moving-block bootstrap must also place the one-sided
 95% lower confidence bound for the shared actor's pass-rate difference above
 zero versus both random-take and take-all. Against the independently trained
 per-ticker actor ablation, the shared actor must have a non-negative pooled and
@@ -784,7 +785,8 @@ confirmation_timesteps_per_seed = 5000000
 maximum_timesteps_per_seed = 10000000
 
 [rl.evaluation]
-market_uncertainty = "synchronized_calendar_block_bootstrap"
+market_uncertainty = "synchronized_adjacent_week_moving_block_bootstrap"
+market_block_length_weeks = 2
 sealed_holdout_start = "2026-01-01T00:00:00+00:00"
 minimum_raw_pass_rate = 0.60
 minimum_seed_raw_pass_rate = 0.50
