@@ -231,6 +231,50 @@ def _spec(tmp_path: Path) -> dict[str, object]:
     }
 
 
+def _official_spec(tmp_path: Path) -> dict[str, object]:
+    spec = _spec(tmp_path)
+    archive = _file(tmp_path / "source.tar.gz", b"source archive")
+    archive["pod_path"] = "/workspace/mantis/control/source/source.tar.gz"
+    lock = spec["dependency_lock"]
+    assert isinstance(lock, dict)
+    image_ref = (
+        "runpod/pytorch@sha256:0a360022e8de4375af99430f84e8b38951acc397252163a37ceac7204d01be35"
+    )
+    receipt = _file(
+        tmp_path / "official-bootstrap.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "passed": True,
+                "scope": "official_bootstrap",
+                "provider_support": "official_runpod_template",
+                "template_id": "runpod-torch-v280",
+                "image_ref": image_ref,
+                "uv_version": "0.9.0",
+                "inventory": {
+                    "identities": {
+                        "source_revision": "a" * 40,
+                        "source_tree": "d" * 40,
+                        "source_archive_sha256": archive["sha256"],
+                        "lock_sha256": lock["sha256"],
+                    }
+                },
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode(),
+    )
+    receipt["pod_path"] = "/workspace/mantis/control/source/official-bootstrap.json"
+    spec["image"] = {"ref": image_ref, "self_check": receipt}
+    spec["bootstrap"] = {
+        "source_archive": archive,
+        "project_root": "/workspace/mantis/runtime/" + "a" * 40,
+        "venv_path": "/workspace/mantis/cache/venvs/" + str(lock["sha256"]),
+        "uv_version": "0.9.0",
+    }
+    return spec
+
+
 def test_launch_manifest_is_complete_content_addressed_and_idempotent(tmp_path: Path) -> None:
     output = tmp_path / "sealed"
     spec = _spec(tmp_path)
@@ -325,6 +369,40 @@ def test_launch_decision_is_immutably_bound_to_exact_immediate_workload(tmp_path
         ),
         "HF_HUB_OFFLINE": "1",
     }
+
+
+def test_official_template_bootstrap_is_hash_bound_and_uses_no_registry_auth(
+    tmp_path: Path,
+) -> None:
+    manifest_path = seal_workload_manifest(_official_spec(tmp_path), tmp_path / "sealed")
+    manifest = validate_workload_manifest(manifest_path)
+    decision = _decision(manifest)
+    decision.pop("workload")
+    decision["image_ref"] = manifest["image"]["ref"]
+    decision["template_id"] = "runpod-torch-v280"
+    decision["registry_auth_id"] = ""
+    unsigned = {key: value for key, value in decision.items() if key != "decision_digest"}
+    decision["decision_digest"] = hashlib.sha256(
+        json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+    output = bind_workload_decision(
+        manifest_path=manifest_path,
+        decision=decision,
+        pod_manifest_path="/workspace/mantis/control/run/launch-manifest.json",
+        output_path=tmp_path / "official-decision.json",
+        evaluated_at=datetime(2026, 7, 22, 12, tzinfo=UTC),
+    )
+    workload = json.loads(output.read_text())["workload"]
+
+    assert "/start.sh" in workload["docker_args"]
+    assert "sha256sum -c -" in workload["docker_args"]
+    assert "uv sync --frozen --no-dev" in workload["docker_args"]
+    assert workload["environment"]["MANTIS_BASE_IMAGE"] == manifest["image"]["ref"]
+    assert workload["environment"]["MANTIS_LOCK_PATH"].endswith("/uv.lock")
+    assert workload["environment"]["UV_PROJECT_ENVIRONMENT"].startswith(
+        "/workspace/mantis/cache/venvs/"
+    )
 
 
 def test_manifest_fails_closed_on_tamper_missing_field_holdout_or_bad_attestation(

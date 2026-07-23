@@ -133,10 +133,49 @@ and private Pod template; it cannot own a Pod.
 - Preserve immutable run identities, artifact hashes, atomic checkpoints, and
   fail-closed resume checks on remote workers.
 
-## Reproducible CUDA image
+## Supported official PyTorch runtime
 
-The public image workflow builds Linux amd64 only. The Dockerfile pins the
-platform-specific NVIDIA CUDA 13.0.2 cuDNN runtime manifest and the official
+The production default uses RunPod's official `Runpod Pytorch 2.8.0` template:
+
+```text
+template: runpod-torch-v280
+image: runpod/pytorch@sha256:0a360022e8de4375af99430f84e8b38951acc397252163a37ceac7204d01be35
+registry auth: none
+```
+
+[RunPod documents official templates](https://docs.runpod.io/pods/templates/overview)
+as RunPod-supported; custom templates are self-supported. Create the source
+bundle and deployment receipt only from a clean committed worktree:
+
+```bash
+just runpod-official-bootstrap \
+  "$HOME/Library/Application Support/mantis-runpod/bootstrap/SOURCE_SHA/source.tar.gz" \
+  "$HOME/Library/Application Support/mantis-runpod/bootstrap/SOURCE_SHA/receipt.json"
+```
+
+Add a `bootstrap` object to the workload spec with file records for that source
+archive, project root `/workspace/mantis/runtime/SOURCE_SHA`, environment root
+`/workspace/mantis/cache/venvs/LOCK_SHA256`, and `uv_version = 0.9.0`. Use the
+receipt as `image.self_check`. Pre-create staging uploads and downloads the
+archive and verifies its size and SHA-256. At container start, the bound command:
+
+1. Starts the official template's `/start.sh` so RunPod owns SSH services.
+2. Re-verifies the source archive SHA-256 before extraction.
+3. Re-extracts the verified source archive for every launch.
+4. Uses the official image's bundled `uv` 0.9.0 and runs `uv sync --frozen --no-dev` against the
+   committed lock, with both the uv cache and environment on the network volume.
+5. Executes the same sealed workload and fail-closed CUDA self-check used by the
+   legacy image path.
+
+Expose only `22/tcp`. TensorBoard remains bound to `127.0.0.1:6006` and is
+reached through an SSH tunnel. The example intent at
+`infra/runpod/examples/intent-h100-qualification.json` is the canonical
+supported-image identity.
+
+## Legacy custom CUDA image
+
+The self-supported recovery workflow builds Linux amd64 only. The Dockerfile
+pins the platform-specific NVIDIA CUDA 13.0.2 cuDNN runtime manifest and the official
 `uv` 0.11.30 manifest by SHA-256. It installs Python 3.12 and pinned system
 packages, then materializes the committed workspace exclusively with
 `uv sync --frozen`. The build refuses a dirty worktree so uncommitted source
@@ -167,9 +206,10 @@ unavailable driver exits nonzero before market data promotion or training.
 Rebuilding the same clean commit and lock preserves the declared source, lock,
 base, tool, and image-contract identities.
 
-Use a public registry and immutable digest reference by default. If a private
-pull is unavoidable, configure a scoped RunPod registry-auth object on the Pod
-template. Never pass registry credentials through Pod environment variables.
+If this recovery route is explicitly selected, use a public registry and
+immutable digest reference. If a private pull is unavoidable, configure a
+scoped RunPod registry-auth object on the Pod template. Never pass registry
+credentials through Pod environment variables.
 The image exposes SSH port 22 only. Run TensorBoard inside the Pod on
 `127.0.0.1:6006`, then use the existing localhost tunnel contract:
 

@@ -61,7 +61,8 @@ them can make a checkpoint intentionally non-resumable.
 | `just rl-account-replay <input> <output> <config>` | Replays marked-equity account fixtures | Atomic replay manifest | CPU; refuses overwrite |
 | `just rl-smoke <output> <config> [--resume]` | Trains the bounded synthetic MaskablePPO qualification | Atomic checkpoint, state, metrics, manifest | 50K CPU steps; no production or holdout data |
 | `just rl-train <training_manifest> <output> <config> [variant] [--resume]` | Trains all declared development seeds on one production training partition | Atomic fold/seed checkpoints, metrics, seed summary | CPU only; no validation, test, or holdout input |
-| `just runpod-image-build <image>` | Builds the pinned Linux amd64 CUDA image from a clean commit | Local Docker image | Docker CPU/disk/network use; no Pod or registry push |
+| `just runpod-official-bootstrap <archive> <receipt>` | Archives a clean commit and emits the official-template provenance receipt | Source tarball and canonical JSON | Local only; default supported RunPod route |
+| `just runpod-image-build <image>` | Builds the legacy pinned Linux amd64 CUDA image from a clean commit | Local Docker image | Self-supported fallback; Docker CPU/disk/network use |
 | `just runpod-image-scan <image> <output>` | Scans saved image layers and history | Canonical scan JSON | Requires a local Docker daemon |
 | `just runpod-image-self-check <image> <output>` | Verifies image architecture, tools, lock, and source before launch | Canonical static image JSON | Docker emulation is supported; CUDA is checked first inside the Pod |
 | `just transfer-stage-runpod <config> <local> <decision>` | Rehashes and pre-stages the immutable bundle through RunPod S3 | Network-volume objects | Live storage writes; no paid Pod |
@@ -144,13 +145,20 @@ just sync
 This materializes all workspace packages from `uv.lock`. Do not run it during a
 protected training run unless changing the environment is explicitly intended.
 
-### RunPod image preflight
+### RunPod runtime preflight
 
-Before any paid CUDA qualification, follow the image workflow in
-`infra/runpod/README.md`. Build only from a clean commit, scan every layer, and
-run the self-check on a compatible NVIDIA host. Record both canonical JSON
-outputs with the exact immutable image reference. Local static tests do not
-substitute for the unavailable Docker build or GPU-host self-check.
+The production default is RunPod's official PyTorch 2.8 template, not a custom
+container. From a clean commit, create the hash-pinned source archive and
+deployment receipt with `just runpod-official-bootstrap`, then include both in
+the sealed workload. The receipt pins official template `runpod-torch-v280` and
+the immutable RunPod image digest. The bootstrap starts the template's supported
+`/start.sh`, uses the image-bundled `uv` 0.9.0, and syncs the frozen lock into the
+persistent network-volume cache before executing the workload manifest.
+
+The custom image build/scan workflow remains documented in
+`infra/runpod/README.md` for recovery comparisons, but it is self-supported and
+is not the normal production route. Both routes still require the in-Pod CUDA,
+driver, source, lock, and allocation self-check before data promotion or training.
 
 ## Phase 4: run synthetic correctness checks
 

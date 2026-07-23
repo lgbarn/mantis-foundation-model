@@ -56,7 +56,7 @@ def runtime_inventory(
     environment: Mapping[str, str] = os.environ,
     runner: Runner = _run,
     torch_module: Any | None = None,
-    lock_path: Path = Path("/opt/mantis/uv.lock"),
+    lock_path: Path | None = None,
     require_cuda: bool = True,
 ) -> dict[str, Any]:
     required = (
@@ -70,7 +70,8 @@ def runtime_inventory(
     missing = [name for name in required if not environment.get(name)]
     if missing:
         raise ImageContractError(f"missing image identities: {', '.join(missing)}")
-    if not lock_path.is_file() or _sha256(lock_path) != environment["MANTIS_LOCK_SHA256"]:
+    resolved_lock = lock_path or Path(environment.get("MANTIS_LOCK_PATH", "/opt/mantis/uv.lock"))
+    if not resolved_lock.is_file() or _sha256(resolved_lock) != environment["MANTIS_LOCK_SHA256"]:
         raise ImageContractError("installed uv.lock does not match the declared digest")
 
     torch = torch_module

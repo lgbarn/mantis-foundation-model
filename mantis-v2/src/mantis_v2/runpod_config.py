@@ -74,6 +74,12 @@ def _text(value: Any, field: str) -> str:
     return value
 
 
+def _optional_text(value: Any, field: str) -> str:
+    if not isinstance(value, str):
+        raise RunpodConfigError(f"{field} must be a string")
+    return value
+
+
 def _boolean(value: Any, field: str) -> bool:
     if not isinstance(value, bool):
         raise RunpodConfigError(f"{field} must be true or false")
@@ -589,7 +595,7 @@ def load_launch_intent(path: str | Path) -> LaunchIntent:
         container_disk_gb=_integer(raw["container_disk_gb"], "intent.container_disk_gb"),
         image_ref=_text(raw["image_ref"], "intent.image_ref"),
         template_id=_text(raw["template_id"], "intent.template_id"),
-        registry_auth_id=_text(raw["registry_auth_id"], "intent.registry_auth_id"),
+        registry_auth_id=_optional_text(raw["registry_auth_id"], "intent.registry_auth_id"),
         volume_id=_text(raw["volume_id"], "intent.volume_id"),
         volume_size_gb=_integer(raw["volume_size_gb"], "intent.volume_size_gb"),
         volume_mount_path=_text(raw["volume_mount_path"], "intent.volume_mount_path"),

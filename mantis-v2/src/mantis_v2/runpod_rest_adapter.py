@@ -250,7 +250,6 @@ class RunpodRestV1Adapter:
             "cloudType": "SECURE",
             "computeType": "GPU",
             "containerDiskInGb": decision.get("container_disk_gb"),
-            "containerRegistryAuthId": decision.get("registry_auth_id"),
             "dataCenterIds": [decision.get("datacenter_id")],
             "gpuCount": decision.get("gpu_count"),
             "gpuTypeIds": [decision.get("gpu_type")],
@@ -263,6 +262,11 @@ class RunpodRestV1Adapter:
             "templateId": decision.get("template_id"),
             "volumeMountPath": decision.get("volume_mount_path"),
         }
+        registry_auth_id = decision.get("registry_auth_id")
+        if not isinstance(registry_auth_id, str):
+            raise RunpodAdapterError("invalid_launch_decision:registry_auth_id")
+        if registry_auth_id:
+            request["containerRegistryAuthId"] = registry_auth_id
         return _normalize_pod(_json(self._request("POST", "/pods", body=request), 201))
 
     def status(self, pod_id: str) -> Mapping[str, object]:

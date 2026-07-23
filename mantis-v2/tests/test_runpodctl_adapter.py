@@ -138,6 +138,29 @@ def test_create_rejects_secret_values_in_process_argv(tmp_path: Path) -> None:
         adapter.create(decision, datetime(2026, 7, 22, 14, 12, tzinfo=UTC))
 
 
+def test_public_official_image_omits_registry_auth_flag(tmp_path: Path) -> None:
+    binary = tmp_path / "runpodctl"
+    binary.write_bytes(b"pinned-runpodctl")
+    calls: list[list[str]] = []
+    decision = _decision()
+    decision["registry_auth_id"] = ""
+    adapter = RunpodctlCreateAdapter(
+        rest=RestStub(),
+        binary=binary,
+        binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
+        version=RUNPODCTL_VERSION,
+        source_commit=RUNPODCTL_COMMIT,
+        runner=lambda args: (
+            calls.append(args)
+            or subprocess.CompletedProcess(args, 0, json.dumps({"id": "pod-123"}), "")
+        ),
+    )
+
+    adapter.create(decision, datetime(2026, 7, 22, 14, 12, tzinfo=UTC))
+
+    assert not any(arg.startswith("--registry-auth-id=") for arg in calls[0])
+
+
 def test_create_rejects_binary_tamper_bad_output_and_missing_workload(tmp_path: Path) -> None:
     binary = tmp_path / "runpodctl"
     binary.write_bytes(b"wrong")

@@ -102,6 +102,8 @@ class RunpodS3WorkloadIO:
             self.manifest["authorization"],
             self.manifest["monitor"]["token"],
         ]
+        if "bootstrap" in self.manifest:
+            records.append(self.manifest["bootstrap"]["source_archive"])
         uploaded: list[str] = []
         with tempfile.TemporaryDirectory(prefix="mantis-control-preflight-") as temporary:
             verification_root = Path(temporary)

@@ -63,6 +63,9 @@ runpod-image-self-check image output:
 runpod-image-scan image output:
     infra/runpod/scripts/scan-image.sh {{quote(image)}} {{quote(output)}}
 
+runpod-official-bootstrap archive receipt:
+    uv run python infra/runpod/scripts/prepare_official_bootstrap.py --archive {{quote(archive)}} --receipt {{quote(receipt)}}
+
 runpod-plan platform local experiment intent inventory ledger evaluated_at output:
     uv run mantis-v2 runpod-plan --platform {{quote(platform)}} --local {{quote(local)}} --experiment {{quote(experiment)}} --intent {{quote(intent)}} --inventory {{quote(inventory)}} --ledger {{quote(ledger)}} --evaluated-at {{quote(evaluated_at)}} --output {{quote(output)}}
 

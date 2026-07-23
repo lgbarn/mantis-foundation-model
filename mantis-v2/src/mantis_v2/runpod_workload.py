@@ -8,6 +8,7 @@ import json
 import os
 import queue
 import re
+import shlex
 import subprocess
 import tempfile
 import threading
@@ -71,6 +72,12 @@ _KEYS = {
     "authorization",
     "runpodctl",
 }
+_BOOTSTRAP_KEYS = _KEYS | {"bootstrap"}
+_OFFICIAL_RUNPOD_TEMPLATE_ID = "runpod-torch-v280"
+_OFFICIAL_RUNPOD_IMAGE_REF = (
+    "runpod/pytorch@sha256:0a360022e8de4375af99430f84e8b38951acc397252163a37ceac7204d01be35"
+)
+_BOOTSTRAP_UV_VERSION = "0.9.0"
 
 
 def _canonical(value: Any) -> bytes:
@@ -143,7 +150,7 @@ def _decimal(value: object, field: str, *, positive: bool = True) -> Decimal:
 
 
 def _validate_core(core: dict[str, Any], *, now: datetime, path_role: str) -> None:
-    if set(core) != _KEYS:
+    if set(core) != _KEYS and set(core) != _BOOTSTRAP_KEYS:
         raise WorkloadError("workload manifest keys mismatch")
     if core["schema_version"] != 1:
         raise WorkloadError("unsupported workload manifest schema")
@@ -163,7 +170,7 @@ def _validate_core(core: dict[str, Any], *, now: datetime, path_role: str) -> No
     if (
         not isinstance(check_payload, dict)
         or check_payload.get("passed") is not True
-        or check_payload.get("scope") != "static_image"
+        or check_payload.get("scope") not in {"static_image", "official_bootstrap"}
     ):
         raise WorkloadError("image self-check did not pass")
     identities = check_payload.get("inventory", {}).get("identities", {})
@@ -171,6 +178,38 @@ def _validate_core(core: dict[str, Any], *, now: datetime, path_role: str) -> No
         raise WorkloadError("image self-check source revision mismatch")
     if identities.get("lock_sha256") != lock_record["sha256"]:
         raise WorkloadError("image self-check dependency lock mismatch")
+    scope = check_payload["scope"]
+    if scope == "official_bootstrap":
+        bootstrap = _exact(
+            core.get("bootstrap"),
+            {"source_archive", "project_root", "venv_path", "uv_version"},
+            "bootstrap",
+        )
+        source_archive = _file_record(
+            bootstrap["source_archive"], "bootstrap.source_archive", path_role=path_role
+        )
+        expected_project = Path(f"/workspace/mantis/runtime/{source_revision}")
+        expected_venv = Path(f"/workspace/mantis/cache/venvs/{lock_record['sha256']}")
+        if Path(_text(bootstrap["project_root"], "bootstrap.project_root")) != expected_project:
+            raise WorkloadError("bootstrap project root does not match the source revision")
+        if Path(_text(bootstrap["venv_path"], "bootstrap.venv_path")) != expected_venv:
+            raise WorkloadError("bootstrap environment does not match the dependency lock")
+        if _text(bootstrap["uv_version"], "bootstrap.uv_version") != _BOOTSTRAP_UV_VERSION:
+            raise WorkloadError("bootstrap uv version is not qualified")
+        if check_payload.get("uv_version") != _BOOTSTRAP_UV_VERSION:
+            raise WorkloadError("bootstrap receipt uv version is not qualified")
+        if identities.get("source_archive_sha256") != source_archive["sha256"]:
+            raise WorkloadError("bootstrap source archive differs from its receipt")
+        if (
+            check_payload.get("provider_support") != "official_runpod_template"
+            or check_payload.get("template_id") != _OFFICIAL_RUNPOD_TEMPLATE_ID
+            or image["ref"] != _OFFICIAL_RUNPOD_IMAGE_REF
+        ):
+            raise WorkloadError("bootstrap image is not an official RunPod template")
+        if check_payload.get("image_ref") != image["ref"]:
+            raise WorkloadError("bootstrap image differs from its receipt")
+    elif "bootstrap" in core:
+        raise WorkloadError("custom image manifests cannot contain a bootstrap")
     config_record = _file_record(
         core["experiment_config"], "experiment_config", path_role=path_role
     )
@@ -531,6 +570,77 @@ def validate_workload_manifest(
     return manifest
 
 
+def _deployment_receipt(manifest: Mapping[str, Any], *, path_role: str) -> dict[str, Any]:
+    record = manifest["image"]["self_check"]
+    try:
+        payload = json.loads(Path(str(record[f"{path_role}_path"])).read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise WorkloadError("image self-check receipt is invalid") from exc
+    if not isinstance(payload, dict):
+        raise WorkloadError("image self-check receipt is invalid")
+    return payload
+
+
+def _bound_workload(
+    manifest: Mapping[str, Any], pod_path: Path, *, path_role: str = "controller"
+) -> dict[str, Any]:
+    input_root = Path(str(manifest["input_bundle"]["final_parent"])) / str(
+        manifest["input_bundle"]["bundle_digest"]
+    )
+    environment = {
+        "MANTIS_RUN_ID": str(manifest["run_id"]),
+        "MANTIS_WORKLOAD_MANIFEST": str(pod_path),
+        "HF_HOME": str(input_root / "cache" / "huggingface"),
+        "HF_HUB_OFFLINE": "1",
+    }
+    receipt = _deployment_receipt(manifest, path_role=path_role)
+    if receipt.get("scope") == "static_image":
+        docker_args = f"uv run mantis-v2 workload-execute --manifest {pod_path}"
+    elif receipt.get("scope") == "official_bootstrap":
+        bootstrap = manifest["bootstrap"]
+        archive = bootstrap["source_archive"]
+        project_root = str(bootstrap["project_root"])
+        venv_path = str(bootstrap["venv_path"])
+        source_sha256 = str(archive["sha256"])
+        source_path = str(archive["pod_path"])
+        uv_version = str(bootstrap["uv_version"])
+        environment.update(
+            {
+                "MANTIS_BASE_IMAGE": str(manifest["image"]["ref"]),
+                "MANTIS_SOURCE_REVISION": str(manifest["source_revision"]),
+                "MANTIS_SOURCE_TREE": str(receipt["inventory"]["identities"]["source_tree"]),
+                "MANTIS_LOCK_SHA256": str(manifest["dependency_lock"]["sha256"]),
+                "MANTIS_LOCK_PATH": f"{project_root}/uv.lock",
+                "MANTIS_IMAGE_CONTRACT_SHA256": str(manifest["image"]["self_check"]["sha256"]),
+                "MANTIS_UV_VERSION": uv_version,
+                "UV_CACHE_DIR": "/workspace/mantis/cache/uv",
+                "UV_PROJECT_ENVIRONMENT": venv_path,
+            }
+        )
+        temporary = f"{project_root}.partial"
+        shell = (
+            "set -euo pipefail; /start.sh & "
+            f"archive={shlex.quote(source_path)}; project={shlex.quote(project_root)}; "
+            f"expected={shlex.quote(source_sha256)}; temporary={shlex.quote(temporary)}; "
+            'printf "%s  %s\\n" "$expected" "$archive" | sha256sum -c -; '
+            'rm -rf "$temporary"; mkdir -p "$temporary"; '
+            'tar -xzf "$archive" -C "$temporary"; '
+            'printf "%s\\n" "$expected" > "$temporary/.mantis-source.sha256"; '
+            'rm -rf "$project"; mv "$temporary" "$project"; '
+            'cd "$project"; '
+            "/uv sync --frozen --no-dev; "
+            f"exec /uv run mantis-v2 workload-execute --manifest {shlex.quote(str(pod_path))}"
+        )
+        docker_args = f"bash -lc {shlex.quote(shell)}"
+    else:
+        raise WorkloadError("unsupported deployment receipt scope")
+    return {
+        "manifest_digest": manifest["manifest_digest"],
+        "docker_args": docker_args,
+        "environment": environment,
+    }
+
+
 def bind_workload_decision(
     *,
     manifest_path: str | Path,
@@ -556,6 +666,11 @@ def bind_workload_decision(
         manifest["budget_guard"]["next_cell_maximum_usd"],
         "budget_guard.next_cell_maximum_usd",
     )
+    deployment_receipt = _deployment_receipt(manifest, path_role="controller")
+    official_bootstrap_mismatch = deployment_receipt.get("scope") == "official_bootstrap" and (
+        decision.get("template_id") != deployment_receipt.get("template_id")
+        or decision.get("registry_auth_id") != ""
+    )
     if (
         not pod_path.is_absolute()
         or not pod_path.is_relative_to("/workspace/mantis")
@@ -579,24 +694,12 @@ def bind_workload_decision(
         or manifest["authorization"]["expires_at"]
         != authorization.expires_at.isoformat().replace("+00:00", "Z")
         or decision_projected > manifest_maximum
+        or official_bootstrap_mismatch
     ):
         raise WorkloadError("launch decision differs from the workload manifest")
-    docker_args = f"uv run mantis-v2 workload-execute --manifest {pod_path}"
-    input_root = Path(str(manifest["input_bundle"]["final_parent"])) / str(
-        manifest["input_bundle"]["bundle_digest"]
-    )
     core = {
         **{key: value for key, value in decision.items() if key != "decision_digest"},
-        "workload": {
-            "manifest_digest": manifest["manifest_digest"],
-            "docker_args": docker_args,
-            "environment": {
-                "MANTIS_RUN_ID": manifest["run_id"],
-                "MANTIS_WORKLOAD_MANIFEST": str(pod_path),
-                "HF_HOME": str(input_root / "cache" / "huggingface"),
-                "HF_HUB_OFFLINE": "1",
-            },
-        },
+        "workload": _bound_workload(manifest, pod_path),
     }
     bound = {**core, "decision_digest": _digest(core)}
     output = Path(output_path)
@@ -1100,31 +1203,14 @@ def supervise_workload(
     manifest = validate_workload_manifest(manifest_path)
     run_id = str(manifest["run_id"])
     workload = decision.get("workload")
-    expected_docker_args = (
-        "uv run mantis-v2 workload-execute --manifest "
-        + str(workload.get("environment", {}).get("MANTIS_WORKLOAD_MANIFEST", ""))
-        if isinstance(workload, Mapping) and isinstance(workload.get("environment"), Mapping)
-        else ""
+    workload_environment = workload.get("environment") if isinstance(workload, Mapping) else None
+    pod_manifest = (
+        Path(str(workload_environment.get("MANTIS_WORKLOAD_MANIFEST", "")))
+        if isinstance(workload_environment, Mapping)
+        else Path("")
     )
-    expected_input_root = Path(str(manifest["input_bundle"]["final_parent"])) / str(
-        manifest["input_bundle"]["bundle_digest"]
-    )
-    expected_environment = {
-        "MANTIS_RUN_ID": manifest["run_id"],
-        "MANTIS_WORKLOAD_MANIFEST": str(
-            workload.get("environment", {}).get("MANTIS_WORKLOAD_MANIFEST", "")
-        )
-        if isinstance(workload, Mapping)
-        else "",
-        "HF_HOME": str(expected_input_root / "cache" / "huggingface"),
-        "HF_HUB_OFFLINE": "1",
-    }
-    if (
-        not isinstance(workload, Mapping)
-        or workload.get("manifest_digest") != manifest["manifest_digest"]
-        or workload.get("docker_args") != expected_docker_args
-        or workload.get("environment") != expected_environment
-    ):
+    expected_workload = _bound_workload(manifest, pod_manifest)
+    if not isinstance(workload, Mapping) or dict(workload) != expected_workload:
         raise WorkloadError("launch decision does not bind the immediate workload manifest")
     _append_event(
         state_root,

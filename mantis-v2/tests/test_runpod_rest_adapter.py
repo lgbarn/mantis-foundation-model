@@ -123,6 +123,20 @@ def test_create_uses_exact_pinned_rest_v1_exchange_and_normalizes_response() -> 
     assert "provider-secret" not in json.dumps(created)
 
 
+def test_public_official_image_omits_registry_auth_from_rest_request() -> None:
+    transport = RecordingTransport(
+        [HttpResponse(status=201, body=json.dumps(_pod_response()).encode())]
+    )
+    decision = _decision()
+    decision["registry_auth_id"] = ""
+    adapter = RunpodRestV1Adapter(api_key="secret-sentinel", transport=transport)
+
+    adapter.create(decision, datetime(2026, 7, 21, 14, tzinfo=UTC))
+
+    body = json.loads(transport.calls[0][3] or b"")
+    assert "containerRegistryAuthId" not in body
+
+
 def test_inventory_status_delete_and_billing_use_exact_resource_identities() -> None:
     pod = _pod_response()
     transport = RecordingTransport(

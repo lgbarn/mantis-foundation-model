@@ -86,12 +86,17 @@ just rl-decide-continuation candidate-freeze.json budget-evidence.json \
 just rl-run-seed-campaign candidate-freeze.json artifacts/rl-seed-campaign \
   --training-manifest training.json --validation-manifest validation.json \
   --resume --continuation-decision continuation-decision.json
-just runpod-image-build ghcr.io/lgbarn/mantis-v2-cuda:SOURCE_SHA
-just runpod-image-scan ghcr.io/lgbarn/mantis-v2-cuda:SOURCE_SHA reports/image-scan.json
-just runpod-image-self-check \
-  ghcr.io/lgbarn/mantis-v2-cuda:SOURCE_SHA reports/runtime-inventory.json
+just runpod-official-bootstrap \
+  reports/runpod/source-SOURCE_SHA.tar.gz \
+  reports/runpod/official-bootstrap-SOURCE_SHA.json
 just qualify-cuda-bf16 fp32.json bf16.json qualification.json
 ```
+
+The default remote runtime is RunPod's supported PyTorch 2.8 template
+`runpod-torch-v280`, pinned to the image digest recorded in
+`infra/runpod/examples/intent-h100-qualification.json`. The source archive and
+receipt are staged and hash-verified before the paid Pod is created. Custom
+images remain a recovery option, not the production default.
 
 `gate` includes deterministic synthetic smoke training, evaluation, checkpoint,
 and export parity. `verify-upstream`

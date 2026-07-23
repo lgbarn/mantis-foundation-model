@@ -121,8 +121,17 @@ class RunpodctlCreateAdapter:
         allowed_environment = {
             "MANTIS_RUN_ID",
             "MANTIS_WORKLOAD_MANIFEST",
+            "MANTIS_BASE_IMAGE",
+            "MANTIS_SOURCE_REVISION",
+            "MANTIS_SOURCE_TREE",
+            "MANTIS_LOCK_SHA256",
+            "MANTIS_LOCK_PATH",
+            "MANTIS_IMAGE_CONTRACT_SHA256",
+            "MANTIS_UV_VERSION",
             "HF_HOME",
             "HF_HUB_OFFLINE",
+            "UV_CACHE_DIR",
+            "UV_PROJECT_ENVIRONMENT",
         }
         if not set(environment).issubset(allowed_environment):
             raise RunpodctlError("launch decision environment would expose a secret or unknown key")
@@ -153,12 +162,15 @@ class RunpodctlCreateAdapter:
             "--cloud-type=SECURE",
             f"--data-center-ids={_required_text(decision.get('datacenter_id'), 'datacenter_id')}",
             f"--network-volume-id={_required_text(decision.get('volume_id'), 'volume_id')}",
-            "--registry-auth-id="
-            f"{_required_text(decision.get('registry_auth_id'), 'registry_auth_id')}",
             f"--docker-args={docker_args}",
             "--env=" + json.dumps(environment, sort_keys=True, separators=(",", ":")),
             f"--terminate-after={deadline_utc}",
         ]
+        registry_auth_id = decision.get("registry_auth_id")
+        if not isinstance(registry_auth_id, str):
+            raise RunpodctlError("invalid create field: registry_auth_id")
+        if registry_auth_id:
+            args.insert(-3, f"--registry-auth-id={registry_auth_id}")
         completed = self.runner(args)
         if completed.returncode != 0:
             raise RunpodctlError("runpodctl create failed")

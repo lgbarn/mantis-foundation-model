@@ -92,11 +92,12 @@ def _validate_launch_decision(decision: Mapping[str, object], evaluated_at: date
         "datacenter_id",
         "image_ref",
         "template_id",
-        "registry_auth_id",
         "volume_id",
         "volume_mount_path",
     ):
         _required_string(decision.get(field), field)
+    if not isinstance(decision.get("registry_auth_id"), str):
+        raise LifecycleError("invalid_launch_decision:registry_auth_id")
     for field in (
         "gpu_count",
         "vcpu",

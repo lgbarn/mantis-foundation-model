@@ -1,8 +1,8 @@
 {
   "container_disk_gb": 50,
-  "image_ref": "ghcr.io/lgbarn/mantis-v2-cuda@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "template_id": "replace-with-current-template-id",
-  "registry_auth_id": "replace-with-scoped-registry-auth-id",
+  "image_ref": "runpod/pytorch@sha256:0a360022e8de4375af99430f84e8b38951acc397252163a37ceac7204d01be35",
+  "template_id": "runpod-torch-v280",
+  "registry_auth_id": "",
   "datacenter_id": "US-MO-1",
   "gpu_count": 1,
   "gpu_type": "NVIDIA H100 80GB HBM3",
