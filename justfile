@@ -66,6 +66,15 @@ runpod-image-scan image output:
 runpod-official-bootstrap archive receipt:
     uv run python infra/runpod/scripts/prepare_official_bootstrap.py --archive {{quote(archive)}} --receipt {{quote(receipt)}}
 
+runpod-train experiment runtime:
+    infra/runpod/runpod-workflow train {{quote(experiment)}} {{quote(runtime)}}
+
+runpod-recover receipt runtime:
+    infra/runpod/runpod-workflow recover {{quote(receipt)}} {{quote(runtime)}}
+
+runpod-tensorboard receipt runtime port="6006":
+    infra/runpod/runpod-workflow tensorboard {{quote(receipt)}} {{quote(runtime)}} {{quote(port)}}
+
 runpod-plan platform local experiment intent inventory ledger evaluated_at output:
     uv run mantis-v2 runpod-plan --platform {{quote(platform)}} --local {{quote(local)}} --experiment {{quote(experiment)}} --intent {{quote(intent)}} --inventory {{quote(inventory)}} --ledger {{quote(ledger)}} --evaluated-at {{quote(evaluated_at)}} --output {{quote(output)}}
 

@@ -70,6 +70,50 @@ Do not add or enable a paid, metered, token-requiring, or account-requiring depe
 - Keep secrets and machine-local paths outside committed configs.
 - Environment variables may select runtime resources or override documented operational settings, but must not hide the experiment definition.
 
+## Minimal implementation and command-first workflows
+
+Use the least code and the least abstraction that complete the task safely. Code
+complexity must be earned by a current requirement, not by possible future reuse.
+Prefer direct, readable control flow over frameworks, wrapper layers, generic
+orchestration, and configuration that merely moves simple logic out of sight.
+Every additional module, abstraction, dependency, and command wrapper must make
+the workflow materially safer, clearer, more reproducible, or easier to test.
+
+Before writing custom code, look for an official, maintained CLI or documented
+command supplied by the owning project. Prefer that interface when it supports
+the required behavior, can be version-pinned or provenance-recorded, works in
+the qualified runtime, and does not introduce an unapproved cost or dependency.
+Verify commands and flags against official documentation or the installed
+tool's help output; never invent an interface. Use `just` as a discoverable
+entry point when a repository command needs stable arguments or combines real
+workflow stages, but do not hide a single clear command behind unnecessary
+shell or Python layers.
+
+Treat model training as an explicit sequence of tasks. The workflow should be
+understandable from the commands it runs and the artifacts passed between them.
+Documentation for each supported workflow must state:
+
+1. The exact commands, in execution order.
+2. Why that order is required and which invariant each stage protects.
+3. The inputs, outputs, run identity, and provenance expected at each boundary.
+4. The safe resume, retry, and failure behavior.
+5. Any justified exception to the normal order, including when it applies and
+   what additional validation it requires.
+
+Assume existing code may be more complex than necessary and actively look for
+safe simplifications while working in the relevant area. Refactor complexity
+when it obscures the command sequence, duplicates an official tool, creates
+unused flexibility, or makes behavior difficult to explain or test. Keep such
+refactoring scoped to the task, establish behavior with tests before changing
+it, and verify the same behavior afterward. Do not perform unrelated rewrites,
+and do not refactor files used by an active or resumable run.
+
+Minimal does not mean incomplete. Never remove validation, causal boundaries,
+holdout isolation, checkpoint provenance, resume safety, determinism controls,
+or export parity merely to reduce line count. The target is the smallest
+complete implementation whose behavior, commands, and failure modes can be
+explained plainly.
+
 ## Development workflow
 
 Use `uv` for Python environments and dependency locking, and `just` for discoverable repository commands. Do not install packages without explicit user approval.

@@ -224,7 +224,7 @@ def _spec(tmp_path: Path) -> dict[str, object]:
             "recovery_authorized": False,
         },
         "runpodctl": {
-            "version": "v2.7.2",
+            "version": "2.7.2",
             "source_commit": "309512b4926eb7d218bbc8a8f11d380ce54f59c4",
             "binary_sha256": "a016e442fdf12e4642ad3425ea6d624a40882d77accdfa043b5e40a4fd08d037",
         },
