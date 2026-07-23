@@ -11,10 +11,32 @@ import torch
 from mantis_v2 import cli
 from mantis_v2.downstream_config import load_downstream_config
 from mantis_v2.downstream_pipeline import _record_stage_instrumentation
+from mantis_v2.instrumentation import collect_resource_metrics
 from mantis_v2.monitoring import MonitoringError, tensorboard_command
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_missing_optional_cuda_utilization_does_not_fail_metrics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda _device: None)
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda _device: 123)
+    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda _device: 456)
+
+    def missing_nvml(_device: torch.device) -> int:
+        raise ModuleNotFoundError("nvidia-ml-py does not seem to be installed")
+
+    monkeypatch.setattr(torch.cuda, "utilization", missing_nvml)
+
+    metrics = collect_resource_metrics(tmp_path, torch.device("cuda"))
+
+    assert metrics["cuda_allocated_bytes"] == 123
+    assert metrics["cuda_reserved_bytes"] == 456
+    assert metrics["cuda_utilization_percent"] is None
+    assert metrics["filesystem_free_bytes"] > 0
 
 
 def test_downstream_stage_uses_shared_json_and_tensorboard_interface(tmp_path: Path) -> None:

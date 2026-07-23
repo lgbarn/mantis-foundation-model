@@ -155,17 +155,57 @@ just runpod-official-bootstrap \
 
 Add a `bootstrap` object to the workload spec with file records for that source
 archive, project root `/workspace/mantis/runtime/SOURCE_SHA`, environment root
-`/workspace/mantis/cache/venvs/LOCK_SHA256`, and `uv_version = 0.9.0`. Use the
+`/opt/mantis/venv`, and `uv_version = 0.9.0`. Use the
 receipt as `image.self_check`. Pre-create staging uploads and downloads the
 archive and verifies its size and SHA-256. At container start, the bound command:
 
 1. Starts the official template's `/start.sh` so RunPod owns SSH services.
 2. Re-verifies the source archive SHA-256 before extraction.
 3. Re-extracts the verified source archive for every launch.
-4. Uses the official image's bundled `uv` 0.9.0 and runs `uv sync --frozen --no-dev` against the
-   committed lock, with both the uv cache and environment on the network volume.
+4. Resolves the official image's bundled `uv` 0.9.0 from `PATH` and runs
+   `uv sync --frozen --no-dev` against the committed lock. The environment at
+   `/opt/mantis/venv` and cache at `/opt/mantis/cache` use fast container disk;
+   source inputs, checkpoints, and final artifacts remain on `/workspace`.
 5. Executes the same sealed workload and fail-closed CUDA self-check used by the
    legacy image path.
+
+Matrix control files preserve the rendered plan's content-addressed directory
+on both the controller and Pod. Stage `matrix-plan.json`, `base-config.toml`, and
+the generated cell configs beneath
+`/workspace/mantis/control/PLAN_DIGEST/`; flattening them directly into the
+control root is rejected before Pod creation.
+
+CUDA utilization is optional telemetry. A missing NVML Python binding records
+`cuda_utilization_percent = null` and never interrupts training, checkpointing,
+or authoritative metric output.
+
+### 2026-07-23 A100 production evidence
+
+The first supported-template production run used source commit `c7d3ed9`, the
+pinned official MantisV2 checkpoint, four timeframes, seed 42, full fine-tuning,
+and one A100 SXM 80 GB. It early-stopped after 50 completed epochs and 10,000
+steps. Best validation total loss was `2.441334825754166` at epoch 41. The run
+produced 10 files, including both checkpoints, provenance, contamination,
+metrics, TensorBoard events, telemetry, and `train-result.json`.
+
+Before Pod deletion, all 10 files were copied and SHA-256 verified at both:
+
+```text
+~/Library/Application Support/mantis-runpod/artifacts/mantisv2-foundation-accuracy-v1-initial-4tf-full_finetune-s42-cd42b3be4d
+/Volumes/Storage/trading-research/artifacts/mantis-foundation-model/mantisv2-foundation-accuracy-v1-initial-4tf-full_finetune-s42-cd42b3be4d
+```
+
+The checkpoint identities are:
+
+```text
+best.pt    5e6de4cebfbd0fabc84857ed2cbdfb0954c02180466b98a9beb45dd52a364cbb
+latest.pt  87bc6f2c93f70fbb82fd56e88b43125017ca47038ac082d56b6a6554f2e495a3
+```
+
+Pod `4r4ek5keeyrpe0` was deleted only after both copies matched the remote
+manifest, and provider absence was then verified. This ordering is mandatory:
+complete -> hash -> copy -> verify both destinations -> delete -> verify
+provider absence.
 
 Expose only `22/tcp`. TensorBoard remains bound to `127.0.0.1:6006` and is
 reached through an SSH tunnel. The example intent at

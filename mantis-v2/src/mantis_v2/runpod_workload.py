@@ -189,7 +189,7 @@ def _validate_core(core: dict[str, Any], *, now: datetime, path_role: str) -> No
             bootstrap["source_archive"], "bootstrap.source_archive", path_role=path_role
         )
         expected_project = Path(f"/workspace/mantis/runtime/{source_revision}")
-        expected_venv = Path(f"/workspace/mantis/cache/venvs/{lock_record['sha256']}")
+        expected_venv = Path("/opt/mantis/venv")
         if Path(_text(bootstrap["project_root"], "bootstrap.project_root")) != expected_project:
             raise WorkloadError("bootstrap project root does not match the source revision")
         if Path(_text(bootstrap["venv_path"], "bootstrap.venv_path")) != expected_venv:
@@ -227,11 +227,20 @@ def _validate_core(core: dict[str, Any], *, now: datetime, path_role: str) -> No
     base_record = _file_record(
         core["matrix_base_config"], "matrix_base_config", path_role=path_role
     )
-    if (
-        Path(str(base_record[f"{path_role}_path"])).resolve()
-        != Path(str(plan_record[f"{path_role}_path"])).resolve().parent / "base-config.toml"
-    ):
-        raise WorkloadError("matrix base config is not colocated with the matrix plan")
+    try:
+        plan_payload = json.loads(Path(plan_record[f"{path_role}_path"]).read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise WorkloadError("matrix plan is invalid") from exc
+    plan_digest = plan_payload.get("plan_digest") if isinstance(plan_payload, dict) else None
+    if not isinstance(plan_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", plan_digest):
+        raise WorkloadError("matrix plan digest is invalid")
+    for role in ("controller", "pod"):
+        plan_path = Path(str(plan_record[f"{role}_path"]))
+        base_path = Path(str(base_record[f"{role}_path"]))
+        if plan_path.parent.name != plan_digest:
+            raise WorkloadError("matrix plan path does not preserve its digest")
+        if base_path != plan_path.parent / "base-config.toml":
+            raise WorkloadError("matrix base config is not colocated with the matrix plan")
     dataset_record = _file_record(core["dataset_manifest"], "dataset_manifest", path_role=path_role)
     if experiment.get("data", {}).get("corpus_manifest_sha256") != dataset_record["sha256"]:
         raise WorkloadError("dataset manifest differs from experiment config")
@@ -613,7 +622,7 @@ def _bound_workload(
                 "MANTIS_LOCK_PATH": f"{project_root}/uv.lock",
                 "MANTIS_IMAGE_CONTRACT_SHA256": str(manifest["image"]["self_check"]["sha256"]),
                 "MANTIS_UV_VERSION": uv_version,
-                "UV_CACHE_DIR": "/workspace/mantis/cache/uv",
+                "UV_CACHE_DIR": "/opt/mantis/cache",
                 "UV_PROJECT_ENVIRONMENT": venv_path,
             }
         )
@@ -628,8 +637,8 @@ def _bound_workload(
             'printf "%s\\n" "$expected" > "$temporary/.mantis-source.sha256"; '
             'rm -rf "$project"; mv "$temporary" "$project"; '
             'cd "$project"; '
-            "/uv sync --frozen --no-dev; "
-            f"exec /uv run mantis-v2 workload-execute --manifest {shlex.quote(str(pod_path))}"
+            "uv sync --frozen --no-dev; "
+            f"exec uv run mantis-v2 workload-execute --manifest {shlex.quote(str(pod_path))}"
         )
         docker_args = f"bash -lc {shlex.quote(shell)}"
     else:

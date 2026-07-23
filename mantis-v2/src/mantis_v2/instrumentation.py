@@ -40,7 +40,7 @@ def collect_resource_metrics(run_root: Path, device: torch.device) -> dict[str, 
         reserved = int(torch.cuda.memory_reserved(device))
         try:
             utilization = int(torch.cuda.utilization(device))
-        except (AttributeError, OSError, RuntimeError):
+        except (AttributeError, ImportError, OSError, RuntimeError):
             utilization = None
     run_root.mkdir(parents=True, exist_ok=True)
     return {

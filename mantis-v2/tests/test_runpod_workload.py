@@ -269,7 +269,7 @@ def _official_spec(tmp_path: Path) -> dict[str, object]:
     spec["bootstrap"] = {
         "source_archive": archive,
         "project_root": "/workspace/mantis/runtime/" + "a" * 40,
-        "venv_path": "/workspace/mantis/cache/venvs/" + str(lock["sha256"]),
+        "venv_path": "/opt/mantis/venv",
         "uv_version": "0.9.0",
     }
     return spec
@@ -398,11 +398,27 @@ def test_official_template_bootstrap_is_hash_bound_and_uses_no_registry_auth(
     assert "/start.sh" in workload["docker_args"]
     assert "sha256sum -c -" in workload["docker_args"]
     assert "uv sync --frozen --no-dev" in workload["docker_args"]
+    assert "exec uv run mantis-v2" in workload["docker_args"]
+    assert "/uv " not in workload["docker_args"]
     assert workload["environment"]["MANTIS_BASE_IMAGE"] == manifest["image"]["ref"]
     assert workload["environment"]["MANTIS_LOCK_PATH"].endswith("/uv.lock")
-    assert workload["environment"]["UV_PROJECT_ENVIRONMENT"].startswith(
-        "/workspace/mantis/cache/venvs/"
+    assert workload["environment"]["UV_CACHE_DIR"] == "/opt/mantis/cache"
+    assert workload["environment"]["UV_PROJECT_ENVIRONMENT"] == "/opt/mantis/venv"
+    assert (
+        Path(manifest["matrix_plan"]["pod_path"]).parent.name
+        == json.loads(Path(manifest["matrix_plan"]["controller_path"]).read_text())["plan_digest"]
     )
+
+
+def test_manifest_rejects_flattened_pod_matrix_paths(tmp_path: Path) -> None:
+    spec = _official_spec(tmp_path)
+    spec["matrix_plan"]["pod_path"] = "/workspace/mantis/control/matrix-plan.json"  # type: ignore[index]
+    spec["matrix_base_config"]["pod_path"] = (  # type: ignore[index]
+        "/workspace/mantis/control/base-config.toml"
+    )
+
+    with pytest.raises(WorkloadError, match="preserve its digest"):
+        seal_workload_manifest(spec, tmp_path / "flattened-plan")
 
 
 def test_manifest_fails_closed_on_tamper_missing_field_holdout_or_bad_attestation(
