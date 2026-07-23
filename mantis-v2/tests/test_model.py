@@ -130,7 +130,11 @@ def test_transformer_finetune_freezes_only_upstream_token_generator(
 
 @pytest.mark.parametrize(
     ("mode", "rank", "alpha"),
-    [("lora_r8_alpha16", 8, 16), ("lora_r16_alpha32", 16, 32)],
+    [
+        ("lora_r8_alpha16", 8, 16),
+        ("lora_r16_alpha32", 16, 32),
+        ("lora_r8_alpha16_head_warmstart", 8, 16),
+    ],
 )
 def test_lora_targets_only_attention_projections_and_keeps_heads_trainable(
     monkeypatch: pytest.MonkeyPatch, mode: str, rank: int, alpha: int
@@ -181,15 +185,50 @@ def test_lora_targets_only_attention_projections_and_keeps_heads_trainable(
         torch.device("cpu"),
     )
 
-    trainable_encoder = {
-        name for name, parameter in model.encoder.named_parameters() if parameter.requires_grad
-    }
-    assert trainable_encoder == {
+    expected_lora = {
         f"backbone.transf_unit.transformer.layers.{layer}.attention.{projection}.{parameter}"
         for layer in range(2)
         for projection in ("wQKV", "wO")
         for parameter in ("lora_A", "lora_B")
     }
+    trainable_encoder = {
+        name for name, parameter in model.encoder.named_parameters() if parameter.requires_grad
+    }
+    if mode == "lora_r8_alpha16_head_warmstart":
+        assert trainable_encoder == set()
+        assert all(parameter.requires_grad for parameter in model.candle_head.parameters())
+        assert all(parameter.requires_grad for parameter in model.leg_head.parameters())
+        before = {name: tensor.clone() for name, tensor in model.state_dict().items()}
+        optimizer = torch.optim.AdamW(
+            [parameter for parameter in model.parameters() if parameter.requires_grad]
+        )
+        output = model(torch.zeros(2, 5, 512))
+        (output["candle"].sum() + output["leg"].sum()).backward()
+        optimizer.step()
+        after_warm = model.state_dict()
+        for name, tensor in before.items():
+            if name.startswith(("encoder.", "adapter.")):
+                assert torch.equal(tensor, after_warm[name])
+        assert any(
+            not torch.equal(tensor, after_warm[name])
+            for name, tensor in before.items()
+            if name.startswith("candle_head.")
+        )
+        assert any(
+            not torch.equal(tensor, after_warm[name])
+            for name, tensor in before.items()
+            if name.startswith("leg_head.")
+        )
+        before_transition = {name: tensor.clone() for name, tensor in after_warm.items()}
+        model.set_adaptation_phase("lora")
+        assert all(
+            torch.equal(before_transition[name], tensor)
+            for name, tensor in model.state_dict().items()
+        )
+        trainable_encoder = {
+            name for name, parameter in model.encoder.named_parameters() if parameter.requires_grad
+        }
+    assert trainable_encoder == expected_lora
     for module in model.encoder.modules():
         if module.__class__.__name__ == "LoRALinear":
             assert module.rank == rank

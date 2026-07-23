@@ -78,7 +78,7 @@ def inject_mantis_lora(backbone: nn.Module, *, rank: int, alpha: int) -> tuple[s
 
 
 def lora_spec(mode: str) -> tuple[int, int]:
-    if mode == "lora_r8_alpha16":
+    if mode in {"lora_r8_alpha16", "lora_r8_alpha16_head_warmstart"}:
         return 8, 16
     if mode == "lora_r16_alpha32":
         return 16, 32

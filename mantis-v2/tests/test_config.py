@@ -64,6 +64,75 @@ def test_lora_modes_are_strictly_configurable(tmp_path: Path, mode: str) -> None
     assert load_config(path).model.mode == mode
 
 
+def test_bundled_adaptation_config_is_strict(tmp_path: Path) -> None:
+    source = (ROOT / "configs" / "nextleg.toml").read_text()
+    path = tmp_path / "bundled.toml"
+    path.write_text(
+        source.replace(
+            'mode = "full_finetune"',
+            'mode = "lora_r8_alpha16_head_warmstart"',
+        )
+        + "\n[adaptation]\n"
+        + "warm_start_updates = 2000\n"
+        + "total_updates = 10000\n"
+        + "lora_rank = 8\n"
+        + "lora_alpha = 16\n"
+    )
+
+    config = load_config(path)
+    assert config.adaptation is not None
+    assert config.adaptation.warm_start_updates == 2000
+    assert config.adaptation.total_updates == 10000
+    assert config.adaptation.lora_rank == 8
+    assert config.adaptation.lora_alpha == 16
+
+
+def test_bundled_production_config_has_fixed_budget_and_four_timeframes() -> None:
+    config = load_config(ROOT / "configs" / "nextleg-runpod-cuda-bundled-v1.toml")
+    assert config.model.mode == "lora_r8_alpha16_head_warmstart"
+    assert config.data.intervals == ("1min", "3min", "5min", "15min")
+    assert config.adaptation is not None
+    assert config.adaptation.warm_start_updates == 2000
+    assert config.adaptation.total_updates == 10000
+    assert (config.adaptation.lora_rank, config.adaptation.lora_alpha) == (8, 16)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("warm_start_updates", "0", "must be >= 1"),
+        ("total_updates", "0", "must be >= 1"),
+        ("warm_start_updates", "10000", "must be less than"),
+        ("lora_rank", "16", "fixes lora_rank=8"),
+        ("lora_alpha", "32", "fixes lora_rank=8"),
+    ],
+)
+def test_bundled_adaptation_rejects_invalid_contract(
+    tmp_path: Path, field: str, value: str, message: str
+) -> None:
+    source = (ROOT / "configs" / "nextleg.toml").read_text()
+    valid_values = {
+        "warm_start_updates": "2000",
+        "total_updates": "10000",
+        "lora_rank": "8",
+        "lora_alpha": "16",
+    }
+    adaptation = (
+        "\n[adaptation]\n"
+        "warm_start_updates = 2000\n"
+        "total_updates = 10000\n"
+        "lora_rank = 8\n"
+        "lora_alpha = 16\n"
+    ).replace(f"{field} = {valid_values[field]}", f"{field} = {value}")
+    path = tmp_path / "invalid-bundled.toml"
+    path.write_text(
+        source.replace('mode = "full_finetune"', 'mode = "lora_r8_alpha16_head_warmstart"')
+        + adaptation
+    )
+    with pytest.raises(ConfigError, match=message):
+        load_config(path)
+
+
 def test_legacy_production_config_defaults_to_unbound_csv() -> None:
     config = load_config(ROOT / "configs" / "nextleg.toml")
     assert config.data.file_format == "csv"

@@ -63,6 +63,8 @@ just inspect-data mantis-v2/configs/nextleg-parquet-v2.toml
 just probe-mps
 just train mantis-v2/configs/nextleg-parquet-v2.toml
 just validated-export mantis-v2/configs/nextleg-parquet-v2.toml
+just train mantis-v2/configs/nextleg-runpod-cuda-bundled-v1.toml
+just validated-export mantis-v2/configs/nextleg-runpod-cuda-bundled-v1.toml
 just rl-dry-run mantis-v2/configs/rl-entry-smoke.toml
 just rl-build-episodes mantis-v2/configs/rl-entry-smoke.toml 0 training 21
 just rl-account-replay fixture.json replay.json mantis-v2/configs/rl-entry-smoke.toml
@@ -109,6 +111,19 @@ validation batch, with configured validation coverage across all streams.
 validation-selected checkpoint and then exports only if the evaluation gate
 passes. The qualified production path starts from pinned official MantisV2
 weights and runs on Apple MPS.
+
+The bundled CUDA candidate uses
+`configs/nextleg-runpod-cuda-bundled-v1.toml`. It installs zero-delta rank-8,
+alpha-16 attention LoRA at construction, warms only the candle and leg heads
+for at most 2,000 optimizer updates, then enables only those heads and LoRA
+under a fresh AdamW optimizer. The original encoder and unused adapter remain
+frozen. Both phases share one hard 10,000-update ceiling; unused warm-start
+allowance can be consumed only after the LoRA transition. Checkpoints record
+the phase, phase-local and total counts, transition-parent digest, optimizer
+identity, and trainable counts. `just train` resumes either phase from those
+identities. `validated-export` rejects a warm-start checkpoint and accepts only
+a validation-selected LoRA-phase checkpoint with native, adapter-reload, and
+merged-model parity.
 
 Foundation precision is a strict experiment identity: `fp32` is the accepted
 default and `bf16` is rejected unless explicit CUDA reports BF16 support. BF16
