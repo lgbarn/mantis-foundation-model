@@ -14,6 +14,7 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from itertools import pairwise
 from pathlib import Path
 from typing import cast
 
@@ -1095,24 +1096,32 @@ def _paired_effects(
     candidate: Sequence[Mapping[str, object]],
     baseline: Sequence[Mapping[str, object]],
     seeds: Sequence[int],
-) -> tuple[np.ndarray, dict[str, float], list[str]]:
+) -> tuple[
+    np.ndarray,
+    dict[str, float],
+    tuple[tuple[str, ...], ...],
+    list[tuple[int, str]],
+]:
     dimensions = ("fold", "calendar_block", "episode_id", "ticker", "profile", "seed")
     candidate_by_key = {tuple(row[name] for name in dimensions): row for row in candidate}
     baseline_by_key = {tuple(row[name] for name in dimensions): row for row in baseline}
     if not candidate_by_key or set(candidate_by_key) != set(baseline_by_key):
         raise ConfirmationError("paired pass-rate comparison is non-estimable")
-    block_names = sorted({cast(str, key[1]) for key in candidate_by_key})
-    if len(block_names) < _MINIMUM_MARKET_BLOCKS:
+    block_keys = sorted({(cast(int, key[0]), cast(str, key[1])) for key in candidate_by_key})
+    if len(block_keys) < _MINIMUM_MARKET_BLOCKS:
         raise ConfirmationError("non_estimable_insufficient_blocks")
-    differences: dict[tuple[int, str], list[float]] = defaultdict(list)
+    differences: dict[tuple[int, int, str], list[float]] = defaultdict(list)
     for key, row in candidate_by_key.items():
-        differences[(cast(int, key[5]), cast(str, key[1]))].append(
+        differences[(cast(int, key[5]), cast(int, key[0]), cast(str, key[1]))].append(
             float(row["outcome"] == "PASS") - float(baseline_by_key[key]["outcome"] == "PASS")
         )
-    if any((seed, block) not in differences for seed in seeds for block in block_names):
+    if any((seed, fold, week) not in differences for seed in seeds for fold, week in block_keys):
         raise ConfirmationError("non_estimable_missing_block_seed_attempt")
     block_effects = np.asarray(
-        [np.mean([np.mean(differences[(seed, block)]) for seed in seeds]) for block in block_names],
+        [
+            np.mean([np.mean(differences[(seed, fold, week)]) for seed in seeds])
+            for fold, week in block_keys
+        ],
         dtype=np.float64,
     )
     seed_effects = {
@@ -1120,7 +1129,7 @@ def _paired_effects(
             np.mean(
                 [
                     value
-                    for (owner, _block), values in differences.items()
+                    for (owner, _fold, _week), values in differences.items()
                     if owner == seed
                     for value in values
                 ]
@@ -1128,7 +1137,11 @@ def _paired_effects(
         )
         for seed in seeds
     }
-    return block_effects, seed_effects, block_names
+    fold_weeks = tuple(
+        tuple(week for owner, week in block_keys if owner == fold)
+        for fold in sorted({fold for fold, _week in block_keys})
+    )
+    return block_effects, seed_effects, fold_weeks, block_keys
 
 
 def _exact_seed_analysis(seed_effects: Mapping[str, float]) -> dict[str, object]:
@@ -1151,26 +1164,117 @@ def _exact_seed_analysis(seed_effects: Mapping[str, float]) -> dict[str, object]
     }
 
 
-def _synchronized_bootstrap(
-    block_effects: Sequence[np.ndarray], block_count: int, seed: int
-) -> tuple[list[np.ndarray], str]:
+def _adjacent_week_blocks(
+    fold_weeks: Sequence[Sequence[str]], block_length_weeks: int
+) -> np.ndarray:
+    if not fold_weeks:
+        raise ConfirmationError("moving-block contract requires at least one fold")
+    if block_length_weeks <= 0:
+        raise ConfirmationError("moving-block block length must be positive")
+    blocks: list[list[int]] = []
+    offset = 0
+    for weeks in fold_weeks:
+        if not weeks:
+            raise ConfirmationError("moving-block folds must not be empty")
+        if block_length_weeks > len(weeks):
+            raise ConfirmationError("moving-block block length exceeds available weeks")
+        mondays = []
+        for week in weeks:
+            if not _WEEK_PATTERN.fullmatch(week):
+                raise ConfirmationError("moving-block source contains an invalid ISO week")
+            year, number = week.split("-W", 1)
+            try:
+                mondays.append(datetime.fromisocalendar(int(year), int(number), 1))
+            except ValueError as exc:
+                raise ConfirmationError("moving-block source contains an invalid ISO week") from exc
+        if any(later <= earlier for earlier, later in pairwise(mondays)):
+            raise ConfirmationError("moving-block weeks must be unique and strictly ordered")
+        prior_block_count = len(blocks)
+        for start in range(len(weeks) - block_length_weeks + 1):
+            window = mondays[start : start + block_length_weeks]
+            if all((later - earlier).days == 7 for earlier, later in pairwise(window)):
+                blocks.append(list(range(offset + start, offset + start + block_length_weeks)))
+        if len(blocks) == prior_block_count:
+            raise ConfirmationError("moving-block fold has insufficient adjacent source blocks")
+        covered = {index for block in blocks[prior_block_count:] for index in block}
+        if covered != set(range(offset, offset + len(weeks))):
+            raise ConfirmationError("moving-block fold does not cover every source week")
+        offset += len(weeks)
+    if not blocks:
+        raise ConfirmationError("moving-block contract has insufficient adjacent source blocks")
+    return np.asarray(blocks, dtype=np.uint32)
+
+
+def _expand_block_choices(
+    blocks: np.ndarray, choices: np.ndarray, sample_length: int
+) -> np.ndarray:
+    if sample_length <= 0 or blocks.ndim != 2 or choices.ndim != 2:
+        raise ConfirmationError("moving-block sample shape is invalid")
+    return cast(np.ndarray, blocks[choices].reshape(choices.shape[0], -1)[:, :sample_length])
+
+
+def _synchronized_adjacent_week_bootstrap(
+    block_effects: Sequence[np.ndarray],
+    fold_weeks: Sequence[Sequence[str]],
+    block_length_weeks: int,
+    seed: int,
+    *,
+    replicates: int = _MARKET_BOOTSTRAP_REPLICATES,
+) -> tuple[list[np.ndarray], str, dict[str, object]]:
+    if replicates <= 0:
+        raise ConfirmationError("moving-block replicates must be positive")
+    source_week_count = sum(len(weeks) for weeks in fold_weeks)
+    if source_week_count < _MINIMUM_MARKET_BLOCKS:
+        raise ConfirmationError("non_estimable_insufficient_blocks")
+    if not block_effects or any(
+        np.asarray(effects).shape != (source_week_count,) for effects in block_effects
+    ):
+        raise ConfirmationError("moving-block effects do not match source weeks")
+    all_blocks = _adjacent_week_blocks(fold_weeks, block_length_weeks)
+    fold_blocks: list[np.ndarray] = []
+    offset = 0
+    blocks_per_replicate = 0
+    for weeks in fold_weeks:
+        next_offset = offset + len(weeks)
+        owned = all_blocks[(all_blocks[:, 0] >= offset) & (all_blocks[:, -1] < next_offset)]
+        if not len(owned):
+            raise ConfirmationError("moving-block fold has insufficient adjacent source blocks")
+        fold_blocks.append(owned)
+        blocks_per_replicate += math.ceil(len(weeks) / block_length_weeks)
+        offset = next_offset
+
     generator = np.random.Generator(np.random.PCG64(seed))
-    outputs = [np.empty(_MARKET_BOOTSTRAP_REPLICATES, dtype=np.float64) for _ in block_effects]
+    outputs = [np.empty(replicates, dtype=np.float64) for _ in block_effects]
     index_digest = hashlib.sha256()
     chunk_size = 2_048
-    for start in range(0, _MARKET_BOOTSTRAP_REPLICATES, chunk_size):
-        stop = min(start + chunk_size, _MARKET_BOOTSTRAP_REPLICATES)
-        indices = generator.integers(
-            0, block_count, size=(stop - start, block_count), dtype=np.uint32
-        )
+    for start in range(0, replicates, chunk_size):
+        stop = min(start + chunk_size, replicates)
+        sampled_folds = []
+        for weeks, blocks in zip(fold_weeks, fold_blocks, strict=True):
+            choices = generator.integers(
+                0,
+                len(blocks),
+                size=(stop - start, math.ceil(len(weeks) / block_length_weeks)),
+                dtype=np.uint32,
+            )
+            sampled_folds.append(_expand_block_choices(blocks, choices, len(weeks)))
+        indices = np.concatenate(sampled_folds, axis=1)
         index_digest.update(indices.tobytes())
         for output, effects in zip(outputs, block_effects, strict=True):
             output[start:stop] = effects[indices].mean(axis=1)
-    return outputs, index_digest.hexdigest()
+    metadata: dict[str, object] = {
+        "method": "synchronized_adjacent_week_moving_block_bootstrap_v1",
+        "block_length_weeks": block_length_weeks,
+        "source_week_count": source_week_count,
+        "effective_block_count": len(all_blocks),
+        "blocks_per_replicate": blocks_per_replicate,
+        "fold_count": len(fold_weeks),
+    }
+    return outputs, index_digest.hexdigest(), metadata
 
 
 def _qualification_gates(
-    rows: Sequence[Mapping[str, object]], freeze_payload_sha256: str
+    config: RlConfig, rows: Sequence[Mapping[str, object]], freeze_payload_sha256: str
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
     candidate = [row for row in rows if row["variant"] == _CANDIDATE.value]
     baseline = [row for row in rows if row["variant"] == PolicyVariant.INDEPENDENT_ACTOR.value]
@@ -1190,21 +1294,34 @@ def _qualification_gates(
             selected_baseline = [
                 row for row in baseline if row["ticker"] == ticker and row["profile"] == profile
             ]
-        blocks, seed_effects, block_names = _paired_effects(
+        blocks, seed_effects, fold_weeks, block_keys = _paired_effects(
             selected_candidate, selected_baseline, (42, 43, 44, 45, 46)
         )
         view_effects.append(
-            (scope, ticker, profile, blocks, seed_effects, block_names, len(selected_candidate))
+            (
+                scope,
+                ticker,
+                profile,
+                blocks,
+                seed_effects,
+                fold_weeks,
+                block_keys,
+                len(selected_candidate),
+            )
         )
-    ordered_blocks = view_effects[0][5]
-    if any(value[5] != ordered_blocks for value in view_effects):
+    ordered_fold_weeks = view_effects[0][5]
+    ordered_blocks = view_effects[0][6]
+    if any(value[5] != ordered_fold_weeks or value[6] != ordered_blocks for value in view_effects):
         raise ConfirmationError("required views do not share synchronized calendar blocks")
     bootstrap_seed = int.from_bytes(
-        hashlib.sha256(f"{freeze_payload_sha256}:market-bootstrap-v1".encode()).digest()[:8],
+        hashlib.sha256(f"{freeze_payload_sha256}:adjacent-week-bootstrap-v1".encode()).digest()[:8],
         "big",
     )
-    distributions, index_sha256 = _synchronized_bootstrap(
-        [value[3] for value in view_effects], len(ordered_blocks), bootstrap_seed
+    distributions, index_sha256, sampler_metadata = _synchronized_adjacent_week_bootstrap(
+        [value[3] for value in view_effects],
+        ordered_fold_weeks,
+        config.evaluation.market_block_length_weeks,
+        bootstrap_seed,
     )
     gates: list[dict[str, object]] = []
     for (
@@ -1213,7 +1330,8 @@ def _qualification_gates(
         profile,
         blocks,
         seed_effects,
-        block_names,
+        _fold_weeks,
+        block_keys,
         matched_attempts,
     ), bootstrap in zip(view_effects, distributions, strict=True):
         point = float(blocks.mean())
@@ -1227,7 +1345,7 @@ def _qualification_gates(
             "point_difference": point,
             "paired_lcb_95": lower,
             "matched_attempts": matched_attempts,
-            "complete_calendar_blocks": len(block_names),
+            "complete_calendar_blocks": len(block_keys),
             "seed_uncertainty": _exact_seed_analysis(seed_effects),
             "passed": point >= 0.0 and lower >= 0.0,
         }
@@ -1235,14 +1353,17 @@ def _qualification_gates(
     if not gates or not all(cast(bool, gate["passed"]) for gate in gates):
         raise ConfirmationError("preregistered architecture failed the negative-transfer gate")
     bootstrap_contract = {
-        "method": "synchronized_calendar_week_bootstrap_v1",
+        **sampler_metadata,
         "rng": "numpy.PCG64",
         "rng_seed": bootstrap_seed,
         "replicates": _MARKET_BOOTSTRAP_REPLICATES,
         "quantile": 0.05,
         "quantile_method": "inverted_cdf",
-        "block_definition": "fixed_exchange_calendar_week",
-        "ordered_source_block_ids": ordered_blocks,
+        "block_definition": "adjacent_exchange_calendar_weeks_within_fold",
+        "ordered_source_block_ids": [
+            {"fold": fold, "calendar_week": week} for fold, week in ordered_blocks
+        ],
+        "truncation_rule": "sample_each_fold_to_ceil_then_truncate_to_source_week_count",
         "index_matrix_sha256": index_sha256,
         "interval_scope": "pointwise_not_simultaneous_familywise",
     }
@@ -1317,7 +1438,7 @@ def qualify_architecture(
     evidence = _load_object(evidence_path, "architecture evidence")
     plan, plan_sha256 = _validated_plan(config, winner_sha256, evidence)
     rows, schedule_sha256 = _validated_rows(config, evidence, winner_sha256, plan)
-    gates, bootstrap_contract = _qualification_gates(rows, plan_sha256)
+    gates, bootstrap_contract = _qualification_gates(config, rows, plan_sha256)
     repository = Path(__file__).resolve().parents[3]
     spec_path = repository / "docs" / "research" / "2026-07-20-mantisv2-topstep-rl-entry-spec.md"
     statistical_contract = {
@@ -1332,7 +1453,7 @@ def qualify_architecture(
         "market_bootstrap_replicates": _MARKET_BOOTSTRAP_REPLICATES,
         "market_rng": "numpy.PCG64",
         "market_rng_derivation": (
-            "first_u64_be_sha256(candidate_freeze_payload_sha256 + ':market-bootstrap-v1')"
+            "first_u64_be_sha256(candidate_freeze_payload_sha256 +  ':adjacent-week-bootstrap-v1')"
         ),
         "one_sided_quantile": 0.05,
         "quantile_method": "inverted_cdf",
@@ -2035,25 +2156,29 @@ def decide_continuation(
             earlier = [
                 row for row in earlier if row["ticker"] == ticker and row["profile"] == profile
             ]
-        blocks, _seed_effects, block_names = _paired_effects(
+        blocks, _seed_effects, fold_weeks, block_keys = _paired_effects(
             later, earlier, config.training.confirmation_seeds
         )
-        views.append((scope, ticker, profile, blocks, block_names))
-    ordered_blocks = views[0][4]
-    if any(view[4] != ordered_blocks for view in views):
+        views.append((scope, ticker, profile, blocks, fold_weeks, block_keys))
+    ordered_fold_weeks = views[0][4]
+    ordered_blocks = views[0][5]
+    if any(view[4] != ordered_fold_weeks or view[5] != ordered_blocks for view in views):
         raise ConfirmationError("budget views do not share synchronized blocks")
     bootstrap_seed = int.from_bytes(
         hashlib.sha256(
-            f"{candidate['candidate_freeze_payload_sha256']}:market-bootstrap-v1".encode()
+            f"{candidate['candidate_freeze_payload_sha256']}:adjacent-week-bootstrap-v1".encode()
         ).digest()[:8],
         "big",
     )
-    distributions, index_sha256 = _synchronized_bootstrap(
-        [view[3] for view in views], len(ordered_blocks), bootstrap_seed
+    distributions, index_sha256, sampler_metadata = _synchronized_adjacent_week_bootstrap(
+        [view[3] for view in views],
+        ordered_fold_weeks,
+        config.evaluation.market_block_length_weeks,
+        bootstrap_seed,
     )
     comparisons = []
     estimable = True
-    for (scope, ticker, profile, blocks, block_names), bootstrap in zip(
+    for (scope, ticker, profile, blocks, _fold_weeks, block_keys), bootstrap in zip(
         views, distributions, strict=True
     ):
         nondegenerate = bool(np.isfinite(bootstrap).all() and float(np.ptp(bootstrap)) > 0.0)
@@ -2069,7 +2194,7 @@ def decide_continuation(
                 "profile": profile,
                 "point_improvement": point,
                 "paired_lcb_95": lower,
-                "complete_calendar_blocks": len(block_names),
+                "complete_calendar_blocks": len(block_keys),
                 "estimable": nondegenerate,
             }
         )
@@ -2092,9 +2217,21 @@ def decide_continuation(
         "campaign_progress_path": progress_path_value,
         "campaign_progress_sha256": progress_sha256,
         "comparisons": comparisons,
-        "bootstrap_seed": bootstrap_seed,
-        "bootstrap_replicates": _MARKET_BOOTSTRAP_REPLICATES,
-        "bootstrap_index_matrix_sha256": index_sha256,
+        "market_bootstrap": {
+            **sampler_metadata,
+            "rng": "numpy.PCG64",
+            "rng_seed": bootstrap_seed,
+            "replicates": _MARKET_BOOTSTRAP_REPLICATES,
+            "quantile": 0.05,
+            "quantile_method": "inverted_cdf",
+            "block_definition": "adjacent_exchange_calendar_weeks_within_fold",
+            "ordered_source_block_ids": [
+                {"fold": fold, "calendar_week": week} for fold, week in ordered_blocks
+            ],
+            "truncation_rule": ("sample_each_fold_to_ceil_then_truncate_to_source_week_count"),
+            "index_matrix_sha256": index_sha256,
+            "interval_scope": "pointwise_not_simultaneous_familywise",
+        },
         "final_timesteps": (
             config.training.maximum_timesteps_per_seed
             if authorized

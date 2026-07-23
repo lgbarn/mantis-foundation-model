@@ -77,6 +77,118 @@ def _calendar_quarter(year: int, week: int) -> str:
     return f"calendar-quarter-{(month - 1) // 3 + 1}"
 
 
+def test_adjacent_week_blocks_are_fold_local_and_truncate_deterministically() -> None:
+    folds = (
+        ("2025-W01", "2025-W02", "2025-W03", "2025-W04"),
+        ("2025-W10", "2025-W11", "2025-W12"),
+    )
+
+    blocks = rl_confirmation._adjacent_week_blocks(folds, block_length_weeks=2)
+    sampled = rl_confirmation._expand_block_choices(
+        blocks,
+        np.asarray([[1, 3, 2, 4]], dtype=np.uint32),
+        sample_length=7,
+    )
+
+    assert blocks.tolist() == [[0, 1], [1, 2], [2, 3], [4, 5], [5, 6]]
+    assert sampled.tolist() == [[1, 2, 4, 5, 2, 3, 5]]
+
+
+def test_adjacent_week_bootstrap_is_synchronized_and_byte_deterministic() -> None:
+    folds = (
+        tuple(f"2025-W{week:02d}" for week in range(1, 13)),
+        tuple(f"2025-W{week:02d}" for week in range(20, 32)),
+    )
+    base = np.arange(24, dtype=np.float64)
+
+    first = rl_confirmation._synchronized_adjacent_week_bootstrap(
+        (base, base + 100.0, base + 200.0),
+        folds,
+        block_length_weeks=2,
+        seed=1234,
+        replicates=64,
+    )
+    second = rl_confirmation._synchronized_adjacent_week_bootstrap(
+        (base, base + 100.0, base + 200.0),
+        folds,
+        block_length_weeks=2,
+        seed=1234,
+        replicates=64,
+    )
+
+    distributions, index_sha256, metadata = first
+    assert np.array_equal(distributions[1] - distributions[0], np.full(64, 100.0))
+    assert np.array_equal(distributions[2] - distributions[0], np.full(64, 200.0))
+    assert all(
+        left.tobytes() == right.tobytes()
+        for left, right in zip(distributions, second[0], strict=True)
+    )
+    assert index_sha256 == second[1]
+    assert metadata == second[2]
+    assert metadata == {
+        "method": "synchronized_adjacent_week_moving_block_bootstrap_v1",
+        "block_length_weeks": 2,
+        "source_week_count": 24,
+        "effective_block_count": 22,
+        "blocks_per_replicate": 12,
+        "fold_count": 2,
+    }
+
+
+def test_paired_effects_preserve_fold_identity_for_repeated_calendar_weeks() -> None:
+    baseline = []
+    candidate = []
+    for fold in (0, 1):
+        for week in range(1, 11):
+            common = {
+                "fold": fold,
+                "calendar_block": f"2025-W{week:02d}",
+                "episode_id": f"fold-{fold}-week-{week}",
+                "ticker": "NQ",
+                "profile": "one_mini",
+                "seed": 42,
+            }
+            baseline.append({**common, "outcome": "TIMEOUT"})
+            candidate.append({**common, "outcome": "PASS" if fold else "TIMEOUT"})
+
+    effects, _seed_effects, folds, block_keys = rl_confirmation._paired_effects(
+        candidate, baseline, (42,)
+    )
+
+    assert effects.tolist() == ([0.0] * 10 + [1.0] * 10)
+    assert folds == (
+        tuple(f"2025-W{week:02d}" for week in range(1, 11)),
+        tuple(f"2025-W{week:02d}" for week in range(1, 11)),
+    )
+    assert block_keys[0] == (0, "2025-W01")
+    assert block_keys[10] == (1, "2025-W01")
+
+
+@pytest.mark.parametrize(
+    ("folds", "block_length", "message"),
+    [
+        ((), 2, "at least one fold"),
+        ((("2025-W01",), ()), 1, "folds must not be empty"),
+        ((("2025-W01", "2025-W02"),), 0, "block length must be positive"),
+        ((("2025-W01", "2025-W02"),), 3, "block length exceeds"),
+        ((("2025-W01", "2025-W01"),), 1, "strictly ordered"),
+        ((("2025-W02", "2025-W01"),), 1, "strictly ordered"),
+        ((("2025-W01", "2025-W03"),), 2, "insufficient adjacent source blocks"),
+        (
+            ((*(f"2025-W{week:02d}" for week in range(1, 19)), "2025-W20", "2025-W22"),),
+            2,
+            "does not cover every source week",
+        ),
+        ((("not-a-week", "2025-W02"),), 1, "ISO week"),
+    ],
+)
+def test_adjacent_week_blocks_reject_invalid_contracts(
+    folds: tuple[tuple[str, ...], ...], block_length: int, message: str
+) -> None:
+    with pytest.raises(ConfirmationError, match=message):
+        rl_confirmation._adjacent_week_blocks(folds, block_length_weeks=block_length)
+
+
 def _winner(path: Path) -> Path:
     parameters = {
         "learning_rate": 0.0003,
@@ -164,7 +276,7 @@ def _evidence(path: Path, winner: Path, *, candidate_passes: int = 9) -> Path:
                     for block_index in range(1, 21):
                         passes = 8
                         if variant == PolicyVariant.SHARED_TICKER_VALUE.value:
-                            passes = candidate_passes + int(block_index % 2 == 0)
+                            passes = candidate_passes + int(block_index % 3 == 0)
                         for episode in range(10):
                             rows.append(
                                 {
@@ -385,7 +497,7 @@ def _campaign_result(request) -> dict[str, object]:
                         "episode_id": f"{ticker}-{profile}-{block_index:02d}",
                         "outcome": (
                             "PASS"
-                            if request.phase != "development" and block_index % 2 == 0
+                            if request.phase != "development" and block_index % 3 == 0
                             else "TIMEOUT"
                         ),
                         "finite": True,
@@ -511,11 +623,17 @@ def test_qualification_freezes_only_preregistered_candidate_from_validation(tmp_
     assert all(gate["seed_uncertainty"]["assignments"] == 32 for gate in payload["gates"])
     expected_seed = int.from_bytes(
         hashlib.sha256(
-            f"{payload['architecture_plan_sha256']}:market-bootstrap-v1".encode()
+            f"{payload['architecture_plan_sha256']}:adjacent-week-bootstrap-v1".encode()
         ).digest()[:8],
         "big",
     )
     assert payload["market_bootstrap"]["rng_seed"] == expected_seed
+    assert payload["market_bootstrap"]["method"] == (
+        "synchronized_adjacent_week_moving_block_bootstrap_v1"
+    )
+    assert payload["market_bootstrap"]["block_length_weeks"] == 2
+    assert payload["market_bootstrap"]["source_week_count"] == 20
+    assert payload["market_bootstrap"]["effective_block_count"] == 19
     repeated = qualify_architecture(config, winner, evidence, tmp_path / "candidates")
     assert (
         repeated["market_bootstrap"]["index_matrix_sha256"]
@@ -1251,6 +1369,12 @@ def test_bounded_production_campaign_reaches_serving_freeze(
     )
 
     assert decision["status"] == "authorized"
+    assert decision["market_bootstrap"]["method"] == (
+        "synchronized_adjacent_week_moving_block_bootstrap_v1"
+    )
+    assert decision["market_bootstrap"]["block_length_weeks"] == 2
+    assert decision["market_bootstrap"]["source_week_count"] == 20
+    assert decision["market_bootstrap"]["effective_block_count"] == 19
     assert serving["status"] == "complete"
     assert serving["final_timesteps"] == 10_000_000
     assert serving["confirmation_statistics"]["phase"] == "continuation"
