@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "api_key_env": "RUNPOD_API_KEY",
+  "api_v2": {
+    "base_url": "https://api.runpod.io/v2",
+    "openapi_sha256": "58a7c1aedec38ab48f676dc4e727f40eeec66edc740bb98cc1dea94293c706fd"
+  },
+  "runpodctl": {
+    "version": "v2.7.2"
+  },
+  "gpu": {
+    "id": "NVIDIA A100 80GB PCIe",
+    "count": 1,
+    "cloud": "SECURE",
+    "min_memory_gb": 80,
+    "max_hourly_price_usd": 2.0
+  },
+  "pod": {
+    "name": "mantisv2-foundation-production",
+    "image": "runpod/pytorch@sha256:0a360022e8de4375af99430f84e8b38951acc397252163a37ceac7204d01be35",
+    "container_disk_gb": 80,
+    "network_volume_id": "replace-with-network-volume-id",
+    "volume_mount_path": "/workspace",
+    "ports": [
+      "22/tcp"
+    ],
+    "terminate_after": "12h"
+  },
+  "ssh": {
+    "key_path": "/Users/replace-me/.ssh/id_ed25519",
+    "user": "root",
+    "ready_timeout_seconds": 900,
+    "poll_seconds": 10
+  },
+  "paths": {
+    "source_root": "/Users/replace-me/Personal/Trading/mantis-foundation-model",
+    "remote_repo": "/workspace/mantis/repo",
+    "corpus_manifest": "/Volumes/Storage/trading-research/data/mantisv2/corpus/manifest.json",
+    "remote_corpus_manifest": "/workspace/mantis/data/corpus/manifest.json",
+    "remote_artifact_root": "/workspace/mantis/artifacts/mantisv2-foundation-production",
+    "local_artifact_root": "/Volumes/Storage/trading-research/artifacts/mantis-foundation-model/mantisv2-foundation-production",
+    "receipt_root": "/Users/replace-me/Library/Application Support/mantis-runpod-v2"
+  },
+  "commands": {
+    "remote_train": [
+      "just",
+      "train",
+      "mantis-v2/configs/nextleg-parquet-v2.toml"
+    ],
+    "local_validate": [
+      "just",
+      "validated-export",
+      "mantis-v2/configs/nextleg-parquet-v2.toml"
+    ]
+  }
+}

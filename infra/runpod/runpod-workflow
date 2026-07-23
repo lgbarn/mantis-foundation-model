@@ -1,0 +1,480 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+die() {
+  printf '%s\n' "$1" >&2
+  exit 2
+}
+
+require_file() {
+  [[ -f "$1" ]] || die "file_not_found:$1"
+}
+
+validate_runtime_config() {
+  local config="$1"
+  require_file "$config"
+  jq -e 'type == "object"' "$config" >/dev/null 2>&1 || die "runtime_config_invalid_json"
+
+  local unknown
+  unknown="$({
+    jq -r '
+      (keys - [
+        "api_key_env",
+        "api_v2",
+        "commands",
+        "gpu",
+        "paths",
+        "pod",
+        "runpodctl",
+        "schema_version",
+        "ssh"
+      ]) | sort | join(",")
+    ' "$config"
+  })"
+  [[ -z "$unknown" ]] || die "runtime_config_unknown_keys:$unknown"
+
+  jq -e '
+    .schema_version == 1 and
+    (.api_key_env | type == "string" and test("^[A-Z][A-Z0-9_]*$")) and
+    (.api_v2 | type == "object" and
+      (keys | sort) == ["base_url", "openapi_sha256"] and
+      .base_url == "https://api.runpod.io/v2" and
+      (.openapi_sha256 | type == "string" and test("^[0-9a-f]{64}$"))) and
+    (.runpodctl | type == "object" and
+      (keys | sort) == ["version"] and
+      (.version | type == "string" and test("^v2\\.[0-9]+\\.[0-9]+$"))) and
+    (.gpu | type == "object" and
+      (keys | sort) == ["cloud", "count", "id", "max_hourly_price_usd", "min_memory_gb"] and
+      (.id | type == "string" and length > 0) and
+      (.count | type == "number" and . >= 1 and floor == .) and
+      (.cloud == "SECURE" or .cloud == "COMMUNITY") and
+      (.min_memory_gb | type == "number" and . > 0) and
+      (.max_hourly_price_usd | type == "number" and . > 0)) and
+    (.pod | type == "object" and
+      (keys | sort) == ["container_disk_gb", "image", "name", "network_volume_id", "ports", "terminate_after", "volume_mount_path"] and
+      (.name | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")) and
+      (.image | type == "string" and length > 0) and
+      (.container_disk_gb | type == "number" and . > 0 and floor == .) and
+      (.network_volume_id | type == "string" and length > 0) and
+      (.volume_mount_path | type == "string" and startswith("/")) and
+      .ports == ["22/tcp"] and
+      (.terminate_after | type == "string" and test("^[1-9][0-9]*[mh]$"))) and
+    (.ssh | type == "object" and
+      (keys | sort) == ["key_path", "poll_seconds", "ready_timeout_seconds", "user"] and
+      (.key_path | type == "string" and length > 0) and
+      (.user | type == "string" and test("^[A-Za-z_][A-Za-z0-9_-]*$")) and
+      (.ready_timeout_seconds | type == "number" and . > 0 and floor == .) and
+      (.poll_seconds | type == "number" and . > 0 and floor == .) and
+      .poll_seconds <= .ready_timeout_seconds) and
+    (.paths | type == "object" and
+      (keys | sort) == ["corpus_manifest", "local_artifact_root", "receipt_root", "remote_artifact_root", "remote_corpus_manifest", "remote_repo", "source_root"] and
+      all(.[]; type == "string" and length > 0)) and
+    (.pod.volume_mount_path as $mount |
+      [.paths.remote_repo, .paths.remote_corpus_manifest, .paths.remote_artifact_root] |
+      all(startswith($mount + "/"))) and
+    (.commands | type == "object" and
+      (keys | sort) == ["local_validate", "remote_train"] and
+      (.remote_train | type == "array" and length > 0 and all(type == "string" and length > 0)) and
+      (.local_validate | type == "array" and length > 0 and all(type == "string" and length > 0)))
+  ' "$config" >/dev/null 2>&1 || die "runtime_config_invalid"
+
+  require_file "$(jq -r '.ssh.key_path' "$config")"
+  require_file "$(jq -r '.paths.corpus_manifest' "$config")"
+  [[ -d "$(jq -r '.paths.source_root' "$config")" ]] || die "source_root_not_found"
+
+  local api_key_name
+  api_key_name="$(jq -r '.api_key_env' "$config")"
+  [[ -n "${!api_key_name:-}" ]] || die "api_key_env_missing:$api_key_name"
+  if grep -Fq "${!api_key_name}" "$config"; then
+    die "runtime_config_contains_api_key"
+  fi
+}
+
+catalog_preflight() {
+  local config="$1"
+  local api_key_name gpu_id gpu_count cloud min_memory max_price catalog_url response gpu
+  api_key_name="$(jq -r '.api_key_env' "$config")"
+  gpu_id="$(jq -r '.gpu.id' "$config")"
+  gpu_count="$(jq -r '.gpu.count' "$config")"
+  cloud="$(jq -r '.gpu.cloud' "$config")"
+  min_memory="$(jq -r '.gpu.min_memory_gb' "$config")"
+  max_price="$(jq -r '.gpu.max_hourly_price_usd' "$config")"
+  catalog_url="$(jq -r '.api_v2.base_url' "$config")/catalog/gpus?include=AVAILABILITY&product=POD&count=${gpu_count}&cloud=${cloud}"
+
+  response="$(
+    printf 'header = "Authorization: Bearer %s"\n' "${!api_key_name}" |
+      curl --config - --fail --silent --show-error "$catalog_url"
+  )" || die "catalog_request_failed"
+  jq -e 'type == "object" and (.gpus | type == "array")' <<<"$response" \
+    >/dev/null 2>&1 || die "catalog_schema_invalid"
+  gpu="$(jq -c --arg id "$gpu_id" '.gpus[] | select(.id == $id)' <<<"$response" | head -n 1)"
+  [[ -n "$gpu" ]] || die "gpu_not_found:$gpu_id"
+  jq -e --argjson minimum "$min_memory" '
+    (.memory | type == "number" and . >= $minimum) and
+    (.availability | type == "string") and
+    (.price | type == "object")
+  ' <<<"$gpu" >/dev/null 2>&1 || die "catalog_gpu_schema_invalid:$gpu_id"
+
+  local availability price_key price
+  availability="$(jq -r '.availability' <<<"$gpu")"
+  [[ "$availability" != "NONE" ]] || die "gpu_unavailable:$gpu_id"
+  case "$availability" in LOW|MEDIUM|HIGH) ;; *) die "catalog_gpu_schema_invalid:$gpu_id" ;; esac
+  price_key="$(tr '[:upper:]' '[:lower:]' <<<"$cloud")"
+  price="$(jq -r --arg key "$price_key" '.price[$key] // empty' <<<"$gpu")"
+  [[ "$price" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "catalog_gpu_price_invalid:$gpu_id"
+  jq -en --argjson actual "$price" --argjson maximum "$max_price" '$actual <= $maximum' \
+    >/dev/null || die "gpu_price_exceeds_limit:${price}:${max_price}"
+
+  printf '%s\n' "$response"
+}
+
+sha256_file() {
+  shasum -a 256 "$1" | awk '{print $1}'
+}
+
+atomic_write() {
+  local destination="$1"
+  local directory temporary
+  directory="$(dirname "$destination")"
+  mkdir -p "$directory"
+  temporary="$(mktemp "$directory/.tmp.XXXXXX")"
+  cat >"$temporary"
+  chmod 600 "$temporary"
+  mv "$temporary" "$destination"
+}
+
+record_ambiguous_create() {
+  local config="$1" output="$2" reason="$3"
+  local receipt_root run_id destination
+  receipt_root="$(jq -r '.paths.receipt_root' "$config")"
+  run_id="$(jq -r '.pod.name' "$config")"
+  destination="$receipt_root/$run_id-ambiguous-create.json"
+  jq -n \
+    --arg run_id "$run_id" \
+    --arg reason "$reason" \
+    --arg output "$output" \
+    '{schema_version:1,run_id:$run_id,reason:$reason,provider_output:$output}' |
+    atomic_write "$destination"
+}
+
+RUNPOD_CONFIG=""
+RUNPOD_POD_ID=""
+RUNPOD_API_KEY_VALUE=""
+
+cleanup_pod() {
+  local original_status=$?
+  trap - EXIT INT TERM
+  local cleanup_failed=0 receipt_root
+  if [[ -n "$RUNPOD_POD_ID" ]]; then
+    if ! RUNPOD_API_KEY="$RUNPOD_API_KEY_VALUE" runpodctl pod delete "$RUNPOD_POD_ID" \
+      >/dev/null; then
+      printf 'pod_delete_failed:%s\n' "$RUNPOD_POD_ID" >&2
+      cleanup_failed=1
+    fi
+    if RUNPOD_API_KEY="$RUNPOD_API_KEY_VALUE" runpodctl pod get "$RUNPOD_POD_ID" \
+      >/dev/null 2>&1; then
+      printf 'pod_absence_not_verified:%s\n' "$RUNPOD_POD_ID" >&2
+      cleanup_failed=1
+    fi
+    receipt_root="$(jq -r '.paths.receipt_root' "$RUNPOD_CONFIG")"
+    if ! RUNPOD_API_KEY="$RUNPOD_API_KEY_VALUE" runpodctl billing pods \
+      --pod-id "$RUNPOD_POD_ID" --grouping podId --output=json |
+      atomic_write "$receipt_root/$RUNPOD_POD_ID-billing.json"; then
+      printf 'billing_query_failed:%s\n' "$RUNPOD_POD_ID" >&2
+      cleanup_failed=1
+    fi
+  fi
+  if [[ $original_status -eq 0 && $cleanup_failed -ne 0 ]]; then
+    original_status=1
+  fi
+  exit "$original_status"
+}
+
+connect_fields() {
+  local connect_output="$1"
+  if [[ "$connect_output" =~ ^ssh[[:space:]]+([A-Za-z_][A-Za-z0-9_-]*)@([A-Za-z0-9.-]+)[[:space:]]+-p[[:space:]]+([0-9]+)$ ]]; then
+    printf '%s\n%s\n%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+    return 0
+  fi
+  return 1
+}
+
+wait_for_ssh() {
+  local config="$1" pod_id="$2"
+  local expected_user timeout poll started connect_output fields user host port key
+  expected_user="$(jq -r '.ssh.user' "$config")"
+  timeout="$(jq -r '.ssh.ready_timeout_seconds' "$config")"
+  poll="$(jq -r '.ssh.poll_seconds' "$config")"
+  key="$(jq -r '.ssh.key_path' "$config")"
+  started="$(date +%s)"
+  while (( $(date +%s) - started < timeout )); do
+    connect_output="$(
+      RUNPOD_API_KEY="$RUNPOD_API_KEY_VALUE" runpodctl ssh connect "$pod_id" 2>/dev/null || true
+    )"
+    fields="$(connect_fields "$connect_output" || true)"
+    if [[ -n "$fields" ]]; then
+      user="$(sed -n '1p' <<<"$fields")"
+      host="$(sed -n '2p' <<<"$fields")"
+      port="$(sed -n '3p' <<<"$fields")"
+      if [[ "$user" == "$expected_user" ]] &&
+        ssh -i "$key" -p "$port" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+          "$user@$host" true >/dev/null 2>&1; then
+        printf '%s\n%s\n%s\n' "$user" "$host" "$port"
+        return 0
+      fi
+    fi
+    sleep "$poll"
+  done
+  die "ssh_readiness_timeout:$pod_id"
+}
+
+run_train() {
+  local experiment="$1" config="$2"
+  validate_runtime_config "$config"
+  local catalog cli_version expected_version api_key_name
+  catalog="$(catalog_preflight "$config")"
+  expected_version="$(jq -r '.runpodctl.version' "$config")"
+  cli_version="$(runpodctl version | tr -d '\r\n')"
+  [[ "$cli_version" == "$expected_version" ]] || die "runpodctl_version_mismatch:$cli_version"
+  api_key_name="$(jq -r '.api_key_env' "$config")"
+  RUNPOD_API_KEY_VALUE="${!api_key_name}"
+  RUNPOD_CONFIG="$config"
+
+  local run_id receipt_root receipt_path ports create_output create_status
+  run_id="$(jq -r '.pod.name' "$config")"
+  receipt_root="$(jq -r '.paths.receipt_root' "$config")"
+  receipt_path="$receipt_root/$run_id.json"
+  [[ ! -e "$receipt_path" ]] || die "run_receipt_exists:$receipt_path"
+  ports="$(jq -r '.pod.ports | join(",")' "$config")"
+
+  trap cleanup_pod EXIT
+  trap 'exit 130' INT TERM
+  set +e
+  create_output="$(
+    RUNPOD_API_KEY="$RUNPOD_API_KEY_VALUE" runpodctl pod create --output=json \
+      --name="$run_id" \
+      --image="$(jq -r '.pod.image' "$config")" \
+      --gpu-id="$(jq -r '.gpu.id' "$config")" \
+      --gpu-count="$(jq -r '.gpu.count' "$config")" \
+      --cloud-type="$(jq -r '.gpu.cloud' "$config")" \
+      --container-disk-in-gb="$(jq -r '.pod.container_disk_gb' "$config")" \
+      --network-volume-id="$(jq -r '.pod.network_volume_id' "$config")" \
+      --volume-mount-path="$(jq -r '.pod.volume_mount_path' "$config")" \
+      --ports="$ports" \
+      --ssh=true \
+      --terminate-after="$(jq -r '.pod.terminate_after' "$config")"
+  )"
+  create_status=$?
+  set -e
+  if [[ $create_status -ne 0 ]]; then
+    record_ambiguous_create "$config" "$create_output" "provider_create_failed"
+    die "provider_create_failed"
+  fi
+  RUNPOD_POD_ID="$(jq -r '.id // empty' <<<"$create_output" 2>/dev/null || true)"
+  if [[ ! "$RUNPOD_POD_ID" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$ ]]; then
+    RUNPOD_POD_ID=""
+    record_ambiguous_create "$config" "$create_output" "provider_create_id_invalid"
+    die "provider_create_id_invalid"
+  fi
+  jq -e --arg name "$run_id" \
+    --argjson maximum "$(jq -r '.gpu.max_hourly_price_usd' "$config")" '
+      .name == $name and
+      (.status | type == "string") and
+      (.cost | type == "number" and . > 0 and . <= $maximum)
+    ' <<<"$create_output" >/dev/null 2>&1 || die "provider_create_schema_or_price_invalid"
+
+  local request_digest created_at catalog_price
+  request_digest="$(
+    jq -cS '{gpu,pod,runpodctl,api_v2}' "$config" |
+      shasum -a 256 | awk '{print $1}'
+  )"
+  created_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  catalog_price="$(
+    jq -r --arg id "$(jq -r '.gpu.id' "$config")" --arg cloud "$(jq -r '.gpu.cloud | ascii_downcase' "$config")" \
+      '.gpus[] | select(.id == $id) | .price[$cloud]' <<<"$catalog"
+  )"
+  jq -n \
+    --arg pod_id "$RUNPOD_POD_ID" \
+    --arg run_id "$run_id" \
+    --arg request_digest "$request_digest" \
+    --arg runpodctl_version "$cli_version" \
+    --arg api_v2_openapi_sha256 "$(jq -r '.api_v2.openapi_sha256' "$config")" \
+    --arg image "$(jq -r '.pod.image' "$config")" \
+    --arg gpu_id "$(jq -r '.gpu.id' "$config")" \
+    --arg network_volume_id "$(jq -r '.pod.network_volume_id' "$config")" \
+    --argjson hourly_price_usd "$catalog_price" \
+    --arg created_at "$created_at" \
+    --arg termination_deadline "$(jq -r '.pod.terminate_after' "$config")" \
+    --arg experiment_sha256 "$(sha256_file "$experiment")" \
+    --arg runtime_sha256 "$(sha256_file "$config")" \
+    '{schema_version:1,pod_id:$pod_id,run_id:$run_id,request_digest:$request_digest,
+      runpodctl_version:$runpodctl_version,api_v2_openapi_sha256:$api_v2_openapi_sha256,
+      image:$image,gpu_id:$gpu_id,network_volume_id:$network_volume_id,
+      hourly_price_usd:$hourly_price_usd,created_at:$created_at,
+      termination_deadline:$termination_deadline,experiment_sha256:$experiment_sha256,
+      runtime_sha256:$runtime_sha256}' |
+    atomic_write "$receipt_path"
+
+  local fields ssh_user ssh_host ssh_port ssh_key ssh_target rsync_ssh
+  fields="$(wait_for_ssh "$config" "$RUNPOD_POD_ID")"
+  ssh_user="$(sed -n '1p' <<<"$fields")"
+  ssh_host="$(sed -n '2p' <<<"$fields")"
+  ssh_port="$(sed -n '3p' <<<"$fields")"
+  ssh_key="$(jq -r '.ssh.key_path' "$config")"
+  ssh_target="$ssh_user@$ssh_host"
+  rsync_ssh="ssh -i $ssh_key -p $ssh_port -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+
+  local source_root remote_repo corpus_manifest remote_corpus_manifest corpus_sha
+  source_root="$(jq -r '.paths.source_root' "$config")"
+  remote_repo="$(jq -r '.paths.remote_repo' "$config")"
+  corpus_manifest="$(jq -r '.paths.corpus_manifest' "$config")"
+  remote_corpus_manifest="$(jq -r '.paths.remote_corpus_manifest' "$config")"
+  corpus_sha="$(sha256_file "$corpus_manifest")"
+  rsync -az -e "$rsync_ssh" "$source_root/" "$ssh_target:$remote_repo/"
+
+  local remote_repo_q remote_manifest_q corpus_sha_q remote_train
+  printf -v remote_repo_q '%q' "$remote_repo"
+  printf -v remote_manifest_q '%q' "$remote_corpus_manifest"
+  printf -v corpus_sha_q '%q' "$corpus_sha"
+  remote_train="$(jq -r '.commands.remote_train | map(@sh) | join(" ")' "$config")"
+  ssh -i "$ssh_key" -p "$ssh_port" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+    "$ssh_target" \
+    "set -euo pipefail; command -v nvidia-smi >/dev/null; command -v python3 >/dev/null; command -v uv >/dev/null; test -f $remote_manifest_q; test \"\$(sha256sum $remote_manifest_q | awk '{print \$1}')\" = $corpus_sha_q; cd $remote_repo_q; uv sync --frozen; $remote_train"
+
+  local remote_artifact_root local_artifact_root local_validate source_root
+  remote_artifact_root="$(jq -r '.paths.remote_artifact_root' "$config")"
+  local_artifact_root="$(jq -r '.paths.local_artifact_root' "$config")"
+  mkdir -p "$local_artifact_root"
+  rsync -az -e "$rsync_ssh" "$ssh_target:$remote_artifact_root/" "$local_artifact_root/"
+  local_validate="$(jq -r '.commands.local_validate | map(@sh) | join(" ")' "$config")"
+  source_root="$(jq -r '.paths.source_root' "$config")"
+  (cd "$source_root" && bash -lc "$local_validate")
+}
+
+validate_receipt() {
+  local receipt="$1"
+  require_file "$receipt"
+  jq -e '
+    type == "object" and
+    (keys | sort) == [
+      "api_v2_openapi_sha256", "created_at", "experiment_sha256", "gpu_id",
+      "hourly_price_usd", "image", "network_volume_id", "pod_id",
+      "request_digest", "run_id", "runpodctl_version", "runtime_sha256",
+      "schema_version", "termination_deadline"
+    ] and
+    .schema_version == 1 and
+    (.pod_id | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")) and
+    (.run_id | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")) and
+    (.request_digest | test("^[0-9a-f]{64}$")) and
+    (.api_v2_openapi_sha256 | test("^[0-9a-f]{64}$")) and
+    (.experiment_sha256 | test("^[0-9a-f]{64}$")) and
+    (.runtime_sha256 | test("^[0-9a-f]{64}$")) and
+    (.hourly_price_usd | type == "number" and . > 0)
+  ' "$receipt" >/dev/null 2>&1 || die "run_receipt_invalid"
+}
+
+validate_receipt_binding() {
+  local receipt="$1" config="$2"
+  jq -e \
+    --arg runtime_sha256 "$(sha256_file "$config")" \
+    --arg run_id "$(jq -r '.pod.name' "$config")" \
+    --arg cli_version "$(jq -r '.runpodctl.version' "$config")" \
+    --arg api_schema "$(jq -r '.api_v2.openapi_sha256' "$config")" '
+      .runtime_sha256 == $runtime_sha256 and
+      .run_id == $run_id and
+      .runpodctl_version == $cli_version and
+      .api_v2_openapi_sha256 == $api_schema
+    ' "$receipt" >/dev/null || die "run_receipt_runtime_mismatch"
+}
+
+run_recover() {
+  local receipt="$1" config="$2"
+  validate_receipt "$receipt"
+  validate_runtime_config "$config"
+  local api_key_name expected_version cli_version observation
+  api_key_name="$(jq -r '.api_key_env' "$config")"
+  RUNPOD_API_KEY_VALUE="${!api_key_name}"
+  expected_version="$(jq -r '.runpodctl.version' "$config")"
+  cli_version="$(runpodctl version | tr -d '\r\n')"
+  [[ "$cli_version" == "$expected_version" ]] || die "runpodctl_version_mismatch:$cli_version"
+  validate_receipt_binding "$receipt" "$config"
+
+  RUNPOD_CONFIG="$config"
+  RUNPOD_POD_ID="$(jq -r '.pod_id' "$receipt")"
+  trap cleanup_pod EXIT
+  trap 'exit 130' INT TERM
+  observation="$(
+    RUNPOD_API_KEY="$RUNPOD_API_KEY_VALUE" runpodctl pod get "$RUNPOD_POD_ID" --output=json
+  )" || die "receipted_pod_not_found:$RUNPOD_POD_ID"
+  jq -e --arg id "$RUNPOD_POD_ID" --arg name "$(jq -r '.run_id' "$receipt")" \
+    '.id == $id and .name == $name' <<<"$observation" >/dev/null 2>&1 ||
+    die "receipted_pod_identity_mismatch"
+
+  local fields ssh_user ssh_host ssh_port ssh_key ssh_target rsync_ssh
+  fields="$(wait_for_ssh "$config" "$RUNPOD_POD_ID")"
+  ssh_user="$(sed -n '1p' <<<"$fields")"
+  ssh_host="$(sed -n '2p' <<<"$fields")"
+  ssh_port="$(sed -n '3p' <<<"$fields")"
+  ssh_key="$(jq -r '.ssh.key_path' "$config")"
+  ssh_target="$ssh_user@$ssh_host"
+  rsync_ssh="ssh -i $ssh_key -p $ssh_port -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+
+  local remote_artifact_root local_artifact_root
+  remote_artifact_root="$(jq -r '.paths.remote_artifact_root' "$config")"
+  local_artifact_root="$(jq -r '.paths.local_artifact_root' "$config")"
+  mkdir -p "$local_artifact_root"
+  rsync -az -e "$rsync_ssh" "$ssh_target:$remote_artifact_root/" "$local_artifact_root/"
+}
+
+run_tensorboard() {
+  local receipt="$1" config="$2" local_port="$3"
+  if [[ ! "$local_port" =~ ^[0-9]+$ ]] ||
+    ((local_port < 1 || local_port > 65535)); then
+    die "tensorboard_port_invalid:$local_port"
+  fi
+  validate_receipt "$receipt"
+  validate_runtime_config "$config"
+  local api_key_name expected_version cli_version pod_id connect_output fields user host port key
+  api_key_name="$(jq -r '.api_key_env' "$config")"
+  RUNPOD_API_KEY_VALUE="${!api_key_name}"
+  expected_version="$(jq -r '.runpodctl.version' "$config")"
+  cli_version="$(runpodctl version | tr -d '\r\n')"
+  [[ "$cli_version" == "$expected_version" ]] || die "runpodctl_version_mismatch:$cli_version"
+  validate_receipt_binding "$receipt" "$config"
+  pod_id="$(jq -r '.pod_id' "$receipt")"
+  connect_output="$(
+    RUNPOD_API_KEY="$RUNPOD_API_KEY_VALUE" runpodctl ssh connect "$pod_id"
+  )" || die "ssh_connection_info_unavailable:$pod_id"
+  fields="$(connect_fields "$connect_output")" || die "ssh_connection_schema_invalid:$pod_id"
+  user="$(sed -n '1p' <<<"$fields")"
+  host="$(sed -n '2p' <<<"$fields")"
+  port="$(sed -n '3p' <<<"$fields")"
+  [[ "$user" == "$(jq -r '.ssh.user' "$config")" ]] || die "ssh_user_mismatch:$user"
+  key="$(jq -r '.ssh.key_path' "$config")"
+  printf 'ssh -N -L %s:127.0.0.1:6006 -i %s -p %s %s@%s\n' \
+    "$local_port" "$key" "$port" "$user" "$host"
+}
+
+main() {
+  local command="${1:-}"
+  case "$command" in
+    train)
+      [[ $# -eq 3 ]] || die "usage:runpod-workflow train EXPERIMENT_CONFIG RUNTIME_CONFIG"
+      require_file "$2"
+      run_train "$2" "$3"
+      ;;
+    recover)
+      [[ $# -eq 3 ]] || die "usage:runpod-workflow recover RUN_RECEIPT RUNTIME_CONFIG"
+      run_recover "$2" "$3"
+      ;;
+    tensorboard)
+      [[ $# -eq 4 ]] || die "usage:runpod-workflow tensorboard RUN_RECEIPT RUNTIME_CONFIG LOCAL_PORT"
+      run_tensorboard "$2" "$3" "$4"
+      ;;
+    *)
+      die "unknown_command:$command"
+      ;;
+  esac
+}
+
+main "$@"
