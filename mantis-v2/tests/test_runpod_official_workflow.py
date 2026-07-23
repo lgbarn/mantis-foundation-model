@@ -8,18 +8,43 @@ import time
 from hashlib import sha256
 from pathlib import Path
 
+from mantis_v2.config import load_config
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def _write_executable(path: Path, body: str) -> None:
     path.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + body)
     path.chmod(0o755)
+    runtime = path.parents[1] / "runtime.json"
+    if path.name == "runpodctl" and runtime.is_file():
+        payload = json.loads(runtime.read_text())
+        payload["runpodctl"]["binary_sha256"] = sha256(path.read_bytes()).hexdigest()
+        runtime.write_text(json.dumps(payload))
 
 
 def _runtime(tmp_path: Path) -> Path:
     source = tmp_path / "source"
     source.mkdir(exist_ok=True)
     (source / ".gitignore").write_text(".env\n.venv/\n")
+    if not (source / ".git").is_dir():
+        subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "-c",
+            "user.name=RunPod Test",
+            "-c",
+            "user.email=runpod-test@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
     corpus_manifest = tmp_path / "corpus-manifest.json"
     corpus_manifest.write_text('{"dataset":"five-year"}\n')
     ssh_key = tmp_path / "id_ed25519"
@@ -34,7 +59,11 @@ def _runtime(tmp_path: Path) -> Path:
                     "base_url": "https://api.runpod.io/v2",
                     "openapi_sha256": "a" * 64,
                 },
-                "runpodctl": {"version": "v2.7.2"},
+                "runpodctl": {
+                    "version": "2.7.2",
+                    "source_commit": "309512b4926eb7d218bbc8a8f11d380ce54f59c4",
+                    "binary_sha256": "0" * 64,
+                },
                 "gpu": {
                     "id": "NVIDIA A100 80GB PCIe",
                     "count": 1,
@@ -63,7 +92,7 @@ def _runtime(tmp_path: Path) -> Path:
                     "remote_repo": "/workspace/mantis/repo",
                     "corpus_manifest": str(corpus_manifest),
                     "remote_corpus_manifest": "/workspace/mantis/data/manifest.json",
-                    "remote_artifact_root": "/workspace/mantis/artifacts/smoke",
+                    "remote_artifact_root": "/workspace/mantis/artifacts/mantis-smoke",
                     "local_artifact_root": str(tmp_path / "artifacts"),
                     "receipt_root": str(tmp_path / "receipts"),
                 },
@@ -77,7 +106,19 @@ def _experiment(tmp_path: Path) -> Path:
     source = tmp_path / "source"
     source.mkdir(exist_ok=True)
     experiment = source / "experiment.toml"
-    experiment.write_text('[experiment]\nname = "smoke"\n')
+    experiment.write_text(
+        """[run]
+name = "mantis-smoke"
+artifact_root = "/workspace/mantis/artifacts"
+device = "cuda"
+require_accelerator = true
+
+[data]
+root = "/workspace/mantis/data/market"
+corpus_manifest_path = "/workspace/mantis/data/manifest.json"
+file_format = "parquet"
+"""
+    )
     return experiment
 
 
@@ -88,7 +129,7 @@ def _environment(tmp_path: Path, *, curl_body: str) -> tuple[dict[str, str], Pat
     _write_executable(bin_dir / "curl", f"printf '%s' '{curl_body}'\n")
     _write_executable(
         bin_dir / "runpodctl",
-        f"printf 'runpodctl %s\\n' \"$*\" >> {call_log}\nprintf 'v2.7.2\\n'\n",
+        f"printf 'runpodctl %s\\n' \"$*\" >> {call_log}\nprintf 'runpodctl 2.7.2-309512b\\n'\n",
     )
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
@@ -101,6 +142,7 @@ def _success_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
     bin_dir.mkdir()
     call_log = tmp_path / "calls.log"
     deleted = tmp_path / "deleted"
+    created = tmp_path / "created"
     catalog = json.dumps(
         {
             "gpus": [
@@ -122,17 +164,30 @@ def _success_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
         f"""
 printf 'runpodctl %s\\n' "$*" >> {call_log}
 case "${{1:-}} ${{2:-}}" in
-  "version ") printf 'v2.7.2\\n' ;;
+  "version ") printf 'runpodctl 2.7.2-309512b\\n' ;;
   "pod create")
+    touch {created}
     printf '%s\\n' '{{"id":"pod-123"}}'
     ;;
-  "ssh connect") printf 'ssh root@127.0.0.1 -p 2222\\n' ;;
+  "ssh info")
+    printf '%s\\n' '{{"id":"pod-123","ip":"127.0.0.1","port":2222,"ssh_command":"ssh root@127.0.0.1 -p 2222"}}'
+    ;;
   "pod delete") touch {deleted}; printf '%s\\n' '{{"id":"pod-123","deleted":true}}' ;;
   "pod get")
     printf '%s%s\\n' '{{"id":"pod-123","name":"mantis-smoke",' \
-      '"desiredStatus":"RUNNING","costPerHr":"1.5"}}'
+      '"gpuTypeId":"NVIDIA A100 80GB PCIe","gpuCount":1,' \
+      '"imageName":"runpod/pytorch:official","containerDiskInGb":80,' \
+      '"volumeMountPath":"/workspace","desiredStatus":"RUNNING","costPerHr":"1.5"}}'
     ;;
-  "pod list") [[ -f {deleted} ]] && printf '[]\\n' || printf '[{{"id":"pod-123"}}]\\n' ;;
+  "pod list")
+    if [[ -f {deleted} && "${{STALE_POD_AFTER_DELETE:-0}}" == 1 ]]; then
+      printf '[{{"id":"pod-123","name":"mantis-smoke"}}]\\n'
+    elif [[ -f {deleted} || ! -f {created} ]]; then
+      printf '[]\\n'
+    else
+      printf '[{{"id":"pod-123","name":"mantis-smoke"}}]\\n'
+    fi
+    ;;
   "billing pods") printf '%s\\n' '[{{"podId":"pod-123","amount":0.01}}]' ;;
   *) printf 'unexpected runpodctl call: %s\\n' "$*" >&2; exit 9 ;;
 esac
@@ -149,10 +204,17 @@ printf 'rsync %s\\n' "$*" >> {call_log}
 destination="${{@: -1}}"
 if [[ "$destination" != root@* && "$*" == *"root@127.0.0.1:"* ]]; then
   mkdir -p "$destination/export" "$destination/checkpoints"
-  printf '{{"status":"complete"}}\\n' > "$destination/train-result.json"
-  printf '{{"status":"passed"}}\\n' > "$destination/evaluation.json"
-  printf '{{"status":"verified"}}\\n' > "$destination/export/manifest.json"
+  printf '{{"device":"cuda","epochs_completed":1}}\\n' > "$destination/train-result.json"
+  printf '{{"passed":true}}\\n' > "$destination/evaluation.json"
+  cp "$destination/evaluation.json" "$destination/export/evaluation.json"
+  printf 'weights' > "$destination/export/model.safetensors"
   printf 'checkpoint' > "$destination/checkpoints/best.pt"
+  weights_sha="$(shasum -a 256 "$destination/export/model.safetensors" | awk '{{print $1}}')"
+  evaluation_sha="$(shasum -a 256 "$destination/export/evaluation.json" | awk '{{print $1}}')"
+  checkpoint_sha="$(shasum -a 256 "$destination/checkpoints/best.pt" | awk '{{print $1}}')"
+  printf '{{"config":{{"run":{{"name":"mantis-smoke"}}}},"weights_sha256":"%s","validation_gate":{{"verified":true,"evaluation_sha256":"%s","checkpoint_sha256":"%s"}},"parity":{{"verified":true}}}}\\n' \
+    "$weights_sha" "$evaluation_sha" "$checkpoint_sha" > "$destination/export/manifest.json"
+  if [[ "${{CORRUPT_ARTIFACT:-0}}" == 1 ]]; then printf 'corrupt' >> "$destination/export/model.safetensors"; fi
 fi
 """,
     )
@@ -168,7 +230,7 @@ def _receipt(runtime: Path) -> dict[str, object]:
         "pod_id": "pod-123",
         "run_id": "mantis-smoke",
         "request_digest": "b" * 64,
-        "runpodctl_version": "v2.7.2",
+        "runpodctl_version": "2.7.2-309512b",
         "api_v2_openapi_sha256": "a" * 64,
         "image": "runpod/pytorch:official",
         "gpu_id": "NVIDIA A100 80GB PCIe",
@@ -178,6 +240,12 @@ def _receipt(runtime: Path) -> dict[str, object]:
         "termination_deadline": "2026-07-23T14:00:00Z",
         "experiment_sha256": "c" * 64,
         "runtime_sha256": sha256(runtime.read_bytes()).hexdigest(),
+        "source_revision": subprocess.run(
+            ["git", "-C", str(runtime.parent / "source"), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip(),
     }
 
 
@@ -240,7 +308,7 @@ def test_train_rejects_unavailable_gpu_before_create(tmp_path: Path) -> None:
 
     assert completed.returncode == 2
     assert "gpu_unavailable:NVIDIA A100 80GB PCIe" in completed.stderr
-    assert not call_log.exists()
+    assert "pod create" not in call_log.read_text()
 
 
 def test_train_runs_and_always_deletes_exact_pod(tmp_path: Path) -> None:
@@ -261,7 +329,7 @@ def test_train_runs_and_always_deletes_exact_pod(tmp_path: Path) -> None:
     receipt = json.loads((tmp_path / "receipts" / "mantis-smoke.json").read_text())
     assert receipt["pod_id"] == "pod-123"
     assert receipt["run_id"] == "mantis-smoke"
-    assert receipt["runpodctl_version"] == "v2.7.2"
+    assert receipt["runpodctl_version"] == "2.7.2-309512b"
     assert receipt["gpu_id"] == "NVIDIA A100 80GB PCIe"
     assert receipt["hourly_price_usd"] == 1.5
     assert receipt["termination_deadline"].endswith("Z")
@@ -270,9 +338,9 @@ def test_train_runs_and_always_deletes_exact_pod(tmp_path: Path) -> None:
     assert "count=1" in calls
     assert "cloud=SECURE" in calls
     assert f"--terminate-after={receipt['termination_deadline']}" in calls
-    assert "--exclude=.git/" in calls
-    assert "--exclude-from=" in calls
-    assert "nvidia-smi --query-gpu=name,memory.total" in calls
+    assert "--from0 --files-from=-" in calls
+    assert "nvidia-smi --query-gpu=memory.total" in calls
+    assert "just inspect-data /workspace/mantis/repo/.runpod-experiment.toml" in calls
     assert "torch.cuda.is_available()" in calls
     assert "just train /workspace/mantis/repo/.runpod-experiment.toml" in calls
     assert "just validated-export /workspace/mantis/repo/.runpod-experiment.toml" in calls
@@ -286,9 +354,9 @@ def test_train_runs_and_always_deletes_exact_pod(tmp_path: Path) -> None:
 
 def test_recover_never_creates_and_deletes_receipted_pod(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
+    env, call_log = _success_environment(tmp_path)
     receipt = tmp_path / "run-receipt.json"
     receipt.write_text(json.dumps(_receipt(runtime)))
-    env, call_log = _success_environment(tmp_path)
 
     completed = subprocess.run(
         ["just", "runpod-recover", str(receipt), str(runtime)],
@@ -336,9 +404,9 @@ def test_recover_rejects_runtime_drift_before_pod_access(tmp_path: Path) -> None
 
 def test_tensorboard_emits_localhost_only_ssh_tunnel(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
+    env, call_log = _success_environment(tmp_path)
     receipt = tmp_path / "run-receipt.json"
     receipt.write_text(json.dumps(_receipt(runtime)))
-    env, call_log = _success_environment(tmp_path)
 
     completed = subprocess.run(
         ["just", "runpod-tensorboard", str(receipt), str(runtime), "6006"],
@@ -355,7 +423,7 @@ def test_tensorboard_emits_localhost_only_ssh_tunnel(tmp_path: Path) -> None:
         "-p 2222 root@127.0.0.1"
     )
     calls = call_log.read_text()
-    assert "runpodctl ssh connect pod-123" in calls
+    assert "runpodctl ssh info pod-123 --output=json" in calls
     assert "pod create" not in calls
     assert "pod delete" not in calls
     assert "curl " not in calls
@@ -363,15 +431,13 @@ def test_tensorboard_emits_localhost_only_ssh_tunnel(tmp_path: Path) -> None:
 
 def test_recover_deletes_exact_pod_when_status_read_fails(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
-    receipt = tmp_path / "run-receipt.json"
-    receipt.write_text(json.dumps(_receipt(runtime)))
     env, call_log = _success_environment(tmp_path)
     _write_executable(
         tmp_path / "bin" / "runpodctl",
         f"""
 printf 'runpodctl %s\\n' "$*" >> {call_log}
 case "${{1:-}} ${{2:-}}" in
-  "version ") printf 'v2.7.2\\n' ;;
+  "version ") printf 'runpodctl 2.7.2-309512b\\n' ;;
   "pod get") exit 1 ;;
   "pod delete") printf '%s\\n' '{{"id":"pod-123","deleted":true}}' ;;
   "pod list") printf '[]\\n' ;;
@@ -380,6 +446,8 @@ case "${{1:-}} ${{2:-}}" in
 esac
 """,
     )
+    receipt = tmp_path / "run-receipt.json"
+    receipt.write_text(json.dumps(_receipt(runtime)))
 
     completed = subprocess.run(
         ["just", "runpod-recover", str(receipt), str(runtime)],
@@ -429,7 +497,7 @@ def test_train_rejects_overpriced_gpu_before_create(tmp_path: Path) -> None:
 
     assert completed.returncode == 2
     assert "gpu_price_exceeds_limit:1.5:1" in completed.stderr
-    assert not call_log.exists()
+    assert "pod create" not in call_log.read_text()
 
 
 def test_train_deletes_exact_pod_after_remote_failure(tmp_path: Path) -> None:
@@ -464,13 +532,14 @@ def test_train_deletes_returned_id_when_create_schema_is_invalid(tmp_path: Path)
     runtime = _runtime(tmp_path)
     env, call_log = _success_environment(tmp_path)
     deleted = tmp_path / "deleted"
+    created = tmp_path / "created"
     _write_executable(
         tmp_path / "bin" / "runpodctl",
         f"""
 printf 'runpodctl %s\\n' "$*" >> {call_log}
 case "${{1:-}} ${{2:-}}" in
-  "version ") printf 'v2.7.2\\n' ;;
-  "pod create") printf '%s\\n' '{{"id":"pod-123"}}' ;;
+  "version ") printf 'runpodctl 2.7.2-309512b\\n' ;;
+  "pod create") touch {created}; printf '%s\\n' '{{"id":"pod-123"}}' ;;
   "pod delete") touch {deleted}; printf '%s\\n' '{{"id":"pod-123","deleted":true}}' ;;
   "pod get") printf '%s\\n' '{{"id":"pod-123"}}' ;;
   "pod list") [[ -f {deleted} ]] && printf '[]\\n' || printf '[{{"id":"pod-123"}}]\\n' ;;
@@ -506,7 +575,7 @@ def test_train_deletes_id_returned_by_failed_create_and_blocks_retry(tmp_path: P
         f"""
 printf 'runpodctl %s\\n' "$*" >> {call_log}
 case "${{1:-}} ${{2:-}}" in
-  "version ") printf 'v2.7.2\\n' ;;
+  "version ") printf 'runpodctl 2.7.2-309512b\\n' ;;
   "pod create") printf '%s\\n' '{{"id":"pod-123"}}'; exit 7 ;;
   "pod delete") touch {deleted}; printf '%s\\n' '{{"id":"pod-123","deleted":true}}' ;;
   "pod list") printf '[]\\n' ;;
@@ -551,20 +620,27 @@ def test_train_fails_when_exact_pod_absence_cannot_be_verified(tmp_path: Path) -
     runtime = _runtime(tmp_path)
     env, call_log = _success_environment(tmp_path)
     deleted = tmp_path / "deleted"
+    created = tmp_path / "created"
     _write_executable(
         tmp_path / "bin" / "runpodctl",
         f"""
 printf 'runpodctl %s\\n' "$*" >> {call_log}
 case "${{1:-}} ${{2:-}}" in
-  "version ") printf 'v2.7.2\\n' ;;
-  "pod create") printf '%s\\n' '{{"id":"pod-123"}}' ;;
+  "version ") printf 'runpodctl 2.7.2-309512b\\n' ;;
+  "pod create") touch {created}; printf '%s\\n' '{{"id":"pod-123"}}' ;;
   "pod get")
     printf '%s%s\\n' '{{"id":"pod-123","name":"mantis-smoke",' \
-      '"desiredStatus":"RUNNING","costPerHr":"1.5"}}'
+      '"gpuTypeId":"NVIDIA A100 80GB PCIe","gpuCount":1,' \
+      '"imageName":"runpod/pytorch:official","containerDiskInGb":80,' \
+      '"volumeMountPath":"/workspace","desiredStatus":"RUNNING","costPerHr":"1.5"}}'
     ;;
-  "ssh connect") printf 'ssh root@127.0.0.1 -p 2222\\n' ;;
+  "ssh info")
+    printf '%s\\n' '{{"id":"pod-123","ip":"127.0.0.1","port":2222,"ssh_command":"ssh root@127.0.0.1 -p 2222"}}'
+    ;;
   "pod delete") touch {deleted}; printf '%s\\n' '{{"id":"pod-123","deleted":true}}' ;;
-  "pod list") exit 7 ;;
+  "pod list")
+    if [[ ! -f {created} ]]; then printf '[]\\n'; else exit 7; fi
+    ;;
   "billing pods") printf '%s\\n' '[{{"podId":"pod-123","amount":0.01}}]' ;;
   *) exit 9 ;;
 esac
@@ -660,7 +736,7 @@ def test_train_rejects_changed_catalog_schema_before_create(tmp_path: Path) -> N
 
     assert completed.returncode == 2
     assert "catalog_gpu_schema_invalid:NVIDIA A100 80GB PCIe" in completed.stderr
-    assert not call_log.exists()
+    assert "pod create" not in call_log.read_text()
 
 
 def test_train_deletes_exact_pod_after_transfer_failure(tmp_path: Path) -> None:
@@ -749,3 +825,190 @@ if [[ "$*" == *"uv sync --frozen"* ]]; then sleep 30; fi
     calls = _wait_for_call(call_log, "runpodctl billing pods --pod-id pod-123")
     assert "runpodctl pod delete pod-123" in calls
     assert "runpodctl billing pods --pod-id pod-123" in calls
+
+
+def test_committed_runpod_experiment_is_cuda_four_timeframe_production() -> None:
+    config = load_config(ROOT / "mantis-v2/configs/nextleg-runpod-cuda-v1.toml")
+
+    assert config.run.device == "cuda"
+    assert config.run.require_accelerator is True
+    assert config.model.mode == "full_finetune"
+    assert config.data.intervals == ("1min", "3min", "5min", "15min")
+    assert config.training.precision == "fp32"
+    assert config.run.artifact_root == Path("/workspace/mantis/runs")
+
+
+def test_train_rejects_runpodctl_version_drift_before_catalog(tmp_path: Path) -> None:
+    experiment = _experiment(tmp_path)
+    runtime = _runtime(tmp_path)
+    env, call_log = _success_environment(tmp_path)
+    _write_executable(
+        tmp_path / "bin" / "runpodctl",
+        f"printf 'runpodctl %s\\n' \"$*\" >> {call_log}\nprintf 'runpodctl 2.7.3-deadbee\\n'\n",
+    )
+
+    completed = subprocess.run(
+        ["just", "runpod-train", str(experiment), str(runtime)],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert "runpodctl_version_mismatch:runpodctl 2.7.3-deadbee" in completed.stderr
+    calls = call_log.read_text()
+    assert "curl " not in calls
+    assert "pod create" not in calls
+
+
+def test_tensorboard_rejects_malformed_ssh_json(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    env, call_log = _success_environment(tmp_path)
+    _write_executable(
+        tmp_path / "bin" / "runpodctl",
+        f"""
+printf 'runpodctl %s\\n' "$*" >> {call_log}
+case "${{1:-}} ${{2:-}}" in
+  "version ") printf 'runpodctl 2.7.2-309512b\\n' ;;
+  "ssh info") printf '%s\\n' '{{"id":"pod-123","ssh_command":"not-ssh"}}' ;;
+  *) exit 9 ;;
+esac
+""",
+    )
+    receipt = tmp_path / "run-receipt.json"
+    receipt.write_text(json.dumps(_receipt(runtime)))
+
+    completed = subprocess.run(
+        ["just", "runpod-tensorboard", str(receipt), str(runtime), "6006"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert "ssh_connection_schema_invalid:pod-123" in completed.stderr
+
+
+def test_failed_create_without_id_reconciles_and_deletes_unique_pod(
+    tmp_path: Path,
+) -> None:
+    experiment = _experiment(tmp_path)
+    runtime = _runtime(tmp_path)
+    env, call_log = _success_environment(tmp_path)
+    created = tmp_path / "created"
+    deleted = tmp_path / "deleted"
+    _write_executable(
+        tmp_path / "bin" / "runpodctl",
+        f"""
+printf 'runpodctl %s\\n' "$*" >> {call_log}
+case "${{1:-}} ${{2:-}}" in
+  "version ") printf 'runpodctl 2.7.2-309512b\\n' ;;
+  "pod create") touch {created}; printf '{{}}\\n'; exit 7 ;;
+  "pod list")
+    if [[ -f {deleted} || ! -f {created} ]]; then printf '[]\\n';
+    else printf '[{{"id":"pod-123","name":"mantis-smoke"}}]\\n'; fi
+    ;;
+  "pod delete") touch {deleted}; printf '{{}}\\n' ;;
+  "billing pods") printf '[]\\n' ;;
+  *) exit 9 ;;
+esac
+""",
+    )
+
+    completed = subprocess.run(
+        ["just", "runpod-train", str(experiment), str(runtime)],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    evidence = json.loads((tmp_path / "receipts/mantis-smoke-ambiguous-create.json").read_text())
+    assert evidence["pod_id"] == "pod-123"
+    calls = call_log.read_text()
+    assert calls.count("runpodctl pod create") == 1
+    assert "runpodctl pod delete pod-123" in calls
+
+
+def test_recover_ambiguous_create_reconciles_by_unique_name_without_create(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    env, call_log = _success_environment(tmp_path)
+    (tmp_path / "created").touch()
+    receipt = tmp_path / "ambiguous.json"
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "run_id": "mantis-smoke",
+                "pod_id": "",
+                "reason": "provider_create_failed",
+                "provider_output": "{}",
+                "runtime_sha256": sha256(runtime.read_bytes()).hexdigest(),
+                "termination_deadline": "2026-07-23T14:00:00Z",
+            }
+        )
+    )
+
+    completed = subprocess.run(
+        ["just", "runpod-recover", str(receipt), str(runtime)],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    calls = call_log.read_text()
+    assert "pod create" not in calls
+    assert "runpodctl pod delete pod-123" in calls
+
+
+def test_train_rejects_corrupted_download_and_preserves_staging(tmp_path: Path) -> None:
+    experiment = _experiment(tmp_path)
+    runtime = _runtime(tmp_path)
+    env, call_log = _success_environment(tmp_path)
+    env["CORRUPT_ARTIFACT"] = "1"
+
+    completed = subprocess.run(
+        ["just", "runpod-train", str(experiment), str(runtime)],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert "export_weights_digest_mismatch" in completed.stderr
+    assert not (tmp_path / "artifacts").exists()
+    assert list(tmp_path.glob(".mantis-smoke.download.*"))
+    assert "runpodctl pod delete pod-123" in call_log.read_text()
+
+
+def test_train_fails_if_deleted_pod_remains_in_inventory(tmp_path: Path) -> None:
+    experiment = _experiment(tmp_path)
+    runtime = _runtime(tmp_path)
+    env, call_log = _success_environment(tmp_path)
+    env["STALE_POD_AFTER_DELETE"] = "1"
+
+    completed = subprocess.run(
+        ["just", "runpod-train", str(experiment), str(runtime)],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "pod_absence_not_verified:pod-123" in completed.stderr
+    assert call_log.read_text().count("runpodctl pod list --all --output=json") >= 4

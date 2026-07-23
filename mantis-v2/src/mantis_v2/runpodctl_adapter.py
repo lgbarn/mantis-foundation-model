@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-RUNPODCTL_VERSION = "v2.7.2"
+RUNPODCTL_VERSION = "2.7.2"
 RUNPODCTL_COMMIT = "309512b4926eb7d218bbc8a8f11d380ce54f59c4"
 RUNPODCTL_DARWIN_ARM64_SHA256 = "a016e442fdf12e4642ad3425ea6d624a40882d77accdfa043b5e40a4fd08d037"
 RUNPODCTL_RELEASE_URL = "https://github.com/runpod/runpodctl/releases/tag/v2.7.2"

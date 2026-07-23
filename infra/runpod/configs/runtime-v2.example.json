@@ -6,7 +6,9 @@
     "openapi_sha256": "58a7c1aedec38ab48f676dc4e727f40eeec66edc740bb98cc1dea94293c706fd"
   },
   "runpodctl": {
-    "version": "v2.7.2"
+    "version": "2.7.2",
+    "source_commit": "309512b4926eb7d218bbc8a8f11d380ce54f59c4",
+    "binary_sha256": "a016e442fdf12e4642ad3425ea6d624a40882d77accdfa043b5e40a4fd08d037"
   },
   "gpu": {
     "id": "NVIDIA A100 80GB PCIe",
@@ -16,7 +18,7 @@
     "max_hourly_price_usd": 2.0
   },
   "pod": {
-    "name": "mantisv2-foundation-production",
+    "name": "mantisv2-foundation-production-v2-4tf-full-finetune-s42",
     "image": "runpod/pytorch@sha256:0a360022e8de4375af99430f84e8b38951acc397252163a37ceac7204d01be35",
     "container_disk_gb": 80,
     "min_free_disk_gb": 20,
@@ -36,10 +38,10 @@
   "paths": {
     "source_root": "/Users/replace-me/Personal/Trading/mantis-foundation-model",
     "remote_repo": "/workspace/mantis/repo",
-    "corpus_manifest": "/Volumes/Storage/trading-research/data/mantisv2/corpus/manifest.json",
-    "remote_corpus_manifest": "/workspace/mantis/data/corpus/manifest.json",
-    "remote_artifact_root": "/workspace/mantis/artifacts/mantisv2-foundation-production",
-    "local_artifact_root": "/Volumes/Storage/trading-research/artifacts/mantis-foundation-model/mantisv2-foundation-production",
+    "corpus_manifest": "/Volumes/Storage/trading-research/data/MANTIS_NEXTLEG_PARQUET_V1/manifest.json",
+    "remote_corpus_manifest": "/workspace/mantis/inputs/4d12c3f334dba95fb045905d89654f16d63e75b68f8423ae8726eac06d70fba6/corpus/manifest.json",
+    "remote_artifact_root": "/workspace/mantis/runs/mantisv2-foundation-production-v2-4tf-full-finetune-s42",
+    "local_artifact_root": "/Volumes/Storage/trading-research/artifacts/mantis-foundation-model/mantisv2-foundation-production-v2-4tf-full-finetune-s42",
     "receipt_root": "/Users/replace-me/Library/Application Support/mantis-runpod-v2"
   }
 }
