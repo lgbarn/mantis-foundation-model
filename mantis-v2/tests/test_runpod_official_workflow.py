@@ -247,9 +247,8 @@ case "${{1:-}} ${{2:-}}" in
     ;;
   "pod get")
     printf '%s%s\\n' '{{"id":"pod-123","name":"mantis-smoke",' \
-      '"gpuTypeId":"NVIDIA A100 80GB PCIe","gpuCount":1,' \
-      '"imageName":"runpod/pytorch:official","containerDiskInGb":80,' \
-      '"volumeMountPath":"/workspace","desiredStatus":"RUNNING","costPerHr":"1.5"}}'
+      '"imageName":"runpod/pytorch:official","networkVolumeId":"volume-1",' \
+      '"desiredStatus":"RUNNING","costPerHr":"1.5"}}'
     ;;
   "pod list")
     if [[ -f {deleted} && "${{STALE_POD_AFTER_DELETE:-0}}" == 1 ]]; then
@@ -1052,7 +1051,8 @@ case "${{1:-}} ${{2:-}}" in
   "pod get")
     printf '%s%s\\n' '{{"id":"pod-123","name":"mantis-smoke",' \
       '"gpuTypeId":"NVIDIA A100 80GB PCIe","gpuCount":1,' \
-      '"imageName":"runpod/pytorch:official","containerDiskInGb":80,' \
+      '"imageName":"runpod/pytorch:official","networkVolumeId":"volume-1",' \
+      '"containerDiskInGb":80,' \
       '"volumeMountPath":"/workspace","desiredStatus":"RUNNING","costPerHr":"1.5"}}'
     ;;
   "ssh info")

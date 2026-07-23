@@ -599,19 +599,13 @@ run_train() {
     RUNPOD_API_KEY="$RUNPOD_API_KEY_VALUE" runpodctl pod get "$RUNPOD_POD_ID" --output=json
   )" || die "created_pod_status_unavailable:$RUNPOD_POD_ID"
   jq -e --arg id "$RUNPOD_POD_ID" --arg name "$run_id" \
-    --arg gpu_id "$(jq -r '.gpu.id' "$config")" \
     --arg image "$(jq -r '.pod.image' "$config")" \
-    --arg volume_mount_path "$(jq -r '.pod.volume_mount_path' "$config")" \
-    --argjson gpu_count "$(jq -r '.gpu.count' "$config")" \
-    --argjson container_disk_gb "$(jq -r '.pod.container_disk_gb' "$config")" \
+    --arg network_volume_id "$(jq -r '.pod.network_volume_id' "$config")" \
     --argjson maximum "$(jq -r '.gpu.max_hourly_price_usd' "$config")" '
       .id == $id and
       .name == $name and
-      .gpuTypeId == $gpu_id and
-      .gpuCount == $gpu_count and
       .imageName == $image and
-      .containerDiskInGb >= $container_disk_gb and
-      .volumeMountPath == $volume_mount_path and
+      .networkVolumeId == $network_volume_id and
       (.desiredStatus | type == "string") and
       (.costPerHr | tonumber? | type == "number") and
       (.costPerHr | tonumber) > 0 and
