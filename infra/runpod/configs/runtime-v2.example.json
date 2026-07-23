@@ -19,12 +19,13 @@
     "name": "mantisv2-foundation-production",
     "image": "runpod/pytorch@sha256:0a360022e8de4375af99430f84e8b38951acc397252163a37ceac7204d01be35",
     "container_disk_gb": 80,
+    "min_free_disk_gb": 20,
     "network_volume_id": "replace-with-network-volume-id",
     "volume_mount_path": "/workspace",
     "ports": [
       "22/tcp"
     ],
-    "terminate_after": "12h"
+    "terminate_after_minutes": 720
   },
   "ssh": {
     "key_path": "/Users/replace-me/.ssh/id_ed25519",
@@ -40,17 +41,5 @@
     "remote_artifact_root": "/workspace/mantis/artifacts/mantisv2-foundation-production",
     "local_artifact_root": "/Volumes/Storage/trading-research/artifacts/mantis-foundation-model/mantisv2-foundation-production",
     "receipt_root": "/Users/replace-me/Library/Application Support/mantis-runpod-v2"
-  },
-  "commands": {
-    "remote_train": [
-      "just",
-      "train",
-      "mantis-v2/configs/nextleg-parquet-v2.toml"
-    ],
-    "local_validate": [
-      "just",
-      "validated-export",
-      "mantis-v2/configs/nextleg-parquet-v2.toml"
-    ]
   }
 }
