@@ -504,7 +504,7 @@ retrieve_verified_artifacts() {
   mkdir -p "$parent"
   staging="$parent/.${run_id}.download"
   mkdir -p "$staging"
-  rsync -az --delete --checksum --partial --partial-dir=.rsync-partial -e "$rsync_ssh" \
+  rsync -az --no-owner --no-group --delete --checksum --partial --partial-dir=.rsync-partial -e "$rsync_ssh" \
     "$ssh_target:$remote_root/" "$staging/"
   if [[ "$purpose" == "recovery" && ! -f "$staging/train-result.json" ]]; then
     verify_recovered_checkpoint "$staging" "$expected_source_revision" \
@@ -661,9 +661,9 @@ run_train() {
   remote_corpus_manifest="$(jq -r '.paths.remote_corpus_manifest' "$config")"
   corpus_sha="$(sha256_file "$corpus_manifest")"
   git -C "$source_root" ls-files --cached -z |
-    rsync -az --from0 --files-from=- -e "$rsync_ssh" \
+    rsync -az --no-owner --no-group --from0 --files-from=- -e "$rsync_ssh" \
       "$source_root/" "$ssh_target:$remote_repo/"
-  rsync -az --checksum -e "$rsync_ssh" \
+  rsync -az --no-owner --no-group --checksum -e "$rsync_ssh" \
     "$source_root/.git/" "$ssh_target:$remote_repo/.git/"
 
   local experiment_absolute remote_experiment remote_repo_q remote_experiment_q
@@ -671,7 +671,7 @@ run_train() {
   local gpu_count minimum_gpu_memory_mb
   experiment_absolute="$(cd "$(dirname "$experiment")" && pwd -P)/$(basename "$experiment")"
   remote_experiment="/tmp/${run_id}-experiment.toml"
-  rsync -az -e "$rsync_ssh" "$experiment_absolute" "$ssh_target:$remote_experiment"
+  rsync -az --no-owner --no-group -e "$rsync_ssh" "$experiment_absolute" "$ssh_target:$remote_experiment"
   printf -v remote_repo_q '%q' "$remote_repo"
   printf -v remote_experiment_q '%q' "$remote_experiment"
   printf -v remote_manifest_q '%q' "$remote_corpus_manifest"
