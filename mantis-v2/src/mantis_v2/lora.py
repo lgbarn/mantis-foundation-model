@@ -100,15 +100,20 @@ def adapter_state(model: nn.Module) -> dict[str, torch.Tensor]:
 def merged_lora_copy(model: nn.Module) -> nn.Module:
     """Return a deep copy with every LoRA wrapper folded into its base weight."""
     merged = copy.deepcopy(model)
+    return merge_lora_inplace(merged)
+
+
+def merge_lora_inplace(model: nn.Module) -> nn.Module:
+    """Fold every LoRA wrapper into ``model`` without copying upstream modules."""
     wrappers = [
-        (name, module) for name, module in merged.named_modules() if isinstance(module, LoRALinear)
+        (name, module) for name, module in model.named_modules() if isinstance(module, LoRALinear)
     ]
     if not wrappers:
         raise LoRAContractError("model has no LoRA modules to merge")
     for name, module in wrappers:
-        parent, attribute = _parent_module(merged, name)
+        parent, attribute = _parent_module(model, name)
         setattr(parent, attribute, module.merged())
-    return merged
+    return model
 
 
 def lora_metadata(model: nn.Module) -> Mapping[str, object]:

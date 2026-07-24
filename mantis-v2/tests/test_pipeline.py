@@ -14,6 +14,7 @@ from mantis_v2.config import AdaptationConfig, load_config
 from mantis_v2.data import Anchor
 from mantis_v2.pipeline import (
     PipelineError,
+    _assert_export_repair_provenance,
     _assert_run_writable,
     _loader,
     _stratified_validation_indices,
@@ -21,11 +22,13 @@ from mantis_v2.pipeline import (
     _validation_state,
     evaluate,
     export,
+    export_repair,
     probe,
     train,
     validated_export,
 )
 from mantis_v2.precision import PrecisionContractError
+from mantis_v2.provenance import Provenance
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 from torch.utils.data import DataLoader, Dataset
 
@@ -526,6 +529,65 @@ def test_validated_export_reuses_one_loaded_checkpoint(
         "evaluation": {"passed": True},
         "export": {"parity": {"verified": True}},
     }
+
+
+def test_export_repair_reuses_recorded_training_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_config(ROOT / "configs" / "smoke.toml")
+    loaded = object()
+    calls: list[str] = []
+
+    def load_once(_: object) -> object:
+        calls.append("load")
+        return loaded
+
+    def export_loaded(_: object, candidate: object) -> dict[str, object]:
+        assert candidate is loaded
+        calls.append("export")
+        return {"parity": {"verified": True}}
+
+    monkeypatch.setattr(pipeline_module, "_load_export_repair", load_once)
+    monkeypatch.setattr(pipeline_module, "_export_loaded", export_loaded)
+
+    assert export_repair(config) == {"export": {"parity": {"verified": True}}}
+    assert calls == ["load", "export"]
+
+
+def test_export_repair_requires_same_training_identity_and_descendant_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    values = {
+        "schema_version": 1,
+        "precision": "float32",
+        "config_digest": "a" * 64,
+        "dataset_digest": "b" * 64,
+        "dataset_files": (),
+        "source_revision": "c" * 40,
+        "source_dirty": False,
+        "source_digest": "d" * 64,
+        "lock_digest": "e" * 64,
+        "upstream_source_revision": "source",
+        "upstream_hub_revision": "hub",
+        "upstream_weights_sha256": "f" * 64,
+        "contamination_digest": "0" * 64,
+    }
+    recorded = Provenance(**values)
+    current = Provenance(**{**values, "source_revision": "1" * 40, "source_digest": "2" * 64})
+
+    monkeypatch.setattr(
+        pipeline_module.subprocess,
+        "run",
+        lambda *args, **kwargs: type("Result", (), {"returncode": 0})(),
+    )
+    _assert_export_repair_provenance(recorded, current, tmp_path)
+
+    with pytest.raises(PipelineError, match="dataset_digest"):
+        _assert_export_repair_provenance(
+            recorded,
+            Provenance(**{**current.to_dict(), "dataset_digest": "3" * 64}),
+            tmp_path,
+        )
 
 
 @pytest.mark.parametrize(

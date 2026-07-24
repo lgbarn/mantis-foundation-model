@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import subprocess
 import tempfile
 import time
 from collections.abc import Mapping, Sized
@@ -36,7 +37,7 @@ from mantis_v2.instrumentation import (
     parse_tensorboard_events,
     synchronize_device,
 )
-from mantis_v2.lora import adapter_state, lora_metadata, merged_lora_copy
+from mantis_v2.lora import adapter_state, lora_metadata, merge_lora_inplace
 from mantis_v2.model import (
     MantisV2Adapter,
     NextLegModel,
@@ -68,6 +69,7 @@ class _LoadedTrained:
     global_step: int
     checkpoint_sha256: str
     adaptation: dict[str, object] | None
+    export_implementation: dict[str, str] | None = None
 
 
 _PROVENANCE_IDENTITY_KEYS = (
@@ -80,6 +82,10 @@ _PROVENANCE_IDENTITY_KEYS = (
     "upstream_hub_revision",
     "upstream_weights_sha256",
     "contamination_digest",
+)
+
+_EXPORT_REPAIR_IDENTITY_KEYS = tuple(
+    key for key in _PROVENANCE_IDENTITY_KEYS if key != "source_digest"
 )
 
 
@@ -960,6 +966,78 @@ def _load_trained(
     )
 
 
+def _checkpoint_provenance(path: Path) -> Provenance:
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=True)
+        recorded = payload["provenance"]
+        if not isinstance(recorded, dict):
+            raise TypeError("provenance is not an object")
+        return Provenance(**recorded)
+    except (KeyError, RuntimeError, TypeError, ValueError) as exc:
+        raise PipelineError("export repair checkpoint provenance is invalid") from exc
+
+
+def _assert_export_repair_provenance(
+    recorded: Provenance, current: Provenance, repository: Path
+) -> None:
+    if recorded.source_dirty or current.source_dirty:
+        raise PipelineError("export repair requires clean recorded and current source")
+    for key in _EXPORT_REPAIR_IDENTITY_KEYS:
+        if getattr(recorded, key) != getattr(current, key):
+            raise PipelineError(f"export repair provenance mismatch: {key}")
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", recorded.source_revision, current.source_revision],
+        cwd=repository,
+        check=False,
+    )
+    if ancestor.returncode != 0:
+        raise PipelineError("export repair source is not descended from the training source")
+
+
+def _load_export_repair(config: PipelineConfig) -> _LoadedTrained:
+    """Load a completed checkpoint with an explicitly recorded exporter repair lineage."""
+    seed_everything(config.run.seed)
+    device = select_device(config.run)
+    validate_precision_device(config.training.precision, device)
+    train_dataset, validation_dataset, contamination = _datasets(config)
+    del train_dataset
+    repository = repository_root()
+    current = build_provenance(config, repository, contamination)
+    checkpoint_path = artifact_root(config) / "checkpoints" / "best.pt"
+    if not checkpoint_path.is_file():
+        raise PipelineError(f"checkpoint not found: {checkpoint_path}")
+    recorded = _checkpoint_provenance(checkpoint_path)
+    _assert_export_repair_provenance(recorded, current, repository)
+    model = _model(config, device)
+    optimizer = _optimizer(model, config)
+    adaptation = checkpoint_adaptation_state(checkpoint_path, recorded)
+    if config.adaptation is not None:
+        if adaptation is None or adaptation.get("phase") != "lora":
+            raise PipelineError("validated export requires a completed LoRA-phase checkpoint")
+        model.set_adaptation_phase("lora")
+        optimizer = _optimizer(model, config)
+    elif adaptation is not None:
+        raise PipelineError("standard checkpoint contains adaptation state")
+    next_epoch, global_step = load_checkpoint(
+        checkpoint_path, model, optimizer, recorded, adaptation
+    )
+    return _LoadedTrained(
+        model=model,
+        provenance=recorded,
+        device=device,
+        validation_dataset=validation_dataset,
+        checkpoint_path=checkpoint_path,
+        checkpoint_epoch=next_epoch - 1,
+        global_step=global_step,
+        checkpoint_sha256=sha256_file(checkpoint_path),
+        adaptation=adaptation,
+        export_implementation={
+            "source_revision": current.source_revision,
+            "source_digest": current.source_digest,
+        },
+    )
+
+
 def evaluate(config: PipelineConfig) -> dict[str, Any]:
     if config.evaluation.allow_holdout:
         raise PipelineError(
@@ -1119,7 +1197,15 @@ def _export_loaded(config: PipelineConfig, loaded: _LoadedTrained) -> dict[str, 
         ):
             raise PipelineError("LoRA adapter reload state is incompatible")
         adapter_reloaded.eval()
-        export_model = cast(NextLegModel, merged_lora_copy(loaded.model)).to(loaded.device).eval()
+        # Do not deepcopy the upstream Mantis module: its pinned implementation
+        # contains a staticmethod, which is not picklable. Rebuild an equivalent
+        # LoRA model, load the immutable selected checkpoint state, then fold the
+        # adapters into that independent model in place.
+        export_model = _model(config, loaded.device)
+        incompatible_export = export_model.load_state_dict(loaded.model.state_dict(), strict=True)
+        if incompatible_export.missing_keys or incompatible_export.unexpected_keys:
+            raise PipelineError("LoRA export state is incompatible with a fresh model")
+        export_model = cast(NextLegModel, merge_lora_inplace(export_model)).eval()
         lora = {
             **metadata,
             "base_weights_sha256": loaded.provenance.upstream_weights_sha256,
@@ -1140,7 +1226,7 @@ def _export_loaded(config: PipelineConfig, loaded: _LoadedTrained) -> dict[str, 
             raise PipelineError(f"export tensor parity failed for {key}")
     reloaded = _model(config, loaded.device)
     if config.model.mode.startswith("lora_"):
-        reloaded = cast(NextLegModel, merged_lora_copy(reloaded)).to(loaded.device)
+        reloaded = cast(NextLegModel, merge_lora_inplace(reloaded)).to(loaded.device)
     reloaded.load_state_dict(loaded_state, strict=True)
     reloaded.eval()
     fixture = loaded.validation_dataset[0]["context"].unsqueeze(0).to(loaded.device)
@@ -1190,6 +1276,11 @@ def _export_loaded(config: PipelineConfig, loaded: _LoadedTrained) -> dict[str, 
         manifest["lora"] = lora
         manifest["parity"]["lora_merge_verified"] = True
         manifest["parity"]["lora_adapter_reload_verified"] = True
+    if loaded.export_implementation is not None:
+        manifest["export_repair"] = {
+            "training_provenance_preserved": True,
+            "export_implementation": loaded.export_implementation,
+        }
     _write_json(export_root / "manifest.json", manifest)
     return manifest
 
@@ -1204,6 +1295,16 @@ def validated_export(config: PipelineConfig) -> dict[str, Any]:
     evaluation = _evaluate_loaded(config, loaded)
     manifest = _export_loaded(config, loaded)
     return {"evaluation": evaluation, "export": manifest}
+
+
+def export_repair(config: PipelineConfig) -> dict[str, Any]:
+    """Repair a failed export without retraining or rewriting training provenance."""
+    if config.evaluation.allow_holdout:
+        raise PipelineError(
+            "holdout evaluation is intentionally not automated; create an explicit release config"
+        )
+    loaded = _load_export_repair(config)
+    return {"export": _export_loaded(config, loaded)}
 
 
 def smoke(config: PipelineConfig) -> dict[str, Any]:

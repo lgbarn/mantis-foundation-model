@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import replace
 from pathlib import Path
 
@@ -7,7 +8,7 @@ import pytest
 import torch
 from mantis_v2 import model as model_module
 from mantis_v2.config import load_config
-from mantis_v2.lora import LoRALinear, adapter_state, merged_lora_copy
+from mantis_v2.lora import LoRALinear, adapter_state, merge_lora_inplace, merged_lora_copy
 from mantis_v2.model import (
     MantisV2Adapter,
     ModelContractError,
@@ -271,3 +272,29 @@ def test_lora_merge_preserves_outputs_and_removes_adapter_tensors() -> None:
     }
     assert not any(isinstance(module, LoRALinear) for module in merged.modules())
     assert not any("lora_" in name for name in merged.state_dict())
+
+
+def test_lora_inplace_merge_avoids_unpicklable_upstream_state() -> None:
+    class ProjectionModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.upstream_staticmethod = staticmethod(lambda value: value)
+            self.wQKV = LoRALinear(nn.Linear(4, 12), rank=2, alpha=4)
+            self.wO = LoRALinear(nn.Linear(12, 4), rank=2, alpha=4)
+
+        def forward(self, value: torch.Tensor) -> torch.Tensor:
+            return self.wO(torch.tanh(self.wQKV(value)))
+
+    model = ProjectionModel().eval()
+    with torch.no_grad():
+        model.wQKV.lora_B.copy_(torch.randn_like(model.wQKV.lora_B))
+        model.wO.lora_B.copy_(torch.randn_like(model.wO.lora_B))
+    fixture = torch.randn(3, 4)
+    expected = model(fixture)
+
+    with pytest.raises(TypeError, match="staticmethod"):
+        copy.deepcopy(model)
+    merged = merge_lora_inplace(model).eval()
+
+    assert torch.allclose(expected, merged(fixture), atol=1e-6, rtol=1e-6)
+    assert not any(isinstance(module, LoRALinear) for module in merged.modules())
