@@ -5,6 +5,9 @@
     "base_url": "https://api.runpod.io/v2",
     "openapi_sha256": "58a7c1aedec38ab48f676dc4e727f40eeec66edc740bb98cc1dea94293c706fd"
   },
+  "data_validation": {
+    "mode": "full"
+  },
   "runpodctl": {
     "version": "2.7.2",
     "source_commit": "309512b4926eb7d218bbc8a8f11d380ce54f59c4",

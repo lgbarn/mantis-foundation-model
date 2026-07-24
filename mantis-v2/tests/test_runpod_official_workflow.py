@@ -63,6 +63,7 @@ def _runtime(tmp_path: Path) -> Path:
                     "base_url": "https://api.runpod.io/v2",
                     "openapi_sha256": "a" * 64,
                 },
+                "data_validation": {"mode": "full"},
                 "runpodctl": {
                     "version": "2.7.2",
                     "source_commit": "309512b4926eb7d218bbc8a8f11d380ce54f59c4",
@@ -467,6 +468,29 @@ def test_train_runs_and_always_deletes_exact_pod(tmp_path: Path) -> None:
         "uv run mantis-v2 inspect-data --config /tmp/mantis-smoke-experiment.toml"
     )
     assert (tmp_path / "artifacts" / "train-result.json").is_file()
+
+
+def test_train_manifest_only_skips_full_data_audit(tmp_path: Path) -> None:
+    experiment = _experiment(tmp_path)
+    runtime = _runtime(tmp_path)
+    payload = json.loads(runtime.read_text())
+    payload["data_validation"] = {"mode": "manifest_only"}
+    runtime.write_text(json.dumps(payload))
+    env, call_log = _success_environment(tmp_path)
+
+    completed = subprocess.run(
+        ["just", "runpod-train", str(experiment), str(runtime)],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    calls = call_log.read_text()
+    assert "uv run mantis-v2 inspect-data" not in calls
+    assert "uv run mantis-v2 train --config /tmp/mantis-smoke-experiment.toml" in calls
 
 
 def test_train_uses_immutable_runtime_snapshot_after_catalog(tmp_path: Path) -> None:
