@@ -155,6 +155,20 @@ Never edit source, `uv.lock`, the active config, source data, or active output
 files during a running or resumable job. A checkpoint is bound to these inputs.
 See [Protect an active run](docs/workflow.md#protect-an-active-run).
 
+## RunPod storage and runtime
+
+Stage immutable Parquet data and its manifest onto a RunPod network volume before
+renting a GPU. The volume is for the corpus, checkpoints, exports, and
+TensorBoard logs; it must not hold a mutable Python virtual environment. Use the
+official pinned PyTorch image, create the frozen `uv` environment on the Pod's
+ephemeral `/tmp` disk, perform a CUDA smoke test, then train. A failed Pod is
+therefore disposable and cannot contaminate the next run.
+
+Data transfer needs no CUDA image or GPU. Use the RunPod S3-compatible API from
+the local machine to stage the volume; use a CPU-only Pod only when data must be
+transformed remotely. Reserve CUDA Pods for CUDA smoke checks, training, and
+export.
+
 ## Repository layout
 
 ```text

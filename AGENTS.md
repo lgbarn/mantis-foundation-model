@@ -124,6 +124,13 @@ Rsyncing to a RunPod network volume must use `--no-owner --no-group`; the mounte
 volume rejects ownership changes. Before any source transfer or corpus work, smoke
 the image's CUDA runtime. After the frozen sync, smoke the resolved `uv` runtime
 again before inspecting data or starting training.
+The resolved remote virtual environment must live on the Pod's ephemeral `/tmp`,
+not the shared network volume, so failed installs cannot contaminate later runs.
+Use the network volume only for immutable staged data, manifests, checkpoints,
+exports, and TensorBoard logs. Copying data requires neither a CUDA image nor a
+GPU: stage it from the local machine through RunPod's S3-compatible API, or use
+a CPU-only Pod only when remote transformation is actually required. Reserve a
+CUDA Pod for the CUDA smoke, training, and export stages.
 
 The root `justfile` should eventually expose at least setup, format, lint, test, smoke, train, evaluate, and export commands, with model-version-specific recipes where behavior differs. Until those files exist, do not claim any command or test passes.
 

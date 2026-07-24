@@ -455,6 +455,7 @@ def test_train_runs_and_always_deletes_exact_pod(tmp_path: Path) -> None:
     resolved_cuda_smoke = "uv run python -c 'import torch; assert torch.cuda.is_available()"
     assert base_cuda_smoke in calls
     assert resolved_cuda_smoke in calls
+    assert "UV_PROJECT_ENVIRONMENT=/tmp/mantis-smoke-venv uv sync --frozen" in calls
     assert "uv run mantis-v2 inspect-data --config /tmp/mantis-smoke-experiment.toml" in calls
     assert "uv run mantis-v2 train --config /tmp/mantis-smoke-experiment.toml" in calls
     assert "uv run mantis-v2 validated-export --config /tmp/mantis-smoke-experiment.toml" in calls
