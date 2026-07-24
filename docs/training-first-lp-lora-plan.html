@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Training-First MantisV2 LP-LoRA Plan</title>
+  <style>
+:root { --fg:#1a1a1a; --fg-muted:#57606a; --bg:#fff; --bg-soft:#f6f8fa; --border:#d0d7de; --accent:#0969da; --pos:#1a7f37; --neg:#cf222e; --warn:#9a6700; --code-bg:#f6f8fa; --radius:8px; }
+@media (prefers-color-scheme: dark) { :root { --fg:#e6edf3; --fg-muted:#9198a1; --bg:#0d1117; --bg-soft:#161b22; --border:#30363d; --accent:#4493f8; --pos:#3fb950; --neg:#f85149; --warn:#d29922; --code-bg:#161b22; } }
+*,*::before,*::after { box-sizing:border-box; } html { font-size:100%; -webkit-text-size-adjust:100%; }
+body { max-width:860px; margin:0 auto; padding:2.5rem 1.5rem 4rem; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; font-size:1rem; line-height:1.65; color:var(--fg); background:var(--bg); }
+h1,h2,h3 { line-height:1.25; font-weight:600; margin:2rem 0 1rem; } h1 { font-size:2rem; padding-bottom:.3rem; border-bottom:2px solid var(--border); margin-top:0; } h2 { font-size:1.5rem; padding-bottom:.25rem; border-bottom:1px solid var(--border); } h3 { font-size:1.2rem; }
+p,ul,ol { margin:0 0 1rem; } li { margin:.25rem 0; } strong { font-weight:600; }
+code { font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace; font-size:.9em; background:var(--code-bg); padding:.15em .4em; border-radius:4px; }
+pre { background:var(--code-bg); padding:1rem; border-radius:var(--radius); overflow-x:auto; border:1px solid var(--border); } pre code { background:none; padding:0; }
+table { width:100%; border-collapse:collapse; margin:1rem 0; font-size:.95rem; } th,td { padding:.5rem .75rem; border:1px solid var(--border); text-align:left; } th { background:var(--bg-soft); font-weight:600; } tbody tr:nth-child(even) { background:var(--bg-soft); }
+.stat-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:1rem; margin:1.5rem 0; } .stat { padding:1rem; border:1px solid var(--border); border-radius:var(--radius); background:var(--bg-soft); } .stat .value { font-size:1.5rem; font-weight:700; } .stat .label { font-size:.8rem; color:var(--fg-muted); text-transform:uppercase; letter-spacing:.03em; }
+.pos { color:var(--pos); } .neg { color:var(--neg); } .callout { padding:.75rem 1rem; border-radius:var(--radius); border-left:4px solid var(--accent); background:var(--bg-soft); margin:1rem 0; } .callout.warn { border-left-color:var(--warn); }
+@media (max-width:600px) { body { padding:1.5rem 1rem 3rem; } h1 { font-size:1.6rem; } h2 { font-size:1.3rem; } }
+  </style>
+</head>
+<body>
+  <h1>Training-First MantisV2 LP-LoRA Plan</h1>
+  <p><strong>Objective:</strong> cheaply test whether preparing MantisV2 task heads before LoRA improves the existing NextLeg foundation training. This plan starts with training, not a new downstream, RL, walk-forward, Optuna, or multi-timeframe framework.</p>
+
+  <div class="stat-grid">
+    <div class="stat"><div class="value">2</div><div class="label">Initial training cells</div></div>
+    <div class="stat"><div class="value">42</div><div class="label">Initial seed</div></div>
+    <div class="stat"><div class="value">3TF</div><div class="label">1m, 3m, 15m</div></div>
+    <div class="stat"><div class="value">10,000</div><div class="label">Maximum updates per cell</div></div>
+  </div>
+
+  <div class="callout warn">
+    <strong>Do not reuse the rejected 4TF matrix.</strong> It answered a different question and correctly rejected the 4TF addition. It does not authorize a mode screen, downstream run, or promotion. This is a fresh, uniquely identified 3TF foundation-training experiment.
+  </div>
+
+  <h2>Why this is the next experiment</h2>
+  <p>The NeurIPS 2024 LP-FT paper gives a defensible mechanism for head warm-up: an already useful task head can reduce destructive early changes to pretrained features. Its evidence is strongest for linear probing followed by full fine-tuning under cross-entropy classification. Our NextLeg task uses candle MSE plus leg SmoothL1 and attention LoRA, so it is a hypothesis here, not a result.</p>
+  <p>Therefore the first test is an A/B training pair, not a six-cell matrix and not a claim that LP-LoRA is best. The current code already supports both modes and phase-resumable warm-start training.</p>
+
+  <h2>Initial A/B experiment</h2>
+  <table>
+    <thead><tr><th>Cell</th><th>Mode</th><th>What changes</th><th>What stays identical</th></tr></thead>
+    <tbody>
+      <tr><td>A</td><td><code>lora_r8_alpha16</code></td><td>Direct LoRA from the official checkpoint for 10,000 updates.</td><td>Seed 42, data, symbols, 1m/3m/15m intervals, target, optimizer, batch size, learning rate, validation split, and total 10,000-update compute budget.</td></tr>
+      <tr><td>B</td><td><code>lora_r8_alpha16_head_warmstart</code></td><td>Task heads train alone for 2,000 updates, then LoRA plus heads for 8,000 updates.</td><td>Exactly the same as A except for the planned allocation of the shared 10,000-update budget.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Only required preparation</h2>
+  <ol>
+    <li>Copy <code>mantis-v2/configs/nextleg-runpod-cuda-bundled-r5-v1.toml</code> into two new immutable configs.</li>
+    <li>Give each a distinct run name and artifact root. Keep <code>allow_overwrite = false</code>.</li>
+    <li>Set both <code>data.intervals</code> to <code>["1min", "3min", "15min"]</code>.</li>
+    <li>For A, set <code>model.mode = "lora_r8_alpha16"</code>, remove the <code>[adaptation]</code> section, set <code>epochs = 50</code>, and retain <code>max_steps_per_epoch = 200</code> for a 10,000-update ceiling.</li>
+    <li>For B, retain <code>model.mode = "lora_r8_alpha16_head_warmstart"</code> and <code>[adaptation]</code> with <code>warm_start_updates = 2000</code>, <code>total_updates = 10000</code>, <code>lora_rank = 8</code>, and <code>lora_alpha = 16</code>.</li>
+    <li>Keep every upstream pin, corpus-manifest hash, target setting, and numerical tolerance unchanged from the CUDA template.</li>
+  </ol>
+
+  <h2>Execution sequence</h2>
+  <pre><code># Cell A: direct LoRA
+uv run mantis-v2 train --config mantis-v2/configs/nextleg-runpod-cuda-3tf-direct-lora-s42-v1.toml
+uv run mantis-v2 validated-export --config mantis-v2/configs/nextleg-runpod-cuda-3tf-direct-lora-s42-v1.toml
+
+# Cell B: head warm-up then LoRA
+uv run mantis-v2 train --config mantis-v2/configs/nextleg-runpod-cuda-3tf-lp-lora-s42-v1.toml
+uv run mantis-v2 validated-export --config mantis-v2/configs/nextleg-runpod-cuda-3tf-lp-lora-s42-v1.toml</code></pre>
+  <p>Run the two cells on the same qualified CUDA pod with <code>bash infra/runpod/scripts/training_first_lp_lora_s42.sh</code>. If <code>just</code> is available, <code>just training-first-lp-lora-s42</code> delegates to the same entrypoint. The script then writes one immutable, non-promoting <code>screen-decision.json</code> after verifying both exports and their common provenance. Each training command resumes only its own provenance-checked run. Do not start another command using either run identity.</p>
+
+  <h2>Decision after seed 42</h2>
+  <p>The update budget is compute-matched, not LoRA-step-matched: A has 10,000 LoRA updates while B has 2,000 head-only plus 8,000 LoRA updates. That allocation is the hypothesis under test and is reported in checkpoint provenance. Compare immutable training and export receipts only. B advances only if it has a strictly lower best validation total loss than A, no regression in either candle or leg validation loss, and both exports pass native-to-safetensors parity. A single seed is a screening result, not a model-selection claim.</p>
+  <ul>
+    <li><strong>B wins:</strong> run the same paired A/B cells for seeds 43 and 44. That is four more training cells, still no downstream or RL work.</li>
+    <li><strong>A wins or result is mixed:</strong> stop LP-LoRA. Do not add full fine-tuning, RL, or new timeframes merely to rescue the hypothesis.</li>
+    <li><strong>Paired three-seed B wins:</strong> choose the training method for the next separately approved downstream experiment. Only then evaluate a full-finetune comparison if the expected value justifies its cost.</li>
+  </ul>
+
+  <h2>I/O protocol for the next Pod</h2>
+  <p>Use the network volume as persistent, immutable storage. Use the Pod's local ephemeral disk for the active working set. RunPod documents network-volume performance as variable and local container storage as fastest; the prior run made the worst combination by launching five concurrent writers directly against the network volume.</p>
+  <ol>
+    <li>Before renting a GPU, stage the accepted immutable Parquet corpus bundle on the network volume with the S3-compatible API. Data upload is a local-machine or CPU-only task.</li>
+    <li>At Pod startup, check only free local disk space, then copy the accepted bundle once from <code>/workspace/mantis/inputs/&lt;bundle&gt;</code> to <code>/tmp/mantis/inputs/&lt;bundle&gt;</code>. Do not scan, audit, or otherwise revalidate Parquet on the GPU Pod.</li>
+    <li>Point both A and B configs at the copied local corpus and its identical manifest hash. Run the paired training cells sequentially on the same Pod so the second cell reuses the local copy.</li>
+    <li>Keep checkpoints, TensorBoard logs, validated exports, and final manifests under <code>/workspace/mantis/runs</code> for persistence and resume.</li>
+    <li>For any later embedding diagnostic, write its temporary shards under <code>/tmp/mantis/work/&lt;run-id&gt;</code>, use one writer, hash there, then copy only the final digest directory to the network volume.</li>
+  </ol>
+  <pre><code># One-time Pod-start copy. The accepted source bundle is not revalidated on the GPU Pod.
+rsync -a --no-owner --no-group --info=progress2 \\
+  /workspace/mantis/inputs/&lt;bundle&gt;/ \\
+  /tmp/mantis/inputs/&lt;bundle&gt;/
+
+# Configs for both paired cells use the local read path, but preserve the same manifest SHA-256.
+data.root = "/tmp/mantis/inputs/&lt;bundle&gt;/corpus/market"
+data.corpus_manifest_path = "/tmp/mantis/inputs/&lt;bundle&gt;/corpus/manifest.json"</code></pre>
+  <div class="callout"><strong>Do not copy the corpus separately for A and B.</strong> Do not write five embedding arrays concurrently. Do not put the Python environment on the network volume. The working copy and the resolved virtual environment belong on local ephemeral storage; durable inputs and final artifacts belong on the network volume.</div>
+
+  <h2>Explicitly out of scope</h2>
+  <ul>
+    <li>3TF downstream-pipeline refactor.</li>
+    <li>Embedding diagnostics, walk-forward, Topstep simulation, or RL.</li>
+    <li>Optuna, broader hyperparameter sweeps, and new model modes.</li>
+    <li>Adding 5m, 4TF, or cross-ticker changes.</li>
+    <li>Using the reserved holdout for selection.</li>
+  </ul>
+
+  <h2>Evidence and limits</h2>
+  <p>Tomihari and Sato, "Understanding Linear Probing then Fine-tuning Language Models from NTK Perspective," NeurIPS 2024, supports testing head warm-up as a feature-preservation mechanism. It does not establish that LP-LoRA improves MantisV2, time-series models, regression losses, or trading performance. The plan treats it as one paired training hypothesis and demands a result before adding scope.</p>
+</body>
+</html>

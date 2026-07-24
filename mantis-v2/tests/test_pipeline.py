@@ -969,3 +969,44 @@ def test_bundled_adaptation_resumes_across_transition_and_obeys_total_ceiling(
                 torch.testing.assert_close(value, expected, rtol=0, atol=0)
             else:
                 assert value == expected
+
+
+def test_bundled_adaptation_does_not_early_stop_before_warm_start_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = load_config(ROOT / "configs" / "smoke.toml")
+    config = replace(
+        base,
+        model=replace(base.model, mode="lora_r8_alpha16_head_warmstart"),
+        training=replace(
+            base.training,
+            epochs=10,
+            max_steps_per_epoch=3,
+            checkpoint_every=1,
+            resume=True,
+            early_stopping_patience=1,
+        ),
+        adaptation=AdaptationConfig(
+            warm_start_updates=4,
+            total_updates=10,
+            lora_rank=8,
+            lora_alpha=16,
+        ),
+        run=replace(base.run, name="warm-start-no-early-stop", artifact_root=tmp_path),
+    )
+
+    monkeypatch.setattr(pipeline_module, "_model", lambda *_: FakeBundledModel())
+    monkeypatch.setattr(
+        pipeline_module,
+        "_run_epoch",
+        lambda _model, _loader, _config, _device, optimizer, max_steps, **_kwargs: (
+            {"total": 1.0, "candle": 0.5, "leg": 0.5},
+            max_steps if optimizer is not None else 1,
+        ),
+    )
+
+    result = train(config, process_epoch_limit=2)
+
+    assert result["adaptation"]["phase"] == "warm_start"
+    assert result["adaptation"]["warm_start_updates"] == 4
+    assert result["stopped_early"] is False

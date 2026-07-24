@@ -97,6 +97,24 @@ def test_bundled_production_config_has_fixed_budget_and_four_timeframes() -> Non
     assert (config.adaptation.lora_rank, config.adaptation.lora_alpha) == (8, 16)
 
 
+def test_training_first_three_timeframe_ab_configs_are_paired() -> None:
+    direct = load_config(ROOT / "configs" / "nextleg-runpod-cuda-3tf-direct-lora-s42-v1.toml")
+    warm = load_config(ROOT / "configs" / "nextleg-runpod-cuda-3tf-lp-lora-s42-v1.toml")
+
+    assert direct.run.seed == warm.run.seed == 42
+    assert direct.data.intervals == warm.data.intervals == ("1min", "3min", "15min")
+    assert direct.data.root == warm.data.root
+    assert direct.data.corpus_manifest_sha256 == warm.data.corpus_manifest_sha256
+    assert direct.model.mode == "lora_r8_alpha16"
+    assert warm.model.mode == "lora_r8_alpha16_head_warmstart"
+    assert direct.training.epochs * direct.training.max_steps_per_epoch == 10000
+    assert direct.training.epochs == warm.training.epochs
+    assert direct.training.max_steps_per_epoch == warm.training.max_steps_per_epoch
+    assert warm.adaptation is not None
+    assert warm.adaptation.warm_start_updates == 2000
+    assert warm.adaptation.total_updates == 10000
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [

@@ -65,6 +65,7 @@ just train mantis-v2/configs/nextleg-parquet-v2.toml
 just validated-export mantis-v2/configs/nextleg-parquet-v2.toml
 just train mantis-v2/configs/nextleg-runpod-cuda-bundled-v1.toml
 just validated-export mantis-v2/configs/nextleg-runpod-cuda-bundled-v1.toml
+just training-first-lp-lora-s42
 just rl-dry-run mantis-v2/configs/rl-entry-smoke.toml
 just rl-build-episodes mantis-v2/configs/rl-entry-smoke.toml 0 training 21
 just rl-account-replay fixture.json replay.json mantis-v2/configs/rl-entry-smoke.toml
@@ -132,6 +133,21 @@ state, and must pass the registered fixed-fixture, resume, export, and manifest
 gate before promotion. CPU policy tests cannot qualify BF16.
 
 For diagnosis, `just evaluate <config>` and `just export <config>` expose the individual stages. Direct export still enforces the same evaluation gate.
+
+### Training-first 3TF LP-LoRA screen
+
+`just training-first-lp-lora-s42` runs exactly two serial CUDA cells at seed 42:
+direct rank-8/alpha-16 LoRA for 10,000 updates and 2,000-update head warm-up
+followed by 8,000 LoRA updates. Both use the pinned Parquet corpus at `1min`, `3min`, and
+`15min`, reserve the holdout, and write separate no-overwrite artifacts. It
+expects the accepted corpus to have been copied once to the Pod-local `/tmp`
+path named in the configs. On RunPod, which does not include `just`, use
+`bash infra/runpod/scripts/training_first_lp_lora_s42.sh` after the frozen
+environment sync. The script stages the accepted corpus once and does not run
+`inspect-data` or any separate Parquet audit on the GPU Pod. It trains and
+validated-exports each cell, then writes a non-promoting immutable
+`screen-decision.json`; it
+does not run downstream, RL, simulation, Optuna, or the rejected 4TF matrix.
 
 `rl-dry-run` validates the locked entry-only RL experiment without training or
 reading the sealed holdout. It rehashes the source, dependency lock, corpus,

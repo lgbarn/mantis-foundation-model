@@ -195,6 +195,9 @@ export config:
 validated-export config:
     uv run mantis-v2 validated-export --config {{config}}
 
+training-first-lp-lora-s42:
+    bash infra/runpod/scripts/training_first_lp_lora_s42.sh
+
 foundation-fixture-freeze config output_root:
     uv run mantis-v2 foundation-fixture-freeze --config {{quote(config)}} --output-root {{quote(output_root)}}
 

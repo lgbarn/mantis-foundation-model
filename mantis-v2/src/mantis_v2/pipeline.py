@@ -703,6 +703,7 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
     stopped_early = bool(
         config.training.early_stopping_patience
         and epochs_without_improvement >= config.training.early_stopping_patience
+        and (not bundled or phase == "lora")
     )
     end_epoch = config.training.epochs
     if process_epoch_limit is not None:
@@ -711,8 +712,9 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
         if bundled and config.adaptation is not None:
             if global_step >= config.adaptation.total_updates:
                 break
-            if phase == "warm_start" and (
-                warm_start_updates >= config.adaptation.warm_start_updates or stopped_early
+            if (
+                phase == "warm_start"
+                and warm_start_updates >= config.adaptation.warm_start_updates
             ):
                 transition_parent = _model_state_digest(model)
                 phase = "lora"
@@ -794,6 +796,7 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
         stopped_early = bool(
             config.training.early_stopping_patience
             and epochs_without_improvement >= config.training.early_stopping_patience
+            and (not bundled or phase == "lora")
         )
         process_stop = epoch + 1 == end_epoch and end_epoch < config.training.epochs
         checkpoint_due = (

@@ -56,6 +56,10 @@ from mantis_v2.downstream_pipeline import (
 from mantis_v2.embedding import EmbeddingContractError
 from mantis_v2.embedding_artifacts import EmbeddingArtifactError
 from mantis_v2.embedding_qualification import qualify_embedding_files
+from mantis_v2.foundation_adaptation_screen import (
+    FoundationAdaptationScreenError,
+    decide_adaptation_screen,
+)
 from mantis_v2.foundation_diagnostic import DiagnosticError, score_diagnostic_fixture
 from mantis_v2.foundation_fixture import (
     FoundationFixtureError,
@@ -393,6 +397,10 @@ def _parser() -> argparse.ArgumentParser:
     fixture_score.add_argument("--candidate", required=True, type=Path)
     fixture_score.add_argument("--reference", required=True, type=Path)
     fixture_score.add_argument("--output", required=True, type=Path)
+    adaptation_screen = subparsers.add_parser("foundation-adaptation-screen")
+    adaptation_screen.add_argument("--direct-run-root", required=True, type=Path)
+    adaptation_screen.add_argument("--warm-run-root", required=True, type=Path)
+    adaptation_screen.add_argument("--output", required=True, type=Path)
     matrix_initial = subparsers.add_parser("foundation-matrix-plan-initial")
     matrix_initial.add_argument("--config", required=True, type=Path)
     matrix_initial.add_argument("--output-root", required=True, type=Path)
@@ -630,6 +638,16 @@ def main() -> None:
                         args.fixture,
                         args.candidate,
                         args.reference,
+                        args.output,
+                    )
+                )
+            }
+        elif args.command == "foundation-adaptation-screen":
+            result = {
+                "decision": str(
+                    decide_adaptation_screen(
+                        args.direct_run_root,
+                        args.warm_run_root,
                         args.output,
                     )
                 )
@@ -994,6 +1012,7 @@ def main() -> None:
         DiagnosticError,
         FoundationFixtureError,
         FoundationMatrixError,
+        FoundationAdaptationScreenError,
         WorkloadError,
         RunpodS3Error,
         RunpodctlError,
