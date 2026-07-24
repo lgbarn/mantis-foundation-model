@@ -58,6 +58,10 @@ class DownstreamPipelineError(RuntimeError):
     """Raised when a downstream stage fails closed."""
 
 
+_THREE_TIMEFRAME_CONTRACT = ("1min", "3min", "15min")
+_SUPPORTED_EMBEDDING_CONTRACTS = {FOUR_TIMEFRAME_CONTRACT, _THREE_TIMEFRAME_CONTRACT}
+
+
 def artifact_root(config: DownstreamConfig) -> Path:
     return config.run.artifact_root / config.run.name
 
@@ -205,9 +209,9 @@ def _manifest(path: Path, config: DownstreamConfig, expected_stage: str) -> dict
 def _embedding_manifest_input(
     config: DownstreamConfig,
 ) -> tuple[dict[str, Any], Path, str]:
-    if config.data.timeframes != FOUR_TIMEFRAME_CONTRACT:
+    if config.data.timeframes not in _SUPPORTED_EMBEDDING_CONTRACTS:
         raise DownstreamPipelineError(
-            "reusable embedding requires the ordered 1min, 3min, 5min, 15min contract"
+            "reusable embedding requires a supported ordered timeframe contract"
         )
     configured = config.walk_forward.embed_manifest_path
     if configured is None:
@@ -325,12 +329,10 @@ def prepare(config: DownstreamConfig) -> dict[str, Any]:
 def embed(config: DownstreamConfig) -> dict[str, Any]:
     """Extract bounded MantisV2 embedding shards from prepared candidates."""
     device = resolve_embedding_device(config.run.device)
-    if config.data.timeframes != FOUR_TIMEFRAME_CONTRACT:
+    if config.data.timeframes not in _SUPPORTED_EMBEDDING_CONTRACTS:
         raise DownstreamPipelineError(
-            "embedding requires the ordered 1min, 3min, 5min, 15min contract"
+            "embedding requires a supported ordered timeframe contract"
         )
-    if config.foundation.export_role != "promoted":
-        raise DownstreamPipelineError("production embedding requires a promoted export")
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
     root = artifact_root(config)
@@ -716,6 +718,8 @@ def walk_forward(config: DownstreamConfig) -> dict[str, Any]:
 
 def simulate(config: DownstreamConfig) -> dict[str, Any]:
     """Replay walk-forward predictions under the configured Combine rules."""
+    if config.foundation.export_role != "promoted":
+        raise DownstreamPipelineError("simulation requires a promoted foundation export")
     root = artifact_root(config)
     walked = _manifest(root / "walk-forward" / "manifest.json", config, "walk-forward")
     if walked.get("convergence_gate_passed") is not True:
@@ -869,6 +873,8 @@ def smoke(config: DownstreamConfig) -> dict[str, Any]:
 
 def evaluate_holdout(config: DownstreamConfig, unlock: str) -> dict[str, Any]:
     """Apply the last validation-owned head once to the sealed holdout."""
+    if config.foundation.export_role != "promoted":
+        raise DownstreamPipelineError("holdout requires a promoted foundation export")
     if not config.evaluation.allow_holdout or unlock != config.evaluation.holdout_unlock:
         raise DownstreamPipelineError(
             "holdout is locked; set evaluation.allow_holdout=true and pass the configured unlock"

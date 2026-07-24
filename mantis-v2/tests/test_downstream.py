@@ -217,7 +217,7 @@ def test_tuned_production_config_pins_reusable_embeddings_and_head_settings() ->
     assert config.walk_forward.embed_producer_config_sha256 == sha256_file(CONFIG)
 
 
-def test_rejected_three_timeframe_trend_magic_config_cannot_reuse_four_timeframe_embeddings() -> (
+def test_three_timeframe_trend_magic_config_cannot_reuse_four_timeframe_embeddings() -> (
     None
 ):
     config = load_downstream_config(TREND_MAGIC_TUNED_CONFIG)
@@ -236,7 +236,7 @@ def test_rejected_three_timeframe_trend_magic_config_cannot_reuse_four_timeframe
     assert config.data.timeframes == ("1min", "3min", "15min")
     assert producer.data.timeframes == ("1min", "3min", "5min", "15min")
     assert config.embedding_contract_digest != producer.embedding_contract_digest
-    with pytest.raises(DownstreamPipelineError, match="ordered 1min, 3min, 5min, 15min"):
+    with pytest.raises(DownstreamPipelineError, match="does not match its producer config"):
         _embedding_manifest_input(config)
 
 
@@ -1143,6 +1143,30 @@ def test_simulation_rejects_an_ungated_walk_forward_run(
     )
     with pytest.raises(DownstreamPipelineError, match=message):
         simulate(config)
+
+
+def test_simulation_rejects_a_diagnostic_foundation_export(tmp_path: Path) -> None:
+    config = load_downstream_config(CONFIG)
+    config = replace(
+        config,
+        run=replace(config.run, artifact_root=tmp_path),
+        foundation=replace(config.foundation, export_role="diagnostic_candidate"),
+    )
+
+    with pytest.raises(DownstreamPipelineError, match="requires a promoted foundation export"):
+        simulate(config)
+
+
+def test_holdout_rejects_a_diagnostic_foundation_export() -> None:
+    config = load_downstream_config(CONFIG)
+    config = replace(
+        config,
+        foundation=replace(config.foundation, export_role="diagnostic_candidate"),
+        evaluation=replace(config.evaluation, allow_holdout=True),
+    )
+
+    with pytest.raises(DownstreamPipelineError, match="requires a promoted foundation export"):
+        evaluate_holdout(config, config.evaluation.holdout_unlock)
 
 
 def test_downstream_smoke_writes_and_verifies_all_stage_manifests(tmp_path: Path) -> None:
