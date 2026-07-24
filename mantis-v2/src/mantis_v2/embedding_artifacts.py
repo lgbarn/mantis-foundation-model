@@ -17,6 +17,8 @@ import pandas as pd
 from mantis_v2.model import sha256_file
 
 FOUR_TIMEFRAME_CONTRACT = ("1min", "3min", "5min", "15min")
+THREE_TIMEFRAME_CONTRACT = ("1min", "3min", "15min")
+SUPPORTED_EMBEDDING_CONTRACTS = {FOUR_TIMEFRAME_CONTRACT, THREE_TIMEFRAME_CONTRACT}
 
 
 class EmbeddingArtifactError(RuntimeError):
@@ -49,9 +51,9 @@ def _identity_payload(identity: EmbeddingIdentity) -> dict[str, Any]:
 def validate_embedding_identity(
     identity: EmbeddingIdentity,
     *,
-    purpose: Literal["matrix_scoring", "production"],
+    purpose: Literal["matrix_scoring", "downstream_diagnostic", "production"],
 ) -> None:
-    """Validate role separation and the exact ordered four-timeframe contract."""
+    """Validate role separation and an explicitly supported timeframe contract."""
     _validate_identity_shape(identity)
     if purpose == "production" and identity.export_role != "promoted":
         raise EmbeddingArtifactError("production embeddings require a promoted export")
@@ -59,12 +61,16 @@ def validate_embedding_identity(
         raise EmbeddingArtifactError(
             "matrix scoring requires an explicitly labeled diagnostic_candidate export"
         )
+    if purpose == "downstream_diagnostic" and identity.export_role != "diagnostic_candidate":
+        raise EmbeddingArtifactError(
+            "diagnostic downstream embeddings require a diagnostic_candidate export"
+        )
 
 
 def _validate_identity_shape(identity: EmbeddingIdentity) -> None:
-    if identity.timeframes != FOUR_TIMEFRAME_CONTRACT:
+    if identity.timeframes not in SUPPORTED_EMBEDDING_CONTRACTS:
         raise EmbeddingArtifactError(
-            "embedding identity must use the ordered four-timeframe contract"
+            "embedding identity must use a supported ordered timeframe contract"
         )
     if identity.feature_width < 1:
         raise EmbeddingArtifactError("embedding feature width must be positive")

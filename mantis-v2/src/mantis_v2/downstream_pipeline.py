@@ -28,6 +28,7 @@ from mantis_v2.embedding import (
 )
 from mantis_v2.embedding_artifacts import (
     FOUR_TIMEFRAME_CONTRACT,
+    THREE_TIMEFRAME_CONTRACT,
     EmbeddingIdentity,
     EmbeddingPerformance,
     publish_embedding_pair,
@@ -58,8 +59,7 @@ class DownstreamPipelineError(RuntimeError):
     """Raised when a downstream stage fails closed."""
 
 
-_THREE_TIMEFRAME_CONTRACT = ("1min", "3min", "15min")
-_SUPPORTED_EMBEDDING_CONTRACTS = {FOUR_TIMEFRAME_CONTRACT, _THREE_TIMEFRAME_CONTRACT}
+_SUPPORTED_EMBEDDING_CONTRACTS = {FOUR_TIMEFRAME_CONTRACT, THREE_TIMEFRAME_CONTRACT}
 
 
 def artifact_root(config: DownstreamConfig) -> Path:
@@ -358,7 +358,14 @@ def embed(config: DownstreamConfig) -> dict[str, Any]:
         timeframes=config.data.timeframes,
         feature_width=feature_width,
     )
-    validate_embedding_identity(identity, purpose="production")
+    validate_embedding_identity(
+        identity,
+        purpose=(
+            "production"
+            if config.foundation.export_role == "promoted"
+            else "downstream_diagnostic"
+        ),
+    )
     outputs = list(scan_embedding_pairs(stage_root / "shards", identity))
     completed_rows = sum(int(output["rows"]) for output in outputs)
     shard_number = len(outputs)

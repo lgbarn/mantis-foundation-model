@@ -382,11 +382,13 @@ No all-stage Trend Magic command is currently qualified. Use the separate
 producer and head-consumer commands above; this prevents the known-failing head
 settings from triggering another expensive embed run.
 
-`configs/trend-magic-direct-lora-3tf-s42-v1.toml` is the isolated diagnostic
+`configs/trend-magic-direct-lora-3tf-s42-v2.toml` is the isolated diagnostic
 consumer for the selected 1m/3m/15m direct-LoRA export. It may run prepare,
 embed, and walk-forward to test the new foundation representation, but its
 `diagnostic_candidate` export role deliberately rejects simulation and sealed
 holdout access. A formally promoted export is required before either stage.
+The superseded `v1` run remains as preserved preparation evidence after an
+interrupted duplicate process; do not resume it.
 
 The completed `head-c0001-v2` walk-forward converged on all eight folds but
 failed both primary proper-score gates (weighted log loss 0.695306 and weighted
