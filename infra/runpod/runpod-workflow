@@ -533,12 +533,15 @@ run_train() {
   validate_runtime_config "$config"
   validate_train_prerequisites "$config"
   validate_experiment_binding "$experiment" "$config"
-  local catalog cli_version api_key_name config_digest lock_sha256 source_revision source_root
+  local catalog cli_version api_key_name config_digest lock_sha256 source_bundle source_revision source_root
   source_root="$(jq -r '.paths.source_root' "$config")"
   config_digest="$(${UV:-uv} run --no-sync python -c \
     'import sys; from mantis_v2.config import load_config; print(load_config(sys.argv[1]).digest)' \
     "$experiment")" || die "experiment_config_invalid"
   source_revision="$(git -C "$source_root" rev-parse HEAD)"
+  source_bundle="$RUNPOD_SNAPSHOT_DIR/source.bundle"
+  git -C "$source_root" bundle create "$source_bundle" --branches ||
+    die "source_bundle_create_failed"
   lock_sha256="$(sha256_file "$source_root/uv.lock")"
   api_key_name="$(jq -r '.api_key_env' "$config")"
   RUNPOD_API_KEY_VALUE="${!api_key_name}"
@@ -665,25 +668,24 @@ run_train() {
     "$ssh_target" \
     "set -euo pipefail; command -v nvidia-smi >/dev/null; command -v python3 >/dev/null; python3 -c 'import torch; assert torch.cuda.is_available(); assert torch.cuda.device_count() == $gpu_count; torch.zeros(1, device=\"cuda\")'"
 
-  local remote_repo corpus_manifest remote_corpus_manifest corpus_sha
+  local remote_repo corpus_manifest remote_bundle remote_corpus_manifest corpus_sha
   remote_repo="$(jq -r '.paths.remote_repo' "$config")"
   corpus_manifest="$(jq -r '.paths.corpus_manifest' "$config")"
   remote_corpus_manifest="$(jq -r '.paths.remote_corpus_manifest' "$config")"
   corpus_sha="$(sha256_file "$corpus_manifest")"
-  git -C "$source_root" ls-files --cached -z |
-    rsync -az --no-owner --no-group --from0 --files-from=- -e "$rsync_ssh" \
-      "$source_root/" "$ssh_target:$remote_repo/"
+  remote_bundle="/tmp/${run_id}-source.bundle"
   rsync -az --no-owner --no-group --checksum -e "$rsync_ssh" \
-    "$source_root/.git/" "$ssh_target:$remote_repo/.git/"
+    "$source_bundle" "$ssh_target:$remote_bundle"
 
   local experiment_absolute remote_experiment remote_repo_q remote_experiment_q
-  local remote_manifest_q corpus_sha_q source_revision_q volume_mount_q remote_venv_q
+  local remote_bundle_q remote_manifest_q corpus_sha_q source_revision_q volume_mount_q remote_venv_q
   local data_validation_mode inspect_command minimum_free_kb minimum_gpu_memory_mb
   experiment_absolute="$(cd "$(dirname "$experiment")" && pwd -P)/$(basename "$experiment")"
   remote_experiment="/tmp/${run_id}-experiment.toml"
   rsync -az --no-owner --no-group -e "$rsync_ssh" "$experiment_absolute" "$ssh_target:$remote_experiment"
   printf -v remote_repo_q '%q' "$remote_repo"
   printf -v remote_experiment_q '%q' "$remote_experiment"
+  printf -v remote_bundle_q '%q' "$remote_bundle"
   printf -v remote_manifest_q '%q' "$remote_corpus_manifest"
   printf -v corpus_sha_q '%q' "$corpus_sha"
   printf -v source_revision_q '%q' "$source_revision"
@@ -697,6 +699,9 @@ run_train() {
     manifest_only) inspect_command=":" ;;
     *) die "runtime_data_validation_mode_invalid:$data_validation_mode" ;;
   esac
+  ssh -i "$ssh_key" -p "$ssh_port" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+    "$ssh_target" \
+    "set -euo pipefail; rm -rf $remote_repo_q; git clone --no-checkout $remote_bundle_q $remote_repo_q; cd $remote_repo_q; git checkout --detach $source_revision_q; test -z \"\$(git status --porcelain)\""
   ssh -i "$ssh_key" -p "$ssh_port" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
     "$ssh_target" \
     "set -euo pipefail; command -v nvidia-smi >/dev/null; command -v python3 >/dev/null; command -v uv >/dev/null; test \"\$(nvidia-smi -L | wc -l | tr -d ' ')\" -eq $gpu_count; nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | awk -v minimum=$minimum_gpu_memory_mb '\$1 + 0 < minimum {exit 1}'; test \"\$(df -Pk / | awk 'NR==2 {print \$4}')\" -ge $minimum_free_kb; test -d $volume_mount_q; test -w $volume_mount_q; test \"\$(df -Pk $volume_mount_q | awk 'NR==2 {print \$4}')\" -ge $minimum_free_kb; test -f $remote_manifest_q; test \"\$(sha256sum $remote_manifest_q | awk '{print \$1}')\" = $corpus_sha_q; cd $remote_repo_q; test \"\$(git rev-parse HEAD)\" = $source_revision_q; test -z \"\$(git status --porcelain)\"; UV_PROJECT_ENVIRONMENT=$remote_venv_q uv sync --frozen; UV_PROJECT_ENVIRONMENT=$remote_venv_q uv run python -c 'import torch; assert torch.cuda.is_available(); assert torch.cuda.device_count() == $gpu_count; torch.zeros(1, device=\"cuda\")'; $inspect_command; UV_PROJECT_ENVIRONMENT=$remote_venv_q uv run mantis-v2 train --config $remote_experiment_q; UV_PROJECT_ENVIRONMENT=$remote_venv_q uv run mantis-v2 validated-export --config $remote_experiment_q"

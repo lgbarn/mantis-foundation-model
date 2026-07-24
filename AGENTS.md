@@ -131,6 +131,9 @@ exports, and TensorBoard logs. Copying data requires neither a CUDA image nor a
 GPU: stage it from the local machine through RunPod's S3-compatible API, or use
 a CPU-only Pod only when remote transformation is actually required. Reserve a
 CUDA Pod for the CUDA smoke, training, and export stages.
+For remote source provenance, transfer a Git bundle created from stable branch
+refs rather than copying the live `.git` directory, whose transient agent refs
+can change while a Pod is starting.
 
 The root `justfile` should eventually expose at least setup, format, lint, test, smoke, train, evaluate, and export commands, with model-version-specific recipes where behavior differs. Until those files exist, do not claim any command or test passes.
 

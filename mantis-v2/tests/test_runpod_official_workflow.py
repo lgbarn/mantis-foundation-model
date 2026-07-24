@@ -446,9 +446,8 @@ def test_train_runs_and_always_deletes_exact_pod(tmp_path: Path) -> None:
     assert "count=1" in calls
     assert "cloud=SECURE" in calls
     assert f"--terminate-after={receipt['termination_deadline']}" in calls
-    assert "--from0 --files-from=-" in calls
+    assert "source.bundle" in calls
     assert "--delete --checksum --partial" in calls
-    assert f"{tmp_path / 'source'}/.git/ root@127.0.0.1:/workspace/mantis/repo/.git/" in calls
     assert "nvidia-smi --query-gpu=memory.total" in calls
     assert "git status --porcelain" in calls
     base_cuda_smoke = "python3 -c 'import torch; assert torch.cuda.is_available()"
