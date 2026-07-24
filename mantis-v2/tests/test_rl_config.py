@@ -92,15 +92,15 @@ def test_production_rl_config_loads_locked_entry_contract() -> None:
 
 def test_direct_lora_3tf_rl_config_binds_completed_embedding_identity() -> None:
     config = load_rl_config(
-        ROOT / "configs" / "rl-entry-topstep-100k-direct-lora-3tf-v1.toml"
+        ROOT / "configs" / "rl-entry-topstep-100k-direct-lora-3tf-v2.toml"
     )
 
-    assert config.run.name == "rl-entry-topstep-100k-direct-lora-3tf-v1"
+    assert config.run.name == "rl-entry-topstep-100k-direct-lora-3tf-v2"
     assert config.run.device == "cpu"
     assert config.policy.role == "entry"
     assert config.policy.actions == ("skip", "enter")
     assert config.upstream.downstream_config_sha256 == (
-        "90782e7a1c1e767eb59a45d9d2a27d3c6d84c94c204969451d8839f59cbcc410"
+        "162a5d29940b8dfbbec50eeb69f61b364a3a83b493c6914724acc91be57a727e"
     )
     assert config.upstream.embedding_manifest_sha256 == (
         "bdcc8819c2d68efff7bd48efc3ffdf4ba02bb73cfe01793d7a23208075b0625a"
