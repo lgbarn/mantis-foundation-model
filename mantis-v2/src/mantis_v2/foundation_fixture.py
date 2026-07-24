@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import tempfile
 from dataclasses import replace
@@ -21,6 +22,39 @@ from mantis_v2.strategy import build_symbol_candidates
 
 class FoundationFixtureError(RuntimeError):
     """Raised when the fixed diagnostic fixture cannot be frozen causally."""
+
+
+def _embedding_runtime_config(config: Any) -> Any:
+    """Apply an explicit executor-only override after fixture identity validation."""
+    device = os.environ.get("MANTIS_V2_EMBED_DEVICE")
+    if device is not None and device not in {"cpu", "cuda", "mps"}:
+        raise FoundationFixtureError("MANTIS_V2_EMBED_DEVICE must be cpu, cuda, or mps")
+    data_root = os.environ.get("MANTIS_V2_EMBED_DATA_ROOT")
+    corpus_manifest = os.environ.get("MANTIS_V2_EMBED_CORPUS_MANIFEST")
+    if bool(data_root) != bool(corpus_manifest):
+        raise FoundationFixtureError(
+            "MANTIS_V2_EMBED_DATA_ROOT and MANTIS_V2_EMBED_CORPUS_MANIFEST must be set together"
+        )
+    if corpus_manifest is not None:
+        runtime_manifest = Path(corpus_manifest)
+        if (
+            not runtime_manifest.is_file()
+            or _sha256_file(runtime_manifest) != config.data.corpus_manifest_sha256
+        ):
+            raise FoundationFixtureError(
+                "MANTIS_V2_EMBED_CORPUS_MANIFEST does not match the configured corpus hash"
+            )
+    run = replace(config.run, device=device) if device is not None else config.run
+    data = (
+        replace(
+            config.data,
+            root=Path(data_root),
+            corpus_manifest_path=runtime_manifest,
+        )
+        if data_root is not None
+        else config.data
+    )
+    return replace(config, run=run, data=data)
 
 
 def _sha256_file(path: Path) -> str:
@@ -267,7 +301,7 @@ def embed_diagnostic_fixture(
     ):
         raise FoundationFixtureError("foundation export identity is incomplete")
     embedding_config = replace(
-        config,
+        _embedding_runtime_config(config),
         foundation=replace(
             config.foundation,
             manifest_path=foundation_path,

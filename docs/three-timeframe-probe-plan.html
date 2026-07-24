@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>3TF Frozen MantisV2 Probe Plan</title>
+  <style>
+:root {
+  --fg: #1a1a1a;
+  --fg-muted: #57606a;
+  --bg: #ffffff;
+  --bg-soft: #f6f8fa;
+  --border: #d0d7de;
+  --accent: #0969da;
+  --pos: #1a7f37;
+  --neg: #cf222e;
+  --warn: #9a6700;
+  --code-bg: #f6f8fa;
+  --radius: 8px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #e6edf3;
+    --fg-muted: #9198a1;
+    --bg: #0d1117;
+    --bg-soft: #161b22;
+    --border: #30363d;
+    --accent: #4493f8;
+    --pos: #3fb950;
+    --neg: #f85149;
+    --warn: #d29922;
+    --code-bg: #161b22;
+  }
+}
+*, *::before, *::after { box-sizing: border-box; }
+html { font-size: 100%; -webkit-text-size-adjust: 100%; }
+body { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.5rem 4rem; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 1rem; line-height: 1.65; color: var(--fg); background: var(--bg); }
+h1, h2, h3, h4 { line-height: 1.25; font-weight: 600; margin: 2rem 0 1rem; }
+h1 { font-size: 2rem; padding-bottom: .3rem; border-bottom: 2px solid var(--border); margin-top: 0; }
+h2 { font-size: 1.5rem; padding-bottom: .25rem; border-bottom: 1px solid var(--border); }
+h3 { font-size: 1.25rem; }
+p, ul, ol { margin: 0 0 1rem; }
+li { margin: .25rem 0; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+strong { font-weight: 600; }
+code { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: .9em; background: var(--code-bg); padding: .15em .4em; border-radius: 4px; }
+pre { background: var(--code-bg); padding: 1rem; border-radius: var(--radius); overflow-x: auto; border: 1px solid var(--border); }
+pre code { background: none; padding: 0; }
+table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: .95rem; }
+th, td { padding: .5rem .75rem; border: 1px solid var(--border); text-align: left; }
+th { background: var(--bg-soft); font-weight: 600; }
+tbody tr:nth-child(even) { background: var(--bg-soft); }
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem; margin: 1.5rem 0; }
+.stat { padding: 1rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-soft); }
+.stat .value { font-size: 1.6rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.stat .label { font-size: .8rem; color: var(--fg-muted); text-transform: uppercase; letter-spacing: .03em; }
+.pos { color: var(--pos); }
+.neg { color: var(--neg); }
+.callout { padding: .75rem 1rem; border-radius: var(--radius); border-left: 4px solid var(--accent); background: var(--bg-soft); margin: 1rem 0; }
+.callout.warn { border-left-color: var(--warn); }
+@media (max-width: 600px) { body { padding: 1.5rem 1rem 3rem; } h1 { font-size: 1.6rem; } h2 { font-size: 1.3rem; } }
+@media print { body { max-width: none; color: #000; background: #fff; } a { color: #000; } }
+  </style>
+</head>
+<body>
+  <h1>3TF Frozen MantisV2 Probe Plan</h1>
+  <p><strong>Purpose:</strong> run the cheapest valid test of whether MantisV2 embeddings add predictive value to the causal Trend Magic trading label. This is a research gate, not a deployment recipe.</p>
+
+  <div class="callout warn">
+    <strong>Do not reuse the rejected matrix candidates as production models.</strong> The completed five-minute matrix rejected the 4TF addition. Its diagnostic candidates remain immutable evidence only. They cannot be relabeled, promoted, or fed into the current production downstream path.
+  </div>
+
+  <div class="stat-grid">
+    <div class="stat"><div class="value neg">Rejected</div><div class="label">4TF matrix gate</div></div>
+    <div class="stat"><div class="value">0.69543</div><div class="label">Median diagnostic log loss</div></div>
+    <div class="stat"><div class="value">0.25110</div><div class="label">Median Brier score</div></div>
+    <div class="stat"><div class="value">3TF</div><div class="label">Next experiment</div></div>
+  </div>
+
+  <h2>Decision</h2>
+  <p>Do not spend another GPU hour on a 4TF rerun, LoRA, RL, or Topstep simulation. First establish that a frozen MantisV2 encoder improves the actual Trend Magic label over a raw-feature linear baseline on the same purged, chronological folds.</p>
+
+  <h2>Experiment contract</h2>
+  <table>
+    <thead><tr><th>Item</th><th>Required choice</th></tr></thead>
+    <tbody>
+      <tr><td>Encoder</td><td>Exact pinned official MantisV2 checkpoint; frozen for this probe.</td></tr>
+      <tr><td>Inputs</td><td>1m, 3m, and 15m only. Trade decision anchors remain 3m.</td></tr>
+      <tr><td>Label</td><td>Existing causal Trend Magic target: eligible closed 3m state, next-open entry, ATR(20) 0.5R risk, strict 3R-before-stop, 120-bar/session horizon, 0.03R cost, stop-first ties.</td></tr>
+      <tr><td>Head</td><td>Train-only standardization plus logistic regression. Fit one head per walk-forward training fold.</td></tr>
+      <tr><td>Baseline</td><td>Identical logistic head and folds, but raw causal features only.</td></tr>
+      <tr><td>Selection</td><td>Validation selects threshold and model. Test and reserved holdout remain untouched until the predeclared gate passes.</td></tr>
+      <tr><td>Artifacts</td><td>New run identity, new artifact root, no overwrite, manifest at every stage.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Required implementation before running</h2>
+  <p>The repository does <strong>not</strong> currently expose this as a supported command. Its production downstream pipeline intentionally accepts only a promoted 4TF export, and its existing diagnostic logistic probe uses fixture labels rather than the Trend Magic label.</p>
+  <p>Add one separate, research-only path. It must not relax or bypass production checks.</p>
+  <ol>
+    <li>Add a typed 3TF research config with a unique run identity and artifact root.</li>
+    <li>Allow only the exact ordered intervals <code>1min,3min,15min</code> in that research path.</li>
+    <li>Embed from the pinned official checkpoint, not from a rejected matrix candidate.</li>
+    <li>Reuse the existing causal label builder and purged walk-forward splitter.</li>
+    <li>Run the raw baseline and frozen-embedding head on the identical folds and write both receipts.</li>
+    <li>Keep the path unable to call promotion, trading deployment, or holdout evaluation.</li>
+  </ol>
+
+  <h2>Execution order after the research path exists</h2>
+  <p>The command names below are stage contracts. Do not invent a CLI flag or route the experiment through the existing 4TF production command until the dedicated research command is implemented and tested.</p>
+  <pre><code># 1. Validate the new 3TF research config and source identities.
+uv run mantis-v2 downstream-verify --config &lt;3tf-research-config&gt;
+
+# 2. Build causal Trend Magic labels and split manifest.
+uv run mantis-v2 downstream-prepare --config &lt;3tf-research-config&gt;
+
+# 3. Freeze the official encoder and write resumable embedding shards.
+uv run mantis-v2 downstream-embed --config &lt;3tf-research-config&gt;
+
+# 4. Fit raw and embedding logistic heads on chronological folds.
+uv run mantis-v2 downstream-walk-forward --config &lt;3tf-research-config&gt;
+
+# 5. Only after the gate passes, simulate. Never use this command to tune.
+uv run mantis-v2 downstream-simulate --config &lt;3tf-research-config&gt;</code></pre>
+
+  <h2>Pass gate</h2>
+  <p>Advance to a 3TF LoRA comparison only if embeddings beat raw features on validation and chronological test in all of the following:</p>
+  <ul>
+    <li>Lower log loss and Brier score.</li>
+    <li>Lower calibration error without threshold leakage.</li>
+    <li>Stable improvement across more than one walk-forward fold.</li>
+    <li>Simulation improves after costs and Topstep risk rules, without using the reserved holdout for selection.</li>
+  </ul>
+  <p>If the frozen probe fails, fix the label, execution assumptions, or feature construction before LoRA. RL for exits and sizing remains downstream of a proven entry signal and does not rescue a near-random classifier.</p>
+
+  <h2>Resume and failure rules</h2>
+  <ul>
+    <li>Never delete matching partial embedding shards. Rehash and resume only the absent or invalid pair.</li>
+    <li>Never overwrite a run directory. Create a new run identity for changed config, data, code, or checkpoint identity.</li>
+    <li>Do not open the reserved holdout while choosing the head, threshold, or LoRA settings.</li>
+    <li>Stop immediately if source, config, corpus, or checkpoint provenance differs from the manifest.</li>
+  </ul>
+
+  <h2>Infrastructure status</h2>
+  <p>The prior A100 pod <code>v9yjgimnwr2avn</code> was terminated on 2026-07-24 with the official RunPod CLI. Verification returned an empty running-pod list and a 404 for that pod ID. No GPU remains billable from this matrix run.</p>
+</body>
+</html>

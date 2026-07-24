@@ -5,11 +5,29 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 from mantis_v2 import foundation_fixture as fixture_module
-from mantis_v2.foundation_fixture import embed_diagnostic_fixture, freeze_diagnostic_fixture
+from mantis_v2.downstream_config import load_downstream_config
+from mantis_v2.foundation_fixture import (
+    FoundationFixtureError,
+    embed_diagnostic_fixture,
+    freeze_diagnostic_fixture,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "configs" / "trend-magic-topstep-100k.toml"
+
+
+def test_runtime_corpus_override_requires_the_configured_manifest_hash(
+    tmp_path: Path, monkeypatch
+) -> None:
+    replacement = tmp_path / "manifest.json"
+    replacement.write_text("{}")
+    monkeypatch.setenv("MANTIS_V2_EMBED_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("MANTIS_V2_EMBED_CORPUS_MANIFEST", str(replacement))
+
+    with pytest.raises(FoundationFixtureError, match="does not match the configured corpus hash"):
+        fixture_module._embedding_runtime_config(load_downstream_config(CONFIG))
 
 
 def _candidates(symbol: str) -> pd.DataFrame:
