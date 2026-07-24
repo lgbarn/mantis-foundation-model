@@ -26,6 +26,7 @@ from mantis_v2.rl_baselines import (
     HistoricalLogisticPolicy,
     MatchedRandomPolicy,
     RejectAllPolicy,
+    ReplayResult,
     SupervisedRows,
     TakeAllPolicy,
     fit_supervised_baselines,
@@ -541,6 +542,47 @@ def _require_environment_throughput(steps_per_second: object) -> None:
         raise EnvironmentValidationError("environment throughput is below 5,000 steps/second")
 
 
+def _matched_random_replay(
+    config: RlConfig, episode: EnvironmentEpisode, take_count: int
+) -> ReplayResult:
+    legal_opportunities = sum(bar.candidate is not None for bar in episode.bars)
+    if take_count > legal_opportunities:
+        raise EnvironmentValidationError("learned participation exceeds legal opportunities")
+    base_probability = take_count / legal_opportunities if legal_opportunities else 0.0
+    factors = (1.0, 2.0, 0.5, 4.0, 0.25, 8.0, 0.125, 16.0, 0.0625, 32.0, 64.0, 128.0)
+    probabilities = list(
+        dict.fromkeys(
+            [min(1.0, base_probability * factor) for factor in factors]
+            + [0.75, 1.0]
+        )
+    )
+    closest: ReplayResult | None = None
+    for probability_number, probability in enumerate(probabilities):
+        for offset in range(32):
+            candidate = replay_policy(
+                config,
+                episode,
+                MatchedRandomPolicy(
+                    take_count=take_count,
+                    legal_opportunities=legal_opportunities,
+                    seed=config.run.seed + probability_number * 32 + offset,
+                    probability=probability,
+                ),
+            )
+            if candidate.accepted_trades == take_count:
+                return candidate
+            if closest is None or abs(candidate.accepted_trades - take_count) < abs(
+                closest.accepted_trades - take_count
+            ):
+                closest = candidate
+    closest_count = closest.accepted_trades if closest is not None else 0
+    raise EnvironmentValidationError(
+        "random baseline cannot match learned participation: "
+        f"ticker={episode.ticker} profile={episode.profile} "
+        f"target={take_count} closest={closest_count}"
+    )
+
+
 def validate_environment(
     config: RlConfig,
     training: LoadedEpisodes,
@@ -563,33 +605,7 @@ def validate_environment(
     mask_mismatches = 0
     for episode in validation.episodes:
         learned = replay_policy(config, episode, hist)
-        matched = None
-        for offset in range(100):
-            candidate = replay_policy(
-                config,
-                episode,
-                MatchedRandomPolicy(
-                    take_count=learned.accepted_trades,
-                    legal_opportunities=sum(bar.candidate is not None for bar in episode.bars),
-                    seed=config.run.seed + offset,
-                ),
-            )
-            if candidate.accepted_trades == learned.accepted_trades:
-                matched = candidate
-                break
-        if matched is None:
-            matched = replay_policy(
-                config,
-                episode,
-                MatchedRandomPolicy(
-                    take_count=learned.accepted_trades,
-                    legal_opportunities=sum(bar.candidate is not None for bar in episode.bars),
-                    seed=config.run.seed,
-                    probability=1.0,
-                ),
-            )
-        if matched.accepted_trades != learned.accepted_trades:
-            raise EnvironmentValidationError("random baseline cannot match learned participation")
+        matched = _matched_random_replay(config, episode, learned.accepted_trades)
         policies = [
             RejectAllPolicy(),
             TakeAllPolicy(),

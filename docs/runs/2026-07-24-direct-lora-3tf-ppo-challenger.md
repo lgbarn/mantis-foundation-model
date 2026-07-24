@@ -17,8 +17,8 @@ The immutable inputs are:
 - Embedding rows: `3,259,736`
 - Embedding feature width: `3,840`
 - Embedding storage: `25,280,949,347` bytes in 400 atomic shard pairs
-- PPO run: `rl-entry-topstep-100k-direct-lora-3tf-v2`
-- PPO config: `mantis-v2/configs/rl-entry-topstep-100k-direct-lora-3tf-v2.toml`
+- PPO run: `rl-entry-topstep-100k-direct-lora-3tf-v3`
+- PPO config: `mantis-v2/configs/rl-entry-topstep-100k-direct-lora-3tf-v3.toml`
 - Sealed holdout begins: `2026-01-01T00:00:00+00:00`
 
 The eight-fold logistic head completed but failed both quality gates:
@@ -71,30 +71,30 @@ export UV_PROJECT_ENVIRONMENT=/tmp/mantis-v2-rl-venv
 uv sync --frozen --no-dev
 
 uv run --no-sync mantis-v2 rl-dry-run \
-  --config mantis-v2/configs/rl-entry-topstep-100k-direct-lora-3tf-v2.toml
+  --config mantis-v2/configs/rl-entry-topstep-100k-direct-lora-3tf-v3.toml
 
 uv run --no-sync mantis-v2 rl-build-episodes \
-  --config mantis-v2/configs/rl-entry-topstep-100k-direct-lora-3tf-v2.toml \
+  --config mantis-v2/configs/rl-entry-topstep-100k-direct-lora-3tf-v3.toml \
   --fold 0 \
   --partition training \
   --episodes 21
 
 uv run --no-sync mantis-v2 rl-build-episodes \
-  --config mantis-v2/configs/rl-entry-topstep-100k-direct-lora-3tf-v2.toml \
+  --config mantis-v2/configs/rl-entry-topstep-100k-direct-lora-3tf-v3.toml \
   --fold 0 \
   --partition validation \
   --episodes 21
 
 uv run --no-sync mantis-v2 rl-validate-environment \
-  --config mantis-v2/configs/rl-entry-topstep-100k-direct-lora-3tf-v2.toml \
-  --training-manifest /workspace/mantis/runs/rl-entry-topstep-100k-direct-lora-3tf-v2/episodes/fold-00-training-seed-42.json \
-  --validation-manifest /workspace/mantis/runs/rl-entry-topstep-100k-direct-lora-3tf-v2/episodes/fold-00-validation-seed-42.json \
-  --output /workspace/mantis/runs/rl-entry-topstep-100k-direct-lora-3tf-v2/environment-validation.json
+  --config mantis-v2/configs/rl-entry-topstep-100k-direct-lora-3tf-v3.toml \
+  --training-manifest /workspace/mantis/runs/rl-entry-topstep-100k-direct-lora-3tf-v3/episodes/fold-00-training-seed-42.json \
+  --validation-manifest /workspace/mantis/runs/rl-entry-topstep-100k-direct-lora-3tf-v3/episodes/fold-00-validation-seed-42.json \
+  --output /workspace/mantis/runs/rl-entry-topstep-100k-direct-lora-3tf-v3/environment-validation.json
 
 uv run --no-sync mantis-v2 rl-train \
-  --config mantis-v2/configs/rl-entry-topstep-100k-direct-lora-3tf-v2.toml \
-  --training-manifest /workspace/mantis/runs/rl-entry-topstep-100k-direct-lora-3tf-v2/episodes/fold-00-training-seed-42.json \
-  --output /workspace/mantis/runs/rl-entry-topstep-100k-direct-lora-3tf-v2/training/shared-ticker-value-bounded \
+  --config mantis-v2/configs/rl-entry-topstep-100k-direct-lora-3tf-v3.toml \
+  --training-manifest /workspace/mantis/runs/rl-entry-topstep-100k-direct-lora-3tf-v3/episodes/fold-00-training-seed-42.json \
+  --output /workspace/mantis/runs/rl-entry-topstep-100k-direct-lora-3tf-v3/training/shared-ticker-value-bounded \
   --variant shared_ticker_value \
   --target-updates 1
 ```
@@ -117,6 +117,13 @@ loading derives the rejected logistic manifest from the downstream run identity,
 so the bound config now retains the actual CUDA producer run name. The producer
 and embedding contract digests remain unchanged. The completed v1 schedules stay
 preserved under their original config identity; the corrected run uses v2.
+
+The v2 environment-validation replay exposed a matched-random baseline bug: the
+baseline tried only 75 percent and 100 percent entry probabilities, so early
+path-dependent trades could block or blow the account before matching a sparse
+learned policy's accepted-trade count. The v3 source searches a bounded,
+deterministic probability and seed grid centered on learned participation while
+still requiring an exact accepted-trade match. All v2 evidence remains preserved.
 
 ## Advancement gates
 

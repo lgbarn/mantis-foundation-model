@@ -13,6 +13,7 @@ from mantis_v2.rl_baselines import (
     BaselineContractError,
     MatchedRandomPolicy,
     RejectAllPolicy,
+    ReplayResult,
     SupervisedRows,
     TakeAllPolicy,
     fit_supervised_baselines,
@@ -263,6 +264,28 @@ def test_environment_validation_emits_baselines_benchmarks_and_provenance(
             by_name["matched_random_take"]["accepted_trades"]
             == by_name["hist_gradient_boosting_contextual"]["accepted_trades"]
         )
+
+
+def test_matched_random_replay_searches_below_aggressive_entry_rates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    episode = _baseline_episode()
+    attempted: list[float] = []
+
+    def fake_replay(
+        _config_value: object, _episode_value: object, policy: object
+    ) -> ReplayResult:
+        assert isinstance(policy, MatchedRandomPolicy)
+        attempted.append(policy.probability)
+        accepted = 3 if policy.probability <= 0.1 else 2
+        return ReplayResult(policy.name, (), accepted, "TIMEOUT", 100000.0)
+
+    monkeypatch.setattr(validation_module, "replay_policy", fake_replay)
+
+    result = validation_module._matched_random_replay(_config(), episode, 3)
+
+    assert result.accepted_trades == 3
+    assert any(probability < 0.75 for probability in attempted)
 
 
 class _ImmediateExecutor:
