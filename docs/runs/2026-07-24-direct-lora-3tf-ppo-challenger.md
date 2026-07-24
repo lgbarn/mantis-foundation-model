@@ -47,11 +47,16 @@ masks have been applied.
 
 ## Execution route
 
-Run the bounded qualification on a short-lived RunPod CPU Pod attached to network
-volume `wbxrj0n0ru` at `/workspace`. This is the minimum-cost path because the
-25.28 GB embeddings already exist there and their signed manifest records absolute
-`/workspace` paths. Do not copy those shards to the Mac and do not rewrite the
-manifest. The PPO implementation is qualified on CPU, not MPS or CUDA.
+Run the bounded qualification on a short-lived RunPod Pod attached to network
+volume `wbxrj0n0ru` at `/workspace`. Prefer a CPU Pod when the volume's datacenter
+supports one. RunPod CPU Pods do not currently support this volume's `US-MO-1`
+datacenter, so the current run uses the least-cost available co-located GPU Pod
+while PPO still executes on CPU. This avoids a 25.28 GB cross-region transfer.
+
+The embeddings already exist on the volume and their signed manifest records
+absolute `/workspace` paths. Do not copy those shards to the Mac, rewrite the
+manifest, or spend Pod time re-auditing the accepted Parquet corpus. The PPO
+implementation is qualified on CPU, not MPS or CUDA.
 
 The Pod must use an immutable Git commit, a frozen dependency sync, a virtual
 environment under `/tmp`, and a hard termination deadline. The network volume is
@@ -59,34 +64,34 @@ used only for immutable inputs and run artifacts.
 
 ## Exact bounded qualification commands
 
-Run these commands from the committed repository checkout on the CPU Pod:
+Run these commands from the committed repository checkout on the Pod:
 
 ```bash
 export UV_PROJECT_ENVIRONMENT=/tmp/mantis-v2-rl-venv
 uv sync --frozen --no-dev
 
-uv run mantis-v2 rl-dry-run \
+uv run --no-sync mantis-v2 rl-dry-run \
   --config mantis-v2/configs/rl-entry-topstep-100k-direct-lora-3tf-v1.toml
 
-uv run mantis-v2 rl-build-episodes \
+uv run --no-sync mantis-v2 rl-build-episodes \
   --config mantis-v2/configs/rl-entry-topstep-100k-direct-lora-3tf-v1.toml \
   --fold 0 \
   --partition training \
   --episodes 21
 
-uv run mantis-v2 rl-build-episodes \
+uv run --no-sync mantis-v2 rl-build-episodes \
   --config mantis-v2/configs/rl-entry-topstep-100k-direct-lora-3tf-v1.toml \
   --fold 0 \
   --partition validation \
   --episodes 21
 
-uv run mantis-v2 rl-validate-environment \
+uv run --no-sync mantis-v2 rl-validate-environment \
   --config mantis-v2/configs/rl-entry-topstep-100k-direct-lora-3tf-v1.toml \
   --training-manifest /workspace/mantis/runs/rl-entry-topstep-100k-direct-lora-3tf-v1/episodes/fold-00-training-seed-42.json \
   --validation-manifest /workspace/mantis/runs/rl-entry-topstep-100k-direct-lora-3tf-v1/episodes/fold-00-validation-seed-42.json \
   --output /workspace/mantis/runs/rl-entry-topstep-100k-direct-lora-3tf-v1/environment-validation.json
 
-uv run mantis-v2 rl-train \
+uv run --no-sync mantis-v2 rl-train \
   --config mantis-v2/configs/rl-entry-topstep-100k-direct-lora-3tf-v1.toml \
   --training-manifest /workspace/mantis/runs/rl-entry-topstep-100k-direct-lora-3tf-v1/episodes/fold-00-training-seed-42.json \
   --output /workspace/mantis/runs/rl-entry-topstep-100k-direct-lora-3tf-v1/training/shared-ticker-value-bounded \
@@ -98,6 +103,13 @@ The 21 training and 21 validation episodes give each of the seven instruments
 three deterministic episode starts in each partition. This stage proves binding,
 episode construction, environment semantics, checkpoint creation, and safe resume.
 It is not a performance claim.
+
+The first dry-run attempt at commit `5793997` failed before creating a run artifact
+because the RL config referenced the producer's base config, which did not include
+the reusable embedding binding. The corrected plan preserves an effective producer
+snapshot and a separate bound consumer config. Their embedding contract digest is
+`329a056ac005889b19696000884a87677803db9654464b2c69ddfeeeb43b02f3`, matching
+the completed embedding manifest exactly.
 
 ## Advancement gates
 

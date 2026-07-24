@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import tomllib
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from mantis_v2.config import ConfigError
+from mantis_v2.downstream_config import load_downstream_config
 from mantis_v2.rl_config import load_rl_config
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -97,11 +99,24 @@ def test_direct_lora_3tf_rl_config_binds_completed_embedding_identity() -> None:
     assert config.run.device == "cpu"
     assert config.policy.role == "entry"
     assert config.policy.actions == ("skip", "enter")
+    assert config.upstream.downstream_config_sha256 == (
+        "90782e7a1c1e767eb59a45d9d2a27d3c6d84c94c204969451d8839f59cbcc410"
+    )
     assert config.upstream.embedding_manifest_sha256 == (
         "bdcc8819c2d68efff7bd48efc3ffdf4ba02bb73cfe01793d7a23208075b0625a"
     )
     assert config.upstream.foundation_weights_sha256 == (
         "536ae864a1fa292b13d6dc98c61c45f3ab15646dbb354dc7f25d5ed4bf0926f0"
+    )
+
+    downstream = load_downstream_config(ROOT.parent / config.upstream.downstream_config_path)
+    assert downstream.embedding_contract_digest == (
+        "329a056ac005889b19696000884a87677803db9654464b2c69ddfeeeb43b02f3"
+    )
+    producer_path = downstream.walk_forward.embed_producer_config_path
+    assert producer_path is not None
+    assert hashlib.sha256(producer_path.read_bytes()).hexdigest() == (
+        downstream.walk_forward.embed_producer_config_sha256
     )
 
 
