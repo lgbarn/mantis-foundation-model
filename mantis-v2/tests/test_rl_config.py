@@ -88,6 +88,23 @@ def test_production_rl_config_loads_locked_entry_contract() -> None:
     assert len(config.digest) == 64
 
 
+def test_direct_lora_3tf_rl_config_binds_completed_embedding_identity() -> None:
+    config = load_rl_config(
+        ROOT / "configs" / "rl-entry-topstep-100k-direct-lora-3tf-v1.toml"
+    )
+
+    assert config.run.name == "rl-entry-topstep-100k-direct-lora-3tf-v1"
+    assert config.run.device == "cpu"
+    assert config.policy.role == "entry"
+    assert config.policy.actions == ("skip", "enter")
+    assert config.upstream.embedding_manifest_sha256 == (
+        "bdcc8819c2d68efff7bd48efc3ffdf4ba02bb73cfe01793d7a23208075b0625a"
+    )
+    assert config.upstream.foundation_weights_sha256 == (
+        "536ae864a1fa292b13d6dc98c61c45f3ab15646dbb354dc7f25d5ed4bf0926f0"
+    )
+
+
 def test_smoke_profile_reduces_scale_without_weakening_promotion_gates() -> None:
     smoke = load_rl_config(ROOT / "configs" / "rl-entry-smoke.toml")
     production = load_rl_config(ROOT / "configs" / "rl-entry-topstep-100k.toml")

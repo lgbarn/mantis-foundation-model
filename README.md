@@ -38,6 +38,10 @@ completed. The eight-fold logistic head converged but did not beat the constant
 log-loss and Brier baselines, so simulation remains blocked. See the
 [current production run record](docs/runs/2026-07-20-mantisv2-nextleg-parquet-v2.md).
 
+The selected direct-LoRA 3TF diagnostic also failed the linear head gates. Its
+separate entry-only PPO challenger is documented in the
+[PPO challenger run plan](docs/runs/2026-07-24-direct-lora-3tf-ppo-challenger.md).
+
 The following workflows are not implemented:
 
 - Original Mantis training or inference.
