@@ -118,6 +118,13 @@ explained plainly.
 
 Use `uv` for Python environments and dependency locking, and `just` for discoverable repository commands. Do not install packages without explicit user approval.
 
+RunPod's supported PyTorch image includes `uv` but not `just`. Remote Pod commands
+must therefore invoke `uv run mantis-v2 ...` directly after `uv sync --frozen`.
+Rsyncing to a RunPod network volume must use `--no-owner --no-group`; the mounted
+volume rejects ownership changes. Before any source transfer or corpus work, smoke
+the image's CUDA runtime. After the frozen sync, smoke the resolved `uv` runtime
+again before inspecting data or starting training.
+
 The root `justfile` should eventually expose at least setup, format, lint, test, smoke, train, evaluate, and export commands, with model-version-specific recipes where behavior differs. Until those files exist, do not claim any command or test passes.
 
 For implementation work:

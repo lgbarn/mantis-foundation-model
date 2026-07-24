@@ -450,8 +450,11 @@ def test_train_runs_and_always_deletes_exact_pod(tmp_path: Path) -> None:
     assert f"{tmp_path / 'source'}/.git/ root@127.0.0.1:/workspace/mantis/repo/.git/" in calls
     assert "nvidia-smi --query-gpu=memory.total" in calls
     assert "git status --porcelain" in calls
+    base_cuda_smoke = "python3 -c 'import torch; assert torch.cuda.is_available()"
+    resolved_cuda_smoke = "uv run python -c 'import torch; assert torch.cuda.is_available()"
+    assert base_cuda_smoke in calls
+    assert resolved_cuda_smoke in calls
     assert "uv run mantis-v2 inspect-data --config /tmp/mantis-smoke-experiment.toml" in calls
-    assert "torch.cuda.is_available()" in calls
     assert "uv run mantis-v2 train --config /tmp/mantis-smoke-experiment.toml" in calls
     assert "uv run mantis-v2 validated-export --config /tmp/mantis-smoke-experiment.toml" in calls
     assert "rsync" in calls
@@ -459,6 +462,10 @@ def test_train_runs_and_always_deletes_exact_pod(tmp_path: Path) -> None:
     assert "runpodctl pod delete pod-123" in calls
     assert "runpodctl pod list --all --output=json" in calls
     assert calls.index("runpodctl pod create") < calls.index("runpodctl pod delete pod-123")
+    assert calls.index(base_cuda_smoke) < calls.index("rsync")
+    assert calls.index(resolved_cuda_smoke) < calls.index(
+        "uv run mantis-v2 inspect-data --config /tmp/mantis-smoke-experiment.toml"
+    )
     assert (tmp_path / "artifacts" / "train-result.json").is_file()
 
 
