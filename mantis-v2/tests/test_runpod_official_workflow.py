@@ -450,10 +450,10 @@ def test_train_runs_and_always_deletes_exact_pod(tmp_path: Path) -> None:
     assert f"{tmp_path / 'source'}/.git/ root@127.0.0.1:/workspace/mantis/repo/.git/" in calls
     assert "nvidia-smi --query-gpu=memory.total" in calls
     assert "git status --porcelain" in calls
-    assert "just inspect-data /tmp/mantis-smoke-experiment.toml" in calls
+    assert "uv run mantis-v2 inspect-data --config /tmp/mantis-smoke-experiment.toml" in calls
     assert "torch.cuda.is_available()" in calls
-    assert "just train /tmp/mantis-smoke-experiment.toml" in calls
-    assert "just validated-export /tmp/mantis-smoke-experiment.toml" in calls
+    assert "uv run mantis-v2 train --config /tmp/mantis-smoke-experiment.toml" in calls
+    assert "uv run mantis-v2 validated-export --config /tmp/mantis-smoke-experiment.toml" in calls
     assert "rsync" in calls
     assert "ssh" in calls
     assert "runpodctl pod delete pod-123" in calls
