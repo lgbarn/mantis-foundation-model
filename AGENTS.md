@@ -118,6 +118,16 @@ explained plainly.
 
 Use `uv` for Python environments and dependency locking, and `just` for discoverable repository commands. Do not install packages without explicit user approval.
 
+Use GPU for every production stage that has a qualified GPU-capable
+implementation. Do not run such a stage on CPU merely because the existing code
+defaults to a CPU library, and never silently fall back from GPU to CPU. Before
+provisioning, identify each stage's execution backend and qualify GPU numerical
+parity, memory use, and throughput on a representative workload. A CPU path is
+allowed only when no GPU implementation is technically applicable, the GPU path
+fails its qualification gate, or the user explicitly approves the exception.
+When a GPU Pod is already required for memory or staging, prioritize qualifying
+and using the GPU path instead of paying for an idle accelerator.
+
 The root `justfile` should eventually expose at least setup, format, lint, test, smoke, train, evaluate, and export commands, with model-version-specific recipes where behavior differs. Until those files exist, do not claim any command or test passes.
 
 For implementation work:
