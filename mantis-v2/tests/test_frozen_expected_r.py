@@ -282,7 +282,7 @@ def test_cuda_comparison_matches_cpu_predictions_metrics_and_selection(
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA threshold requires a GPU")
 def test_cuda_threshold_is_exact_and_bounded() -> None:
-    rows = 8192
+    rows = 2048
     rng = np.random.default_rng(860)
     entries = np.arange(rows, dtype=np.int64) * 2
     outcomes = entries + rng.integers(1, 25, size=rows)
@@ -307,13 +307,30 @@ def test_cuda_threshold_is_exact_and_bounded() -> None:
         ),
     )
 
+    actual = cuda_threshold(frame, scores, desired, progress_label="performance")
+    assert actual == expected
+
+    performance_rows = 16384
+    performance_entries = np.arange(performance_rows, dtype=np.int64) * 2
+    performance_frame = pd.DataFrame(
+        {
+            "entry_index": performance_entries,
+            "outcome_index": performance_entries
+            + rng.integers(1, 25, size=performance_rows),
+        }
+    )
+    performance_scores = rng.normal(size=performance_rows)
     torch.cuda.synchronize()
     started = time.monotonic()
-    actual = cuda_threshold(frame, scores, desired, progress_label="performance")
+    cuda_threshold(
+        performance_frame,
+        performance_scores,
+        desired,
+        progress_label="performance",
+    )
     torch.cuda.synchronize()
     elapsed = time.monotonic() - started
 
-    assert actual == expected
     assert elapsed < 2.0, f"CUDA threshold took {elapsed:.3f}s; expected <2.0s"
 
 
