@@ -754,7 +754,7 @@ def _fit_arm(
     threshold_selector = (
         None
         if comparison_device == "cpu"
-        else lambda rows, scores, desired: _cuda_threshold(
+        else lambda rows, scores, desired: cuda_threshold(
             rows, scores, desired, progress_label=progress_label
         )
     )
@@ -855,7 +855,7 @@ def _cuda_ridge_predict(
     return predictions
 
 
-def _cuda_threshold(
+def cuda_threshold(
     rows: pd.DataFrame,
     scores: np.ndarray,
     desired: int,

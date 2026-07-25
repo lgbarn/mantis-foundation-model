@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +15,7 @@ from mantis_v2.frozen_expected_r import (
     FrozenExpectedRError,
     FrozenMantisEmbedder,
     compare_frozen_to_raw,
+    cuda_threshold,
     write_frozen_input,
     write_paid_preflight,
 )
@@ -276,6 +278,38 @@ def test_cuda_comparison_matches_cpu_predictions_metrics_and_selection(
                     np.testing.assert_allclose(
                         cuda_interval, cpu_interval, atol=tolerance
                     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA threshold requires a GPU")
+def test_cuda_threshold_is_exact_and_bounded() -> None:
+    rows = 2048
+    rng = np.random.default_rng(860)
+    entries = np.arange(rows, dtype=np.int64) * 2
+    outcomes = entries + rng.integers(1, 25, size=rows)
+    scores = rng.normal(size=rows)
+    frame = pd.DataFrame({"entry_index": entries, "outcome_index": outcomes})
+    desired = 160
+    expected = min(
+        np.unique(scores),
+        key=lambda threshold: (
+            abs(
+                int(frozen_expected_r.ExpectedRScreen._executed_mask(
+                    frame, scores, float(threshold)
+                ).sum())
+                - desired
+            ),
+            -threshold,
+        ),
+    )
+
+    torch.cuda.synchronize()
+    started = time.monotonic()
+    actual = cuda_threshold(frame, scores, desired, progress_label="performance")
+    torch.cuda.synchronize()
+    elapsed = time.monotonic() - started
+
+    assert actual == expected
+    assert elapsed < 2.0, f"CUDA threshold took {elapsed:.3f}s; expected <2.0s"
 
 
 def test_config_rejects_unknown_keys(tmp_path: Path) -> None:
