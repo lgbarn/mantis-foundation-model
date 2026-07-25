@@ -155,9 +155,11 @@ def test_parallel_comparison_is_numerically_identical_to_serial(
     config = FrozenExpectedRConfig(bootstrap_replicates=10)
 
     serial = compare_frozen_to_raw(candidates, raw, mantis, config, maximum_workers=1)
-    parallel = compare_frozen_to_raw(candidates, raw, mantis, config, maximum_workers=3)
+    parallel = compare_frozen_to_raw(candidates, raw, mantis, config, maximum_workers=2)
 
     assert parallel == serial
+    with pytest.raises(FrozenExpectedRError, match=r"comparison workers must be in \[1, 2\]"):
+        compare_frozen_to_raw(candidates, raw, mantis, config, maximum_workers=3)
 
 
 def test_config_rejects_unknown_keys(tmp_path: Path) -> None:

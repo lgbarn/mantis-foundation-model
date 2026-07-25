@@ -575,7 +575,7 @@ def compare_frozen_to_raw(
     mantis_features: np.ndarray,
     config: FrozenExpectedRConfig,
     *,
-    maximum_workers: int = 3,
+    maximum_workers: int = 2,
 ) -> dict[str, Any]:
     """Compare both ridge arms on identical rows under the initial date gate."""
     raw = np.asarray(raw_features, dtype=np.float32)
@@ -589,8 +589,8 @@ def compare_frozen_to_raw(
         or not np.isfinite(mantis).all()
     ):
         raise FrozenExpectedRError("raw and Mantis features must be finite matrices")
-    if maximum_workers < 1 or maximum_workers > len(_ANCHORED_FOLDS):
-        raise FrozenExpectedRError("comparison workers must be in [1, 3]")
+    if maximum_workers < 1 or maximum_workers > 2:
+        raise FrozenExpectedRError("comparison workers must be in [1, 2]")
     context = raw[:, -config.context_width :]
     combined = np.concatenate((mantis, context), axis=1)
     with ThreadPoolExecutor(max_workers=maximum_workers) as executor:
