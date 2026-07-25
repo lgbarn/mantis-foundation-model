@@ -117,17 +117,17 @@ svg { max-width: 100%; }
 </head>
 <body>
   <h1>MantisV2 LP-FT Trend Magic Run Summary</h1>
-  <p><strong>Status:</strong> foundation training, validated export, downstream preparation, and embedding are complete and verified. The pinned supervised consumer is ready. This report will be finalized only after the supervised walk-forward and promotion decision finish.</p>
+  <p><strong>Status:</strong> complete. Foundation training, validated export, downstream preparation, embedding, and supervised walk-forward all finished with verified artifacts. The supervised entry head failed the required proper-score gate, so the final decision is rejection with no simulation and no holdout access.</p>
 
   <div class="stat-grid">
     <div class="stat"><div class="value">10,000</div><div class="label">Training updates</div></div>
     <div class="stat"><div class="value">2.485024</div><div class="label">Best validation loss</div></div>
     <div class="stat"><div class="value">3,259,736</div><div class="label">Prepared states</div></div>
-    <div class="stat"><div class="value">3TF</div><div class="label">1m, 3m, 15m</div></div>
+    <div class="stat"><div class="value neg">Rejected</div><div class="label">Entry quality gate</div></div>
   </div>
 
   <div class="callout warn">
-    <strong>Current authorization boundary:</strong> the validated foundation export is a <code>diagnostic_candidate</code>. That role permits embedding and supervised diagnostic walk-forward work, but it prohibits Topstep simulation and sealed-holdout evaluation. Those stages remain fail-closed unless the recorded gates permit promotion.
+    <strong>Final authorization boundary:</strong> the validated foundation export is a <code>diagnostic_candidate</code>, and the supervised proper-score gate failed. Topstep simulation and sealed-holdout evaluation are prohibited for this run identity.
   </div>
 
   <h2>Run identity</h2>
@@ -139,6 +139,8 @@ svg { max-width: 100%; }
       <tr><th>Diagnostic producer config</th><td><code>mantis-v2/configs/trend-magic-lp-ft-3tf-cuda-v1.toml</code></td></tr>
       <tr><th>Producer source</th><td><code>8d4718c6c1858e1ea14757b4ca29ca2cc31a1d8f</code></td></tr>
       <tr><th>Producer run</th><td><code>mantisv2-trend-magic-lp-ft-3tf-cuda-v1</code></td></tr>
+      <tr><th>Supervised source</th><td><code>9f19708e0d20f941accb3466736c6425a4e9c929</code></td></tr>
+      <tr><th>Supervised run</th><td><code>mantisv2-trend-magic-lp-ft-supervised-entry-cuda-v1</code></td></tr>
       <tr><th>Symbols</th><td>ES, NQ, RTY, YM, GC, CL, ZB</td></tr>
       <tr><th>Timeframes</th><td>1m, 3m, 15m with decisions on closed 3m state bars</td></tr>
     </tbody>
@@ -161,6 +163,37 @@ svg { max-width: 100%; }
       <tr><td>Estimated training Pod cost</td><td>$0.93</td></tr>
     </tbody>
   </table>
+
+  <h2>Verified supervised walk-forward</h2>
+  <p>Eight rolling folds used 24 training months, three validation months, three test months, and a three-month stride. Every fold trained on at most 25,000 rows with validation early stopping. All eight folds converged and every one of the 16 recorded head/prediction artifacts passed an independent SHA-256 audit.</p>
+  <table>
+    <thead>
+      <tr><th>Fold</th><th class="num">Best epoch</th><th class="num">Val weighted log loss</th><th class="num">Val weighted Brier</th><th class="num">Test weighted log loss</th><th class="num">Test weighted Brier</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>0</td><td class="num">1</td><td class="num">0.722397</td><td class="num">0.263519</td><td class="num">0.722393</td><td class="num">0.263404</td></tr>
+      <tr><td>1</td><td class="num">2</td><td class="num">0.728290</td><td class="num">0.265757</td><td class="num">0.724325</td><td class="num">0.263987</td></tr>
+      <tr><td>2</td><td class="num">3</td><td class="num">0.711523</td><td class="num">0.258510</td><td class="num">0.716330</td><td class="num">0.260435</td></tr>
+      <tr><td>3</td><td class="num">2</td><td class="num">0.719200</td><td class="num">0.261925</td><td class="num">0.721069</td><td class="num">0.262527</td></tr>
+      <tr><td>4</td><td class="num">3</td><td class="num">0.710061</td><td class="num">0.257795</td><td class="num">0.714060</td><td class="num">0.259541</td></tr>
+      <tr><td>5</td><td class="num">2</td><td class="num">0.717321</td><td class="num">0.260690</td><td class="num">0.716125</td><td class="num">0.259973</td></tr>
+      <tr><td>6</td><td class="num">1</td><td class="num">0.709732</td><td class="num">0.257882</td><td class="num">0.710325</td><td class="num">0.258112</td></tr>
+      <tr><td>7</td><td class="num">1</td><td class="num">0.716904</td><td class="num">0.261112</td><td class="num">0.717223</td><td class="num">0.261192</td></tr>
+    </tbody>
+  </table>
+  <table>
+    <thead><tr><th>Aggregate gate</th><th class="num">Candidate</th><th class="num">Required baseline</th><th>Result</th></tr></thead>
+    <tbody>
+      <tr><td>Mean test weighted log loss</td><td class="num">0.717731</td><td class="num">0.693147</td><td class="neg">Failed</td></tr>
+      <tr><td>Mean test weighted Brier</td><td class="num">0.261146</td><td class="num">0.250000</td><td class="neg">Failed</td></tr>
+      <tr><td>Fold convergence</td><td class="num">8 / 8</td><td class="num">8 / 8</td><td class="pos">Passed</td></tr>
+    </tbody>
+  </table>
+  <p>Walk-forward duration was 1,933.06 seconds. The manifest SHA-256 is <code>9153aff85b37dab6c4a3790ac5b2af0b1714264e5d605e01c2c7b489b15152f3</code>. The RTX PRO 6000 Pod ran from 06:12:07Z to 06:51:10Z at $1.99 per hour, an estimated $1.30 while provider billing detail remained pending.</p>
+
+  <div class="callout warn">
+    <strong>Final decision: reject.</strong> Convergence proves the optimizer ran successfully; it does not prove predictive usefulness. Both proper scores were worse than the balanced constant baseline. Do not tune this immutable run, run Topstep simulation, or unlock the sealed holdout. Any future hypothesis needs a new config and run identity.
+  </div>
 
   <h2>Verified validated export</h2>
   <p>The best checkpoint passed evaluation and native-to-safetensors parity at <code>atol=1e-5</code> and <code>rtol=1e-4</code>. The evaluation micro total was 2.4850239753723145 and the macro total was 2.4853941908589117.</p>
@@ -225,6 +258,184 @@ uv run --no-sync mantis-v2 downstream-walk-forward \
   <pre><code>runpodctl pod delete &lt;pod-id&gt;
 runpodctl pod list</code></pre>
 
+  <h3>Fresh Pod bootstrap used by this run</h3>
+  <p>The API key remains in the local <code>RUNPOD_API_KEY</code> environment variable. Never put it in a command argument, config, bundle, Pod environment, or artifact. The recorded network volume is <code>xj55i8hz5v</code> in <code>EUR-IS-1</code>. Query that data center before create because global GPU stock does not prove volume-local availability.</p>
+  <pre><code>runpodctl version
+runpodctl datacenter list --output=json | \
+  jq '.[] | select(.id == "EUR-IS-1")'
+runpodctl pod list --output=json
+
+deadline=$(date -u -v+150M '+%Y-%m-%dT%H:%M:%SZ')
+pod_json=$(runpodctl pod create --output=json \
+  --name=mantisv2-lp-ft-supervised-entry-s42-v1 \
+  --template-id=runpod-torch-v280 \
+  --gpu-id='NVIDIA RTX PRO 6000 Blackwell Server Edition' \
+  --gpu-count=1 \
+  --cloud-type=SECURE \
+  --data-center-ids=EUR-IS-1 \
+  --container-disk-in-gb=50 \
+  --network-volume-id=xj55i8hz5v \
+  --volume-mount-path=/workspace \
+  --ports='22/tcp,6006/http' \
+  --ssh=true \
+  --terminate-after="$deadline")
+pod_id=$(jq -r '.id' &lt;&lt;&lt;"$pod_json")
+runpodctl ssh info "$pod_id" --output=json</code></pre>
+  <p>The GPU type is the recorded choice, not a permanent requirement. Select only a compatible GPU actually available beside the volume and record the returned hourly price before continuing. Never repeat an ambiguous create. This run's L4 and RTX 4090 requests returned definitive no-capacity errors and created no resources; only the successful exact Pod ID was eligible for remote work and deletion.</p>
+
+  <h3>Exact source and environment bootstrap</h3>
+  <pre><code># Local machine, from a clean pushed checkout.
+source_sha=9f19708e0d20f941accb3466736c6425a4e9c929
+test "$(git rev-parse HEAD)" = "$source_sha"
+test -z "$(git status --porcelain)"
+git bundle create /tmp/mantis-${source_sha}.bundle \
+  issue-78-one-command-training
+git bundle verify /tmp/mantis-${source_sha}.bundle
+
+# Use the IP and port returned by `runpodctl ssh info`.
+scp -P &lt;ssh-port&gt; /tmp/mantis-${source_sha}.bundle \
+  root@&lt;ssh-ip&gt;:/tmp/mantis-${source_sha}.bundle
+
+ssh -p &lt;ssh-port&gt; root@&lt;ssh-ip&gt; '
+  set -euo pipefail
+  nvidia-smi
+  uv --version
+  git clone /tmp/mantis-9f19708e0d20f941accb3466736c6425a4e9c929.bundle \
+    /tmp/mantis-repo
+  cd /tmp/mantis-repo
+  git checkout issue-78-one-command-training
+  test "$(git rev-parse HEAD)" = \
+    9f19708e0d20f941accb3466736c6425a4e9c929
+  export UV_PROJECT_ENVIRONMENT=/tmp/mantis-venv
+  uv sync --frozen
+  uv run --no-sync python -c \
+    "import torch; assert torch.cuda.is_available(); print(torch.cuda.get_device_name(0))"
+'</code></pre>
+
+  <h3>Stage the accepted corpus for foundation training</h3>
+  <p>The immutable accepted bundle remains on the network volume. The foundation config intentionally reads a Pod-local copy from <code>/tmp</code> to avoid remote random I/O. Copy the bundle without changing ownership, then verify only the accepted manifest hash. Do not scan or rewrite the accepted Parquet on GPU time.</p>
+  <pre><code># On the Pod, before foundation training.
+bundle=4d12c3f334dba95fb045905d89654f16d63e75b68f8423ae8726eac06d70fba6
+source_root=/workspace/mantis/inputs/$bundle
+local_root=/tmp/mantis/inputs/$bundle
+expected_manifest=2d8cf8b708c7c743c849059410b3654bc44f9fe4f7d795928de82526e120d703
+
+mkdir -p "$local_root"
+rsync -a --no-owner --no-group --info=progress2 \
+  "$source_root/" "$local_root/"
+actual_manifest=$(sha256sum "$local_root/corpus/manifest.json" | awk '{print $1}')
+test "$actual_manifest" = "$expected_manifest"
+test -d "$local_root/corpus/market"
+test -d "$local_root/corpus/raw"
+test -d "$local_root/corpus/repairs"
+test -d "$local_root/corpus/rolls"</code></pre>
+  <p>This copy satisfies the foundation config's <code>/tmp/mantis/inputs/.../corpus</code> paths. The downstream producer and consumer keep using the original <code>/workspace/mantis/inputs/...</code> paths and the same manifest hash.</p>
+
+  <h3>Create a fresh immutable experiment chain</h3>
+  <p>The commands above reproduce the recorded identities only for audit. They cannot safely rerun completed output. For a new experiment, create and commit each versioned TOML only when its parent artifacts exist. This is deliberately an operator-reviewed config change: no runtime script is allowed to silently rewrite provenance pins.</p>
+  <pre><code># Local machine, from the repository root.
+cp mantis-v2/configs/nextleg-runpod-cuda-3tf-lp-ft-s42-v1.toml \
+  mantis-v2/configs/nextleg-runpod-cuda-3tf-lp-ft-s42-v2.toml
+$EDITOR mantis-v2/configs/nextleg-runpod-cuda-3tf-lp-ft-s42-v2.toml
+
+# Set a unique foundation run.name ending in -v2. Keep allow_overwrite=false,
+# the accepted corpus hash, and the holdout boundary unchanged.
+
+git diff --check
+git add mantis-v2/configs/nextleg-runpod-cuda-3tf-lp-ft-s42-v2.toml
+git commit -m 'config: add LP-FT foundation v2 experiment'
+git push</code></pre>
+  <p>Create a Git bundle at that exact commit, bootstrap the Pod, stage the corpus, then run the new foundation train and validated export. Obtain the values for the producer only after export succeeds:</p>
+  <pre><code>foundation_run=/workspace/mantis/runs/&lt;new-foundation-run-name&gt;
+foundation_manifest_sha=$(sha256sum "$foundation_run/export/manifest.json" | awk '{print $1}')
+foundation_weights_sha=$(sha256sum "$foundation_run/export/model.safetensors" | awk '{print $1}')
+printf '%s\n' "$foundation_manifest_sha" "$foundation_weights_sha"
+
+# Back on the local machine, create the producer only after those hashes exist.
+cp mantis-v2/configs/trend-magic-lp-ft-3tf-cuda-v1.toml \
+  mantis-v2/configs/trend-magic-lp-ft-3tf-cuda-v2.toml
+$EDITOR mantis-v2/configs/trend-magic-lp-ft-3tf-cuda-v2.toml
+
+# Set a unique producer run.name and replace foundation.manifest_path and
+# foundation.weights_sha256 with the new export values. Keep overwrite false.
+git diff --check
+git add mantis-v2/configs/trend-magic-lp-ft-3tf-cuda-v2.toml
+git commit -m 'config: pin LP-FT Trend Magic v2 producer'
+git push
+
+# Create a new exact-source Git bundle, then verify, prepare, and embed.
+producer_config=mantis-v2/configs/trend-magic-lp-ft-3tf-cuda-v2.toml
+producer_config_sha=$(sha256sum "$producer_config" | awk '{print $1}')
+embed_run=/workspace/mantis/runs/&lt;new-producer-run-name&gt;
+embed_manifest_sha=$(sha256sum "$embed_run/embed/manifest.json" | awk '{print $1}')
+printf '%s\n' "$producer_config_sha" "$embed_manifest_sha"
+
+# Back on the local machine, create the consumer after embedding succeeds.
+cp mantis-v2/configs/trend-magic-lp-ft-3tf-supervised-cuda-v1.toml \
+  mantis-v2/configs/trend-magic-lp-ft-3tf-supervised-cuda-v2.toml
+consumer_config=mantis-v2/configs/trend-magic-lp-ft-3tf-supervised-cuda-v2.toml
+$EDITOR "$consumer_config"
+
+# Set a unique consumer run.name. Pin the new foundation path/hash, embed
+# manifest path/hash, and producer config path/hash. Keep overwrite false.
+git diff --check
+git add "$consumer_config"
+git commit -m 'config: pin LP-FT Trend Magic v2 consumer'
+git push</code></pre>
+  <p>After both the producer commit and the later consumer commit, transfer that new exact source state before running its stage. Never keep using the older Pod checkout:</p>
+  <pre><code># Local machine after each pushed config commit.
+source_sha=$(git rev-parse HEAD)
+bundle=/tmp/mantis-${source_sha}.bundle
+git bundle create "$bundle" issue-78-one-command-training
+git bundle verify "$bundle"
+scp -P &lt;ssh-port&gt; "$bundle" root@&lt;ssh-ip&gt;:"$bundle"
+
+# On the Pod. Paste the source_sha printed on the local machine.
+source_sha=&lt;exact-pushed-source-sha&gt;
+checkout=/tmp/mantis-repo-$source_sha
+git clone /tmp/mantis-${source_sha}.bundle "$checkout"
+cd "$checkout"
+git checkout issue-78-one-command-training
+test "$(git rev-parse HEAD)" = "$source_sha"
+export UV_PROJECT_ENVIRONMENT=/tmp/mantis-venv
+export CUBLAS_WORKSPACE_CONFIG=:4096:8
+uv sync --frozen
+uv run --no-sync python -c \
+  "import torch; assert torch.cuda.is_available(); print(torch.cuda.get_device_name(0))"</code></pre>
+  <p>From the fresh producer checkout, run <code>downstream-verify</code>, <code>downstream-prepare</code>, and <code>downstream-embed</code> with the new producer config. From the later fresh consumer checkout, run:</p>
+  <pre><code>uv run --no-sync mantis-v2 downstream-verify \
+  --config mantis-v2/configs/trend-magic-lp-ft-3tf-supervised-cuda-v2.toml
+uv run --no-sync mantis-v2 downstream-walk-forward \
+  --config mantis-v2/configs/trend-magic-lp-ft-3tf-supervised-cuda-v2.toml</code></pre>
+  <p>At every boundary, the next stage starts only after its config contains the exact parent path and SHA-256 and that config is committed. If a computed hash differs from the committed pin, stop. Never bypass the mismatch with overwrite or a command-line override.</p>
+
+  <h3>TensorBoard</h3>
+  <p>The supervised walk-forward does not emit TensorBoard events. TensorBoard monitors the foundation training event directory. Start it on the Pod loopback interface, then create a localhost-only tunnel from the Mac:</p>
+  <pre><code># On the Pod.
+cd /tmp/mantis-repo
+UV_PROJECT_ENVIRONMENT=/tmp/mantis-venv \
+  uv run --no-sync tensorboard \
+  --logdir /workspace/mantis/runs/mantisv2-foundation-training-first-3tf-lp-ft-s42-v1/events \
+  --host 127.0.0.1 --port 6006
+
+# On the local Mac.
+ssh -N -L 6006:127.0.0.1:6006 \
+  -p &lt;ssh-port&gt; root@&lt;ssh-ip&gt;</code></pre>
+
+  <h3>Repeat versus resume</h3>
+  <p>The recorded run identities are immutable and already exist. Auditing them means verifying their manifests and hashes, not rerunning commands. A new experiment must copy the TOML files to new versioned names, assign new <code>run.name</code> values, keep <code>allow_overwrite=false</code>, and pin each newly produced parent hash before launching its consumer.</p>
+  <table>
+    <thead><tr><th>Stage</th><th>Safe restart behavior</th></tr></thead>
+    <tbody>
+      <tr><td>Foundation train</td><td>Rerun the exact training command only when its provenance-checked checkpoint identifies an incomplete run. It resumes from that checkpoint and rejects mismatched source, config, data, or weights.</td></tr>
+      <tr><td>Validated export</td><td>A complete validated export is immutable. Verify its evaluation and parity receipts; do not overwrite it. Retry only after diagnosing an incomplete export under a fresh run identity.</td></tr>
+      <tr><td>Prepare</td><td>A complete prepare manifest is immutable. Existing partial output fails closed and must be diagnosed before a new versioned run is created.</td></tr>
+      <tr><td>Embed</td><td>If no final manifest exists, rerunning the exact command scans and verifies completed atomic pair receipts, then continues from the first missing row. A final manifest makes the stage immutable.</td></tr>
+      <tr><td>Walk-forward</td><td>This implementation does not resume partial folds. Existing partial output fails closed. Preserve it for diagnosis, then create a new versioned consumer run; never set overwrite merely to bypass provenance.</td></tr>
+    </tbody>
+  </table>
+  <p>After success or failure, delete only the exact recorded Pod ID with <code>runpodctl pod delete</code>, then require <code>runpodctl pod list --output=json</code> to return an empty array. The provider termination deadline is a backstop, not a substitute for explicit deletion.</p>
+
   <h2>Resume and failure rules</h2>
   <ul>
     <li>Never overwrite an existing run identity and never start a duplicate command against it.</li>
@@ -239,12 +450,18 @@ runpodctl pod list</code></pre>
   <p>The initial training process emitted CuBLAS and memory-efficient attention nondeterminism warnings because <code>CUBLAS_WORKSPACE_CONFIG</code> was not set before Python started. No result is represented as strictly deterministic. Later CUDA stages set <code>CUBLAS_WORKSPACE_CONFIG=:4096:8</code>; the attention implementation may still remain nondeterministic. This caveat is part of the provenance and any confirmation run must set the variable before training begins.</p>
   <p>Full corpus provenance requires the <code>market/</code>, <code>raw/</code>, <code>repairs/</code>, and <code>rolls/</code> trees. Earlier preflights failed because raw data was omitted and repair/roll directories were flattened. The failure occurred before checkpoints were created, so no trained state was lost. The corrected bundle preserves the expected structure and hashes.</p>
 
-  <h2>Remaining gates</h2>
-  <ol>
-    <li>Fit the supervised shared entry head in walk-forward folds with bounded row sampling and early stopping.</li>
-    <li>Require every fold to converge, aggregate weighted log loss below <code>log(2)</code>, and aggregate weighted Brier below 0.25.</li>
-    <li>Record the promotion decision. If any gate fails, stop without simulation or holdout access.</li>
-    <li>Verify committed documentation, a clean pushed branch, deleted monitors, and zero active Pods.</li>
-  </ol>
+  <h2>I/O findings</h2>
+  <p>The same-volume run completed in about 32 minutes. Roughly three minutes were spent rehashing the 25.3 GB embedding payload; most remaining time was random feature reads while assembling bounded fold samples. GPU fitting bursts were short, and GPU memory stayed near 1.3 GB. The minimal repeatable path is therefore to attach the existing network volume and budget about 32 minutes for this exact head run.</p>
+  <p>Do not copy or rewrite the manifest ad hoc. It records absolute artifact paths and hashes. Local ephemeral staging could reduce random-read latency, but it requires a tested manifest-relocation contract that preserves identity; that was not added to this completed run.</p>
+
+  <h2>Completion audit</h2>
+  <ul>
+    <li>Foundation best checkpoint, evaluation, export parity, and exported weights are verified.</li>
+    <li>Embedding row count, 800 file hashes, dtype, width, and finite samples are verified.</li>
+    <li>Eight fold convergence receipts and all 16 head/prediction hashes are verified.</li>
+    <li>The quality gate failed and the fail-closed rejection is recorded.</li>
+    <li>Both RunPod monitors were deleted after completion and provider inventory reported zero active Pods.</li>
+    <li>Simulation and sealed holdout evaluation were never run.</li>
+  </ul>
 </body>
 </html>

@@ -520,6 +520,31 @@ uv run mantis-v2 downstream-walk-forward \
 The LP-FT foundation role is `diagnostic_candidate`, so neither producer nor
 consumer may run simulation or unlock the holdout.
 
+The completed LP-FT supervised walk-forward is a recorded rejection. All eight
+folds converged, but aggregate test weighted log loss was 0.717731 versus the
+balanced constant 0.693147 baseline, and aggregate test weighted Brier was
+0.261146 versus 0.250000. Its manifest SHA-256 is
+`9153aff85b37dab6c4a3790ac5b2af0b1714264e5d605e01c2c7b489b15152f3`;
+an independent audit recomputed all 16 head and prediction hashes. Do not tune,
+simulate, or unlock the holdout for this run identity. Preserve it as negative
+evidence for the LP-FT representation plus bounded supervised entry head.
+
+On the observed RunPod network volume, the head run spent about three minutes
+rechecking the 25.3 GB embedding payload and about 29 minutes reading bounded
+fold samples and fitting all eight heads. This completed within the cost cap,
+so the repeatable minimal path is to attach the same volume and accept that
+measured 32-minute runtime. Do not improvise a copied or relocated manifest:
+its listed absolute paths and hashes are provenance. A future local-staging
+optimization requires an explicit, tested manifest-relocation contract.
+The exact official-template Pod create, Git-bundle bootstrap, CUDA checks,
+TensorBoard tunnel, teardown, and stage-specific restart rules used for this
+run are recorded in `docs/lp-ft-trend-magic-run-summary.html`. That runbook also
+records the exact `rsync --no-owner --no-group` step from the immutable network
+volume bundle to the foundation config's `/tmp` corpus path, the accepted
+manifest hash check, and the commit-before-run sequence for fresh run names and
+downstream artifact pins. Do not replace those explicit config commits with
+runtime overrides.
+
 The config caps each fit partition at 25,000 rows and uses validation early
 stopping so the first result arrives before any search or PPO work. Trend Magic
 owns direction; continuation, reversal, and fast-stop-risk heads only score the

@@ -445,6 +445,21 @@ uv run mantis-v2 downstream-walk-forward \
 Simulation and holdout remain locked while the export role is
 `diagnostic_candidate`.
 
+The completed LP-FT supervised run converged on all eight folds but failed both
+proper-score gates. Mean test weighted log loss was 0.717731 against the
+balanced constant 0.693147 baseline; mean test weighted Brier was 0.261146
+against 0.250000. The walk-forward manifest SHA-256 is
+`9153aff85b37dab6c4a3790ac5b2af0b1714264e5d605e01c2c7b489b15152f3`,
+and all 16 recorded head/prediction hashes were independently verified. This
+run is rejected. Do not run simulation, unlock the holdout, or tune this run
+identity.
+
+The complete repeat procedure, including network-volume-to-`/tmp` corpus
+staging for foundation training and the fresh run-name/config/hash-pinning
+sequence for each downstream boundary, is in
+`docs/lp-ft-trend-magic-run-summary.html`. The accepted manifest is checked by
+hash after staging; accepted Parquet is not rescanned on GPU time.
+
 The completed `head-c0001-v2` walk-forward converged on all eight folds but
 failed both primary proper-score gates (weighted log loss 0.695306 and weighted
 Brier 0.251044). Do not run `downstream-simulate` or unlock the holdout for this
