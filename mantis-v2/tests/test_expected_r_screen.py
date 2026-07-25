@@ -116,6 +116,52 @@ def test_same_bar_stop_and_target_contact_uses_stop_first() -> None:
     assert candidate["gross_r"] == -1.0
 
 
+def test_active_trail_precedes_same_bar_target_contact() -> None:
+    frame = _frame(1, [102.5, 103.0], [100.0, 101.7])
+    frame.loc[3, "open"] = 102.0
+    candidate = (
+        ExpectedRScreen(
+            ExpectedRScreenConfig(
+                window_bars=2,
+                round_trip_commission=0.0,
+                slippage_ticks=0.0,
+                timestamp_semantics="bar_close",
+            )
+        )
+        .generate_candidates(frame)
+        .iloc[0]
+    )
+
+    assert candidate["exit_reason"] == "trail"
+    assert candidate["exit_price"] == 101.75
+    assert candidate["gross_r"] == 1.75
+
+
+@pytest.mark.parametrize(("direction", "gap_open"), [(1, 104.0), (-1, 96.0)])
+def test_favorable_gap_beyond_target_fills_cap_before_intrabar_stop(
+    direction: int, gap_open: float
+) -> None:
+    frame = _frame(direction, [100.5, 101.0], [99.5, 99.0])
+    frame.loc[3, "open"] = gap_open
+    frame.loc[3, "high"] = 104.0
+    frame.loc[3, "low"] = 96.0
+    candidate = (
+        ExpectedRScreen(
+            ExpectedRScreenConfig(
+                window_bars=2,
+                round_trip_commission=0.0,
+                slippage_ticks=0.0,
+                timestamp_semantics="bar_close",
+            )
+        )
+        .generate_candidates(frame)
+        .iloc[0]
+    )
+
+    assert candidate["exit_reason"] == "target"
+    assert candidate["gross_r"] == 3.0
+
+
 def test_default_costs_match_one_mnq_contract() -> None:
     candidate = (
         ExpectedRScreen(ExpectedRScreenConfig(window_bars=2, timestamp_semantics="bar_close"))

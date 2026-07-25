@@ -332,31 +332,24 @@ class ExpectedRScreen:
             high = float(frame.at[index, "high"])
             low = float(frame.at[index, "low"])
             bar_open = float(frame.at[index, "open"])
-            stop_hit = low <= stop if side > 0 else high >= stop
-            target_hit = high >= target if side > 0 else low <= target
             trail_price = entry + side * trail_r * risk if trail_r is not None else None
-            trail_hit = trail_price is not None and (
-                low <= trail_price if side > 0 else high >= trail_price
-            )
+            active_stop = trail_price if trail_price is not None else stop
+            stop_hit = low <= active_stop if side > 0 else high >= active_stop
+            target_hit = high >= target if side > 0 else low <= target
+            target_gap = bar_open >= target if side > 0 else bar_open <= target
+            if target_gap:
+                exit_price, reason, outcome_index = target, "target", index
+                break
             if stop_hit:
-                gap = bar_open < stop if side > 0 else bar_open > stop
+                gap = bar_open < active_stop if side > 0 else bar_open > active_stop
                 exit_price, reason, outcome_index = (
-                    bar_open if gap else stop,
-                    "stop",
+                    bar_open if gap else active_stop,
+                    "trail" if trail_price is not None else "stop",
                     index,
                 )
                 break
             if target_hit:
                 exit_price, reason, outcome_index = target, "target", index
-                break
-            if trail_hit:
-                assert trail_price is not None
-                gap = bar_open < trail_price if side > 0 else bar_open > trail_price
-                exit_price, reason, outcome_index = (
-                    bar_open if gap else trail_price,
-                    "trail",
-                    index,
-                )
                 break
             favorable = (high - entry) / risk if side > 0 else (entry - low) / risk
             peak_r = max(peak_r, favorable)
