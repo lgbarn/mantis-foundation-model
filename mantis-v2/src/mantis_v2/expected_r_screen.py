@@ -328,9 +328,7 @@ class ExpectedRScreen:
         start_hour, start_minute = (int(part) for part in self.config.entry_start.split(":"))
         end_hour, end_minute = (int(part) for part in self.config.session_exit.split(":"))
         local_time = timestamp.time().replace(tzinfo=None)
-        within_hours = time(start_hour, start_minute) <= local_time <= time(
-            end_hour, end_minute
-        )
+        within_hours = time(start_hour, start_minute) <= local_time <= time(end_hour, end_minute)
         return bool(within_hours and close_timestamp <= self._session_cutoff(timestamp))
 
     def run(self, frame: pd.DataFrame, artifact_path: Path) -> dict[str, Any]:
@@ -569,17 +567,11 @@ class ExpectedRScreen:
 
     def _session_keys(self, timestamps: pd.Series) -> np.ndarray:
         """Map close timestamps to the Chicago trading session they belong to."""
-        local = pd.to_datetime(timestamps, utc=True).dt.tz_convert(
-            self.config.session_timezone
-        )
-        start_hour, start_minute = (
-            int(part) for part in self.config.session_start.split(":")
-        )
+        local = pd.to_datetime(timestamps, utc=True).dt.tz_convert(self.config.session_timezone)
+        start_hour, start_minute = (int(part) for part in self.config.session_start.split(":"))
         minute = local.dt.hour * 60 + local.dt.minute
         starts_next_date = minute >= start_hour * 60 + start_minute
-        offsets = pd.to_timedelta(
-            starts_next_date.to_numpy(dtype=np.int8), unit="D"
-        )
+        offsets = pd.to_timedelta(starts_next_date.to_numpy(dtype=np.int8), unit="D")
         keys = local.dt.normalize() + offsets
         values: list[str] = keys.dt.strftime("%Y-%m-%d").tolist()
         return np.asarray(values, dtype="datetime64[D]")
