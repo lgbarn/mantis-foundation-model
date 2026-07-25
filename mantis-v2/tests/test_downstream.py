@@ -18,7 +18,9 @@ from mantis_v2.downstream_pipeline import (
     DownstreamPipelineError,
     _embedding_manifest_input,
     _manifest_base,
+    _read_head,
     _walk_forward_quality_gate,
+    _write_head,
     evaluate_holdout,
     simulate,
     smoke,
@@ -35,6 +37,16 @@ from mantis_v2.strategy import (
     load_market_frame,
     supertrend_state,
     trend_magic_state,
+)
+from mantis_v2.supervised_entry import (
+    SupervisedExpertHead,
+    annotate_supervised_context,
+    build_context_features,
+    early_stop_labels,
+    fit_supervised_expert_head,
+    predict_supervised_expert_head,
+    select_supervised_thresholds,
+    supervised_thresholds,
 )
 from mantis_v2.topstep import TopstepContractError, simulate_topstep
 from mantis_v2.walk_forward import (
@@ -217,9 +229,7 @@ def test_tuned_production_config_pins_reusable_embeddings_and_head_settings() ->
     assert config.walk_forward.embed_producer_config_sha256 == sha256_file(CONFIG)
 
 
-def test_three_timeframe_trend_magic_config_cannot_reuse_four_timeframe_embeddings() -> (
-    None
-):
+def test_three_timeframe_trend_magic_config_cannot_reuse_four_timeframe_embeddings() -> None:
     config = load_downstream_config(TREND_MAGIC_TUNED_CONFIG)
     assert config.run.name == "mantisv2-trend-magic-topstep-100k-head-c0001-v2"
     assert config.strategy.kind == "trend_magic"
@@ -254,6 +264,211 @@ def test_head_config_digest_changes_without_changing_embed_identity() -> None:
         data=replace(config.data, holdout_start=config.data.holdout_start + timedelta(days=1)),
     )
     assert config.head_config_digest(embed_sha) != changed_holdout.head_config_digest(embed_sha)
+
+
+def test_supervised_entry_config_is_strict_and_changes_only_head_identity(
+    tmp_path: Path,
+) -> None:
+    source = TREND_MAGIC_TUNED_CONFIG.read_text().replace(
+        "[topstep]",
+        """head_kind = \"supervised_experts\"
+
+[supervised_head]
+hidden_width = 64
+epochs = 20
+batch_size = 512
+learning_rate = 0.0003
+weight_decay = 0.0001
+patience = 5
+early_stop_bars = 20
+risk_penalty = 0.2
+target_trades_per_symbol_day = 0.5
+device = \"cpu\"
+
+[topstep]""",
+        1,
+    )
+    path = tmp_path / "supervised-entry.toml"
+    path.write_text(source)
+
+    supervised = load_downstream_config(path)
+    logistic = load_downstream_config(TREND_MAGIC_TUNED_CONFIG)
+
+    assert supervised.walk_forward.head_kind == "supervised_experts"
+    assert supervised.supervised_head is not None
+    assert supervised.supervised_head.early_stop_bars == 20
+    assert supervised.supervised_head.risk_penalty == pytest.approx(0.2)
+    assert supervised.supervised_head.target_trades_per_symbol_day == pytest.approx(0.5)
+    assert supervised.embedding_contract_digest == logistic.embedding_contract_digest
+    assert supervised.head_config_digest("a" * 64) != logistic.head_config_digest("a" * 64)
+
+    path.write_text(
+        TREND_MAGIC_TUNED_CONFIG.read_text().replace(
+            "[topstep]", 'head_kind = "supervised_experts"\n\n[topstep]', 1
+        )
+    )
+    with pytest.raises(ConfigError, match=r"requires \[supervised_head\]"):
+        load_downstream_config(path)
+    path.write_text(source.replace('head_kind = "supervised_experts"\n\n', "", 1))
+    with pytest.raises(ConfigError, match=r"\[supervised_head\] requires"):
+        load_downstream_config(path)
+    path.write_text(source.replace("risk_penalty = 0.2", "risk_penalty = 1.2", 1))
+    with pytest.raises(ConfigError, match=r"risk_penalty must be in \[0, 1\]"):
+        load_downstream_config(path)
+
+
+def test_supervised_entry_head_trains_and_routes_reversal_rows(tmp_path: Path) -> None:
+    source = TREND_MAGIC_TUNED_CONFIG.read_text().replace(
+        "[topstep]",
+        """head_kind = "supervised_experts"
+
+[supervised_head]
+hidden_width = 8
+epochs = 4
+batch_size = 8
+learning_rate = 0.01
+weight_decay = 0.0
+patience = 2
+early_stop_bars = 2
+risk_penalty = 0.2
+target_trades_per_symbol_day = 1.0
+device = "cpu"
+
+[topstep]""",
+        1,
+    )
+    path = tmp_path / "supervised-entry.toml"
+    path.write_text(source)
+    config = load_downstream_config(path)
+    rows = 24
+    decision_ts = pd.date_range("2025-01-01T14:30:00Z", periods=rows, freq="3min")
+    direction = np.asarray(([1] * 6 + [-1] * 6) * 2, dtype=np.int8)
+    labels = np.asarray(([0, 1] * 12), dtype=np.int8)
+    metadata = pd.DataFrame(
+        {
+            "symbol": [config.data.symbols[0]] * rows,
+            "decision_index": np.arange(rows),
+            "decision_ts": decision_ts,
+            "entry_ts": decision_ts + timedelta(minutes=3),
+            "label_end_ts": decision_ts + timedelta(minutes=6),
+            "direction": direction,
+            "label": labels,
+            "reward_r": np.where(labels == 0, -1.0, 3.0),
+        }
+    )
+    context, reversal = build_context_features(metadata, config.data.symbols)
+    assert np.flatnonzero(reversal).tolist() == [6, 12, 18]
+    assert np.isfinite(context).all()
+    capped = annotate_supervised_context(metadata).iloc[[0, 6, 12, 18]]
+    _, capped_reversal = build_context_features(capped, config.data.symbols)
+    assert capped_reversal.tolist() == [False, True, True, True]
+    embeddings = np.column_stack((labels.astype(np.float32), 1.0 - labels.astype(np.float32)))
+    head, metrics, diagnostics = fit_supervised_expert_head(
+        embeddings[:16],
+        metadata.iloc[:16],
+        embeddings[16:],
+        metadata.iloc[16:],
+        config,
+    )
+    probability = predict_supervised_expert_head(head, embeddings[16:], metadata.iloc[16:])
+    head_path = tmp_path / "head.npz"
+    _write_head(head_path, head)
+    restored = _read_head(head_path)
+    assert isinstance(restored, SupervisedExpertHead)
+    restored_probability = predict_supervised_expert_head(
+        restored, embeddings[16:], metadata.iloc[16:]
+    )
+    assert diagnostics.epochs_ran >= 1
+    assert metrics["weighted_log_loss"] is not None
+    assert probability.shape == (8,)
+    assert np.isfinite(probability).all()
+    assert ((probability >= 0.0) & (probability <= 1.0)).all()
+    np.testing.assert_allclose(restored_probability, probability)
+
+
+def test_supervised_entry_routes_experts_and_applies_fast_stop_penalty() -> None:
+    decision = pd.date_range("2025-01-01T14:30:00Z", periods=3, freq="3min")
+    metadata = pd.DataFrame(
+        {
+            "symbol": ["NQ"] * 3,
+            "decision_index": [0, 1, 3],
+            "decision_ts": decision,
+            "entry_ts": decision + timedelta(minutes=3),
+            "label_end_ts": [
+                decision[0] + timedelta(minutes=6),
+                decision[1] + timedelta(minutes=12),
+                decision[2] + timedelta(minutes=6),
+            ],
+            "direction": [1, -1, 1],
+            "reward_r": [-1.0, -1.0, 3.0],
+        }
+    )
+    head = SupervisedExpertHead(
+        scaler_mean=np.zeros(7),
+        scaler_scale=np.ones(7),
+        trunk_weight=np.zeros((1, 7)),
+        trunk_bias=np.ones(1),
+        continuation_weight=np.asarray([-10.0]),
+        continuation_bias=0.0,
+        reversal_weight=np.asarray([10.0]),
+        reversal_bias=0.0,
+        risk_weight=np.zeros(1),
+        risk_bias=50.0,
+        thresholds=np.asarray([0.4]),
+        risk_penalty=0.2,
+        symbols=("NQ",),
+    )
+    embeddings = np.zeros((3, 1), dtype=np.float32)
+    penalized = predict_supervised_expert_head(head, embeddings, metadata)
+    unpenalized = predict_supervised_expert_head(
+        replace(head, risk_penalty=0.0), embeddings, metadata
+    )
+    assert penalized[1] > penalized[0]
+    assert penalized[2] == pytest.approx(penalized[0])
+    np.testing.assert_allclose(penalized, unpenalized * 0.8)
+    np.testing.assert_array_equal(early_stop_labels(metadata, bars=2), [1.0, 0.0, 0.0])
+    np.testing.assert_allclose(supervised_thresholds(head, metadata), 0.4)
+
+
+def test_supervised_thresholds_are_selected_and_persisted_per_symbol(tmp_path: Path) -> None:
+    metadata = pd.DataFrame(
+        {
+            "symbol": ["NQ", "NQ", "ES", "ES"],
+            "decision_ts": pd.to_datetime(
+                [
+                    "2025-01-01T14:30:00Z",
+                    "2025-01-01T14:33:00Z",
+                    "2025-01-01T14:30:00Z",
+                    "2025-01-01T14:33:00Z",
+                ]
+            ),
+        }
+    )
+    selected = select_supervised_thresholds(
+        np.asarray([0.1, 0.9, 0.6, 0.7]), metadata, ("NQ", "ES"), 1.0
+    )
+    np.testing.assert_allclose(selected, [0.9, 0.7])
+    head = SupervisedExpertHead(
+        scaler_mean=np.zeros(1),
+        scaler_scale=np.ones(1),
+        trunk_weight=np.zeros((1, 1)),
+        trunk_bias=np.zeros(1),
+        continuation_weight=np.zeros(1),
+        continuation_bias=0.0,
+        reversal_weight=np.zeros(1),
+        reversal_bias=0.0,
+        risk_weight=np.zeros(1),
+        risk_bias=0.0,
+        thresholds=selected,
+        risk_penalty=0.2,
+        symbols=("NQ", "ES"),
+    )
+    path = tmp_path / "two-symbol-head.npz"
+    _write_head(path, head)
+    restored = _read_head(path)
+    assert isinstance(restored, SupervisedExpertHead)
+    np.testing.assert_allclose(restored.thresholds, [0.9, 0.7])
+    np.testing.assert_allclose(supervised_thresholds(restored, metadata), [0.9, 0.9, 0.7, 0.7])
 
 
 @pytest.mark.parametrize("use_legacy_digest", [False, True])
@@ -378,9 +593,13 @@ def _write_embedding_fixture(config: DownstreamConfig, rows: int = 122) -> tuple
     metadata = pd.DataFrame(
         {
             "symbol": ["NQ"] * rows,
+            "decision_index": np.arange(rows, dtype=np.int64),
             "decision_ts": decision,
+            "entry_ts": decision + timedelta(minutes=3),
             "label_end_ts": decision + timedelta(minutes=3),
+            "direction": np.where((np.arange(rows) // 10) % 2 == 0, 1, -1),
             "label": np.arange(rows, dtype=np.int8) % 2,
+            "reward_r": np.where(np.arange(rows) % 2 == 0, -1.0, 3.0),
         }
     )
     metadata.to_parquet(metadata_path, index=False)
@@ -451,6 +670,50 @@ def test_walk_forward_persists_failure_diagnostics_on_nonconvergence(
     assert failure["head_config_digest"] == config.head_config_digest(embed_manifest_sha)
     assert failure["convergence"]["converged"] is False
     assert failure["convergence"]["n_iter"] == 1
+
+
+def test_supervised_entry_runs_through_walk_forward(tmp_path: Path) -> None:
+    source = CONFIG.read_text().replace(
+        "[topstep]",
+        """head_kind = "supervised_experts"
+
+[supervised_head]
+hidden_width = 8
+epochs = 2
+batch_size = 32
+learning_rate = 0.01
+weight_decay = 0.0
+patience = 1
+early_stop_bars = 2
+risk_penalty = 0.2
+target_trades_per_symbol_day = 1.0
+device = "cpu"
+
+[topstep]""",
+        1,
+    )
+    path = tmp_path / "supervised-walk-forward.toml"
+    path.write_text(source)
+    config = load_downstream_config(path)
+    config = replace(
+        config,
+        run=replace(config.run, name="supervised-walk-forward", artifact_root=tmp_path),
+        walk_forward=replace(
+            config.walk_forward,
+            train_months=1,
+            validation_months=1,
+            test_months=1,
+            stride_months=1,
+            embargo_bars=0,
+            max_fit_rows=100,
+        ),
+    )
+    _write_embedding_fixture(config)
+    manifest = walk_forward(config)
+    assert manifest["head_config"]["head_kind"] == "supervised_experts"
+    assert manifest["supervised_head_config"]["hidden_width"] == 8
+    assert manifest["folds"]
+    assert all(fold["convergence"]["converged"] for fold in manifest["folds"])
 
 
 def test_causal_alignment_cannot_see_a_forming_higher_timeframe_bar() -> None:

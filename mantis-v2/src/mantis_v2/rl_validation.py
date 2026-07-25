@@ -551,10 +551,7 @@ def _matched_random_replay(
     base_probability = take_count / legal_opportunities if legal_opportunities else 0.0
     factors = (1.0, 2.0, 0.5, 4.0, 0.25, 8.0, 0.125, 16.0, 0.0625, 32.0, 64.0, 128.0)
     probabilities = list(
-        dict.fromkeys(
-            [min(1.0, base_probability * factor) for factor in factors]
-            + [0.75, 1.0]
-        )
+        dict.fromkeys([min(1.0, base_probability * factor) for factor in factors] + [0.75, 1.0])
     )
     closest: ReplayResult | None = None
     for probability_number, probability in enumerate(probabilities):

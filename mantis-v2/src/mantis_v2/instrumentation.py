@@ -80,7 +80,9 @@ class RunInstrumentation:
         self._diagnostics = run_root / "instrumentation" / "diagnostics.jsonl"
         self._writer: SummaryWriter | None = None
         try:
-            self._writer = SummaryWriter(log_dir=str(run_root / "events"))
+            self._writer = SummaryWriter(  # type: ignore[no-untyped-call]
+                log_dir=str(run_root / "events")
+            )
         except Exception as exc:
             self._record_failure("writer_initialization", exc)
 
@@ -104,7 +106,7 @@ class RunInstrumentation:
         writer, self._writer = self._writer, None
         if writer is not None:
             try:
-                writer.close()
+                writer.close()  # type: ignore[no-untyped-call]
             except Exception as close_exc:
                 self._record_failure("writer_close", close_exc)
 
@@ -113,8 +115,8 @@ class RunInstrumentation:
             return
         try:
             for tag, value in values.items():
-                self._writer.add_scalar(tag, value, step)
-            self._writer.flush()
+                self._writer.add_scalar(tag, value, step)  # type: ignore[no-untyped-call]
+            self._writer.flush()  # type: ignore[no-untyped-call]
         except Exception as exc:
             self._disable_writer("write_scalars", exc)
 
@@ -122,8 +124,10 @@ class RunInstrumentation:
         if self._writer is None:
             return
         try:
-            self._writer.add_text(tag, json.dumps(value, sort_keys=True), step)
-            self._writer.flush()
+            self._writer.add_text(  # type: ignore[no-untyped-call]
+                tag, json.dumps(value, sort_keys=True), step
+            )
+            self._writer.flush()  # type: ignore[no-untyped-call]
         except Exception as exc:
             self._disable_writer("write_text", exc)
 
@@ -131,7 +135,7 @@ class RunInstrumentation:
         if self._writer is None:
             return
         try:
-            self._writer.close()
+            self._writer.close()  # type: ignore[no-untyped-call]
         except Exception as exc:
             self._record_failure("writer_close", exc)
         finally:

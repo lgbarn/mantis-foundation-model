@@ -53,7 +53,7 @@ them can make a checkpoint intentionally non-resumable.
 | `just downstream-prepare <config>` | Builds candidates and labels | Parquet plus manifest | Full data preparation |
 | `just downstream-verify <config>` | Validates and prints the downstream contract | Nothing | Read-only config check |
 | `just downstream-embed <config>` | Runs frozen encoder | NPY shards, Parquet, manifest | Long MPS/CPU inference |
-| `just downstream-walk-forward <config>` | Fits scaler and logistic folds | NPZ, predictions, metrics, manifest | CPU and memory |
+| `just downstream-walk-forward <config>` | Fits the configured entry-head folds | NPZ, predictions, metrics, manifest | CPU, MPS, or CUDA head device |
 | `just downstream-simulate <config>` | Replays trades and account rules | Results and manifest | CPU |
 | `just downstream-run <config>` | Runs all downstream stages | All downstream outputs | Long, multi-stage mutation |
 | `just downstream-holdout ...` | Opens sealed 2026 downstream data | Holdout artifacts | One-time governance action |
@@ -443,6 +443,23 @@ walk-forward. It pins and reuses the completed embeddings from
 the producer config, changes only head fitting, and writes under a distinct run
 identity. Do not run the all-stage chain with this consumer config because its
 purpose is isolated head fitting against immutable embeddings.
+
+The bounded nonlinear challenger is also head-only. Run it against the pinned
+direct-LoRA embedding manifest without repeating preparation or embedding:
+
+```bash
+uv run mantis-v2 downstream-verify \
+  --config mantis-v2/configs/trend-magic-direct-lora-3tf-supervised-cuda-v1.toml
+uv run mantis-v2 downstream-walk-forward \
+  --config mantis-v2/configs/trend-magic-direct-lora-3tf-supervised-cuda-v1.toml
+```
+
+The config caps each fit partition at 25,000 rows and uses validation early
+stopping so the first result arrives before any search or PPO work. Trend Magic
+owns direction; continuation, reversal, and fast-stop-risk heads only score the
+entry. Inspect `walk-forward/manifest.json` and require `quality_gate.passed`
+before any promotion discussion. The referenced foundation export is still a
+diagnostic candidate, so simulation and holdout remain fail-closed.
 
 `trend-magic-verify` is read-only. It prints the named
 `trend_magic_fixed_3r_v1` contract and its workflow identities without reading

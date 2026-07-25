@@ -165,9 +165,7 @@ def test_embedding_identity_separates_diagnostic_candidates_from_promoted_export
         validate_embedding_identity(_identity(), purpose="downstream_diagnostic")
     with pytest.raises(EmbeddingArtifactError, match="supported ordered timeframe"):
         validate_embedding_identity(
-            EmbeddingIdentity(
-                **{**_identity().__dict__, "timeframes": ("1min", "3min", "30min")}
-            ),
+            EmbeddingIdentity(**{**_identity().__dict__, "timeframes": ("1min", "3min", "30min")}),
             purpose="production",
         )
 

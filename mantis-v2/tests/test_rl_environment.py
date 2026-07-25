@@ -272,9 +272,7 @@ def test_matched_random_replay_searches_below_aggressive_entry_rates(
     episode = _baseline_episode()
     attempted: list[float] = []
 
-    def fake_replay(
-        _config_value: object, _episode_value: object, policy: object
-    ) -> ReplayResult:
+    def fake_replay(_config_value: object, _episode_value: object, policy: object) -> ReplayResult:
         assert isinstance(policy, MatchedRandomPolicy)
         attempted.append(policy.probability)
         accepted = 3 if policy.probability <= 0.1 else 2

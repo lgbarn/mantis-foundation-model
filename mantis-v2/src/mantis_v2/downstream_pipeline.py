@@ -42,9 +42,18 @@ from mantis_v2.instrumentation import (
 )
 from mantis_v2.model import sha256_file
 from mantis_v2.strategy import build_symbol_candidates, market_path
+from mantis_v2.supervised_entry import (
+    SupervisedExpertHead,
+    SupervisedFitDiagnostics,
+    annotate_supervised_context,
+    fit_supervised_expert_head,
+    predict_supervised_expert_head,
+    supervised_thresholds,
+)
 from mantis_v2.topstep import simulate_topstep
 from mantis_v2.walk_forward import (
     HeadConvergenceError,
+    HeadFitDiagnostics,
     PortableHead,
     build_folds,
     deterministic_cap,
@@ -330,9 +339,7 @@ def embed(config: DownstreamConfig) -> dict[str, Any]:
     """Extract bounded MantisV2 embedding shards from prepared candidates."""
     device = resolve_embedding_device(config.run.device)
     if config.data.timeframes not in _SUPPORTED_EMBEDDING_CONTRACTS:
-        raise DownstreamPipelineError(
-            "embedding requires a supported ordered timeframe contract"
-        )
+        raise DownstreamPipelineError("embedding requires a supported ordered timeframe contract")
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
     root = artifact_root(config)
@@ -361,9 +368,7 @@ def embed(config: DownstreamConfig) -> dict[str, Any]:
     validate_embedding_identity(
         identity,
         purpose=(
-            "production"
-            if config.foundation.export_role == "promoted"
-            else "downstream_diagnostic"
+            "production" if config.foundation.export_role == "promoted" else "downstream_diagnostic"
         ),
     )
     outputs = list(scan_embedding_pairs(stage_root / "shards", identity))
@@ -532,18 +537,37 @@ def _feature_rows(
     return features[np.argsort(source_order)]
 
 
-def _write_head(path: Path, head: PortableHead) -> None:
+def _write_head(path: Path, head: PortableHead | SupervisedExpertHead) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     with temporary.open("wb") as handle:
-        np.savez(
-            handle,
-            scaler_mean=head.scaler_mean,
-            scaler_scale=head.scaler_scale,
-            coefficients=head.coefficients,
-            intercept=head.intercept,
-            threshold=np.asarray([head.threshold]),
-        )
+        if isinstance(head, PortableHead):
+            np.savez(
+                handle,
+                scaler_mean=head.scaler_mean,
+                scaler_scale=head.scaler_scale,
+                coefficients=head.coefficients,
+                intercept=head.intercept,
+                threshold=np.asarray([head.threshold]),
+            )
+        else:
+            np.savez(
+                handle,
+                head_kind=np.asarray(["supervised_experts"]),
+                scaler_mean=head.scaler_mean,
+                scaler_scale=head.scaler_scale,
+                trunk_weight=head.trunk_weight,
+                trunk_bias=head.trunk_bias,
+                continuation_weight=head.continuation_weight,
+                continuation_bias=np.asarray([head.continuation_bias]),
+                reversal_weight=head.reversal_weight,
+                reversal_bias=np.asarray([head.reversal_bias]),
+                risk_weight=head.risk_weight,
+                risk_bias=np.asarray([head.risk_bias]),
+                thresholds=head.thresholds,
+                risk_penalty=np.asarray([head.risk_penalty]),
+                symbols=np.asarray(head.symbols, dtype=np.str_),
+            )
     os.replace(temporary, path)
 
 
@@ -577,8 +601,26 @@ def _walk_forward_quality_gate(
     }
 
 
-def _read_head(path: Path) -> PortableHead:
+def _read_head(path: Path) -> PortableHead | SupervisedExpertHead:
     values = np.load(path, allow_pickle=False)
+    if "head_kind" in values.files:
+        if str(values["head_kind"][0]) != "supervised_experts":
+            raise DownstreamPipelineError("unsupported portable head kind")
+        return SupervisedExpertHead(
+            scaler_mean=values["scaler_mean"],
+            scaler_scale=values["scaler_scale"],
+            trunk_weight=values["trunk_weight"],
+            trunk_bias=values["trunk_bias"],
+            continuation_weight=values["continuation_weight"],
+            continuation_bias=float(values["continuation_bias"][0]),
+            reversal_weight=values["reversal_weight"],
+            reversal_bias=float(values["reversal_bias"][0]),
+            risk_weight=values["risk_weight"],
+            risk_bias=float(values["risk_bias"][0]),
+            thresholds=values["thresholds"],
+            risk_penalty=float(values["risk_penalty"][0]),
+            symbols=tuple(str(item) for item in values["symbols"]),
+        )
     return PortableHead(
         scaler_mean=values["scaler_mean"],
         scaler_scale=values["scaler_scale"],
@@ -589,9 +631,14 @@ def _read_head(path: Path) -> PortableHead:
 
 
 def walk_forward(config: DownstreamConfig) -> dict[str, Any]:
-    """Fit train-only logistic heads and emit full out-of-sample predictions."""
+    """Fit train-only entry heads and emit full out-of-sample predictions."""
     root = artifact_root(config)
-    device = torch.device("cpu")
+    device = torch.device(
+        config.supervised_head.device
+        if config.walk_forward.head_kind == "supervised_experts"
+        and config.supervised_head is not None
+        else "cpu"
+    )
     synchronize_device(device)
     started = time.perf_counter()
     embedded, embed_manifest_path, embed_manifest_sha = _embedding_manifest_input(config)
@@ -601,6 +648,8 @@ def walk_forward(config: DownstreamConfig) -> dict[str, Any]:
     head_config_digest = config.head_config_digest(embed_manifest_sha)
     _verify_embedding_features(embedded)
     metadata = _load_embedding_metadata(embedded)
+    if config.walk_forward.head_kind == "supervised_experts":
+        metadata = annotate_supervised_context(metadata)
     folds = build_folds(metadata, config)
     fold_outputs: list[dict[str, Any]] = []
     for fold in folds:
@@ -618,14 +667,25 @@ def walk_forward(config: DownstreamConfig) -> dict[str, Any]:
         test_indices = np.flatnonzero(test_mask)
         train_features = _feature_rows(embedded, metadata, train_indices)
         validation_features = _feature_rows(embedded, metadata, validation_indices)
+        head: PortableHead | SupervisedExpertHead
+        convergence: HeadFitDiagnostics | SupervisedFitDiagnostics
         try:
-            head, validation_metrics, convergence = fit_logistic_head(
-                train_features,
-                metadata["label"].iloc[train_indices].to_numpy(dtype=np.int8),
-                validation_features,
-                metadata["label"].iloc[validation_indices].to_numpy(dtype=np.int8),
-                config,
-            )
+            if config.walk_forward.head_kind == "supervised_experts":
+                head, validation_metrics, convergence = fit_supervised_expert_head(
+                    train_features,
+                    metadata.iloc[train_indices],
+                    validation_features,
+                    metadata.iloc[validation_indices],
+                    config,
+                )
+            else:
+                head, validation_metrics, convergence = fit_logistic_head(
+                    train_features,
+                    metadata["label"].iloc[train_indices].to_numpy(dtype=np.int8),
+                    validation_features,
+                    metadata["label"].iloc[validation_indices].to_numpy(dtype=np.int8),
+                    config,
+                )
         except HeadConvergenceError as exc:
             _atomic_json(
                 stage_root / "failure.json",
@@ -655,11 +715,26 @@ def walk_forward(config: DownstreamConfig) -> dict[str, Any]:
             for start in range(0, len(test_indices), config.foundation.shard_rows):
                 selected = test_indices[start : start + config.foundation.shard_rows]
                 features = _feature_rows(embedded, metadata, selected)
-                probability = predict_head(head, features)
-                output = metadata.iloc[selected].drop(columns=["_shard", "_row"]).copy()
+                if isinstance(head, SupervisedExpertHead):
+                    probability = predict_supervised_expert_head(
+                        head, features, metadata.iloc[selected]
+                    )
+                else:
+                    probability = predict_head(head, features)
+                output = (
+                    metadata.iloc[selected]
+                    .drop(
+                        columns=["_shard", "_row", "_expert_reversal", "_expert_age"],
+                        errors="ignore",
+                    )
+                    .copy()
+                )
                 output["fold"] = fold.number
                 output["probability"] = probability
-                output["threshold"] = head.threshold
+                if isinstance(head, SupervisedExpertHead):
+                    output["threshold"] = supervised_thresholds(head, metadata.iloc[selected])
+                else:
+                    output["threshold"] = head.threshold
                 table = pa.Table.from_pandas(output, preserve_index=False)
                 if writer is None:
                     writer = pq.ParquetWriter(temporary, table.schema)
@@ -700,6 +775,9 @@ def walk_forward(config: DownstreamConfig) -> dict[str, Any]:
         "embedding_contract_digest": config.embedding_contract_digest,
         "head_config_digest": head_config_digest,
         "head_config": asdict(config.walk_forward),
+        "supervised_head_config": (
+            asdict(config.supervised_head) if config.supervised_head is not None else None
+        ),
         "convergence_gate_passed": convergence_gate_passed,
         "quality_gate": quality_gate,
         "primary_metrics": ["weighted_log_loss", "weighted_brier"],
@@ -915,11 +993,22 @@ def evaluate_holdout(config: DownstreamConfig, unlock: str) -> dict[str, Any]:
         candidates = candidates.loc[candidates["is_holdout"]].reset_index(drop=True)
         if candidates.empty:
             continue
+        if isinstance(head, SupervisedExpertHead):
+            candidates = annotate_supervised_context(candidates)
         for start, stop, features in iter_symbol_embeddings(candidates, symbol, config, foundation):
-            probability = predict_head(head, features.astype(np.float32))
+            if isinstance(head, SupervisedExpertHead):
+                probability = predict_supervised_expert_head(
+                    head, features.astype(np.float32), candidates.iloc[start:stop]
+                )
+            else:
+                probability = predict_head(head, features.astype(np.float32))
             output = candidates.iloc[start:stop].copy()
+            output = output.drop(columns=["_expert_reversal", "_expert_age"], errors="ignore")
             output["probability"] = probability
-            output["threshold"] = head.threshold
+            if isinstance(head, SupervisedExpertHead):
+                output["threshold"] = supervised_thresholds(head, candidates.iloc[start:stop])
+            else:
+                output["threshold"] = head.threshold
             output_parts.append(output)
             labels.append(output["label"].to_numpy(dtype=np.int8))
             probabilities.append(probability)
@@ -935,7 +1024,11 @@ def evaluate_holdout(config: DownstreamConfig, unlock: str) -> dict[str, Any]:
         "walk_forward_manifest_sha256": sha256_file(root / "walk-forward" / "manifest.json"),
         "head_sha256": last["head"]["sha256"],
         "foundation_weights_sha256": foundation.weights_sha256,
-        "threshold": head.threshold,
+        "threshold": (
+            dict(zip(head.symbols, head.thresholds.tolist(), strict=True))
+            if isinstance(head, SupervisedExpertHead)
+            else head.threshold
+        ),
         "metrics": metrics,
         "predictions": _file_identity(predictions_path),
     }

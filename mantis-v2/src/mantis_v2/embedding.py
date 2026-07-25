@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import numpy as np
 import pandas as pd
@@ -176,11 +176,14 @@ def _contexts(
     std = np.maximum(context.std(axis=2, keepdims=True), 1e-6)
     context = np.clip((context - mean) / std, -10.0, 10.0)
     tensor = torch.from_numpy(context)
-    return F.interpolate(
-        tensor,
-        size=config.foundation.input_length,
-        mode="linear",
-        align_corners=False,
+    return cast(
+        torch.Tensor,
+        F.interpolate(
+            tensor,
+            size=config.foundation.input_length,
+            mode="linear",
+            align_corners=False,
+        ),
     )
 
 

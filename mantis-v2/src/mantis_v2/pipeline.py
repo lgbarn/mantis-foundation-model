@@ -376,7 +376,11 @@ def _run_epoch(
     data_wait_seconds = 0.0
     epoch_started = time.perf_counter()
     steps_per_epoch = config.training.max_steps_per_epoch or len(loader)
-    context = torch.enable_grad() if training else torch.inference_mode()
+    context = (
+        torch.enable_grad()  # type: ignore[no-untyped-call]
+        if training
+        else torch.inference_mode()
+    )
     synchronize_device(device)
     with context:
         iterator = iter(loader)
@@ -712,10 +716,7 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
         if bundled and config.adaptation is not None:
             if global_step >= config.adaptation.total_updates:
                 break
-            if (
-                phase == "warm_start"
-                and warm_start_updates >= config.adaptation.warm_start_updates
-            ):
+            if phase == "warm_start" and warm_start_updates >= config.adaptation.warm_start_updates:
                 transition_parent = _model_state_digest(model)
                 phase = "lora"
                 model.set_adaptation_phase(phase)

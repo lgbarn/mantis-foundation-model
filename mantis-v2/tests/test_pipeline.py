@@ -996,14 +996,22 @@ def test_bundled_adaptation_does_not_early_stop_before_warm_start_budget(
     )
 
     monkeypatch.setattr(pipeline_module, "_model", lambda *_: FakeBundledModel())
-    monkeypatch.setattr(
-        pipeline_module,
-        "_run_epoch",
-        lambda _model, _loader, _config, _device, optimizer, max_steps, **_kwargs: (
+
+    def fake_run_epoch(_model, _loader, _config, _device, optimizer, max_steps, **kwargs):
+        kwargs["telemetry"].update(
+            {
+                "gradient_norm": 0.0,
+                "examples_per_second": 1.0,
+                "updates_per_second": 1.0,
+                "data_wait_seconds": 0.0,
+            }
+        )
+        return (
             {"total": 1.0, "candle": 0.5, "leg": 0.5},
             max_steps if optimizer is not None else 1,
-        ),
-    )
+        )
+
+    monkeypatch.setattr(pipeline_module, "_run_epoch", fake_run_epoch)
 
     result = train(config, process_epoch_limit=2)
 

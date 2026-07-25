@@ -92,9 +92,7 @@ def test_production_rl_config_loads_locked_entry_contract() -> None:
 
 
 def test_direct_lora_3tf_rl_config_binds_completed_embedding_identity() -> None:
-    config = load_rl_config(
-        ROOT / "configs" / "rl-entry-topstep-100k-direct-lora-3tf-v3.toml"
-    )
+    config = load_rl_config(ROOT / "configs" / "rl-entry-topstep-100k-direct-lora-3tf-v3.toml")
 
     assert config.run.name == "rl-entry-topstep-100k-direct-lora-3tf-v3"
     assert config.upstream.source_digest == source_digest(ROOT.parent)

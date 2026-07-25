@@ -395,6 +395,31 @@ failed both primary proper-score gates (weighted log loss 0.695306 and weighted
 Brier 0.251044). Do not run `downstream-simulate` or unlock the holdout for this
 head. A future candidate must use a new run identity and pass the same gates.
 
+The first supervised challenger reuses those immutable embeddings and changes
+only the entry head:
+
+```bash
+uv run mantis-v2 downstream-verify \
+  --config mantis-v2/configs/trend-magic-direct-lora-3tf-supervised-cuda-v1.toml
+uv run mantis-v2 downstream-walk-forward \
+  --config mantis-v2/configs/trend-magic-direct-lora-3tf-supervised-cuda-v1.toml
+```
+
+Trend Magic still owns long/short direction. A 64-unit shared layer feeds
+separate continuation and exact contiguous-reversal heads. A third supervised
+head learns fast stop-out risk from existing causal metadata and applies a soft
+probability penalty. Training and scaling use train rows only; early stopping
+and the target trades-per-symbol-day threshold use validation rows only. The
+portable head is stored as numeric NPZ arrays without pickle.
+
+This initial run is intentionally bounded to 25,000 fit rows per partition, 12
+epochs, and patience 3 so it produces evidence quickly. Do not add Optuna or
+PPO to this experiment. First require the unchanged proper-score gate to beat
+the balanced constant baseline. The current direct-LoRA foundation remains a
+`diagnostic_candidate`, so Topstep simulation and holdout evaluation stay
+locked even if the entry head improves; promotion requires separate foundation
+qualification.
+
 All locations and parameters live in TOML. A command can record a one-off
 scalar override without changing code, for example:
 
@@ -408,7 +433,8 @@ Prepared candidates and predictions are Parquet. MantisV2 embeddings are
 bounded float16 `.npy` shards with paired Parquet metadata. Each stage verifies
 the prior stage's hashes and emits a manifest. The foundation export path and
 trusted safetensors SHA-256 are both explicit config values. The logistic head stores scaler
-and coefficient arrays in `.npz`, never pickle.
+and coefficient arrays in `.npz`, never pickle. The supervised head uses the
+same safe numeric NPZ format.
 
 Head-only reruns may reuse an existing embedding stage without copying or
 rewriting it. Set the manifest path/SHA and producer-config path/SHA fields,

@@ -106,6 +106,21 @@ class WalkForwardConfig:
     embed_manifest_sha256: str
     embed_producer_config_path: Path | None
     embed_producer_config_sha256: str
+    head_kind: Literal["logistic", "supervised_experts"] = "logistic"
+
+
+@dataclass(frozen=True)
+class SupervisedHeadConfig:
+    hidden_width: int
+    epochs: int
+    batch_size: int
+    learning_rate: float
+    weight_decay: float
+    patience: int
+    early_stop_bars: int
+    risk_penalty: float
+    target_trades_per_symbol_day: float
+    device: Literal["cpu", "mps", "cuda"]
 
 
 @dataclass(frozen=True)
@@ -142,9 +157,20 @@ class DownstreamConfig:
     walk_forward: WalkForwardConfig
     topstep: TopstepConfig
     evaluation: DownstreamEvaluationConfig
+    supervised_head: SupervisedHeadConfig | None = None
+
+    def _identity_payload(self) -> dict[str, Any]:
+        payload = asdict(self)
+        if self.walk_forward.head_kind == "logistic":
+            payload["walk_forward"].pop("head_kind")
+        if self.supervised_head is None:
+            payload.pop("supervised_head")
+        return payload
 
     def canonical_json(self) -> str:
-        return json.dumps(asdict(self), default=str, sort_keys=True, separators=(",", ":"))
+        return json.dumps(
+            self._identity_payload(), default=str, sort_keys=True, separators=(",", ":")
+        )
 
     @property
     def strategy_contract(self) -> dict[str, Any] | None:
@@ -174,7 +200,7 @@ class DownstreamConfig:
     @property
     def workflow_digest(self) -> str:
         """Identify reusable artifacts while excluding the holdout unlock controls."""
-        payload = asdict(self)
+        payload = self._identity_payload()
         del payload["evaluation"]
         encoded = json.dumps(payload, default=str, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(encoded.encode()).hexdigest()
@@ -182,7 +208,7 @@ class DownstreamConfig:
     @property
     def legacy_workflow_digest(self) -> str:
         """Reproduce the schema-v1 digest used before reusable head inputs."""
-        payload = asdict(self)
+        payload = self._identity_payload()
         del payload["evaluation"]
         for key in (
             "solver",
@@ -212,6 +238,8 @@ class DownstreamConfig:
     def head_config_digest(self, embed_manifest_sha256: str) -> str:
         """Identify a head fit independently from the reusable embeddings."""
         walk = asdict(self.walk_forward)
+        if self.walk_forward.head_kind == "logistic":
+            walk.pop("head_kind")
         walk.pop("embed_manifest_path")
         walk.pop("embed_manifest_sha256")
         walk.pop("embed_producer_config_path")
@@ -222,6 +250,8 @@ class DownstreamConfig:
             "embed_manifest_sha256": embed_manifest_sha256,
             "embedding_contract_digest": self.embedding_contract_digest,
         }
+        if self.supervised_head is not None:
+            payload["supervised_head"] = asdict(self.supervised_head)
         encoded = json.dumps(payload, default=str, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(encoded.encode()).hexdigest()
 
@@ -290,6 +320,19 @@ _EXPECTED: dict[str, set[str]] = {
         "embed_manifest_sha256",
         "embed_producer_config_path",
         "embed_producer_config_sha256",
+        "head_kind",
+    },
+    "supervised_head": {
+        "hidden_width",
+        "epochs",
+        "batch_size",
+        "learning_rate",
+        "weight_decay",
+        "patience",
+        "early_stop_bars",
+        "risk_penalty",
+        "target_trades_per_symbol_day",
+        "device",
     },
     "topstep": {
         "starting_balance",
@@ -327,6 +370,7 @@ _OPTIONAL: dict[str, set[str]] = {
         "embed_manifest_sha256",
         "embed_producer_config_path",
         "embed_producer_config_sha256",
+        "head_kind",
     },
 }
 
@@ -470,6 +514,7 @@ def load_downstream_config(path: str | Path, overrides: tuple[str, ...] = ()) ->
     walk = _section(raw, "walk_forward")
     topstep = _section(raw, "topstep")
     evaluation = _section(raw, "evaluation")
+    supervised = _section(raw, "supervised_head") if "supervised_head" in raw else None
 
     config = DownstreamConfig(
         run=DownstreamRunConfig(
@@ -590,6 +635,11 @@ def load_downstream_config(path: str | Path, overrides: tuple[str, ...] = ()) ->
                 else None
             ),
             embed_producer_config_sha256=str(walk.get("embed_producer_config_sha256", "")),
+            head_kind=_choice(
+                walk.get("head_kind", "logistic"),
+                "walk_forward.head_kind",
+                {"logistic", "supervised_experts"},
+            ),
         ),
         topstep=TopstepConfig(
             starting_balance=_float(topstep["starting_balance"], "topstep.starting_balance"),
@@ -625,6 +675,40 @@ def load_downstream_config(path: str | Path, overrides: tuple[str, ...] = ()) ->
         evaluation=DownstreamEvaluationConfig(
             allow_holdout=_bool(evaluation["allow_holdout"], "evaluation.allow_holdout"),
             holdout_unlock=str(evaluation["holdout_unlock"]),
+        ),
+        supervised_head=(
+            SupervisedHeadConfig(
+                hidden_width=_int(
+                    supervised["hidden_width"], "supervised_head.hidden_width", minimum=1
+                ),
+                epochs=_int(supervised["epochs"], "supervised_head.epochs", minimum=1),
+                batch_size=_int(supervised["batch_size"], "supervised_head.batch_size", minimum=1),
+                learning_rate=_float(
+                    supervised["learning_rate"],
+                    "supervised_head.learning_rate",
+                    minimum=1e-12,
+                ),
+                weight_decay=_float(supervised["weight_decay"], "supervised_head.weight_decay"),
+                patience=_int(supervised["patience"], "supervised_head.patience", minimum=1),
+                early_stop_bars=_int(
+                    supervised["early_stop_bars"],
+                    "supervised_head.early_stop_bars",
+                    minimum=1,
+                ),
+                risk_penalty=_float(supervised["risk_penalty"], "supervised_head.risk_penalty"),
+                target_trades_per_symbol_day=_float(
+                    supervised["target_trades_per_symbol_day"],
+                    "supervised_head.target_trades_per_symbol_day",
+                    minimum=1e-12,
+                ),
+                device=_choice(
+                    supervised["device"],
+                    "supervised_head.device",
+                    {"cpu", "mps", "cuda"},
+                ),
+            )
+            if supervised is not None
+            else None
         ),
     )
     _validate(config)
@@ -689,6 +773,15 @@ def _strategy_config(raw: dict[str, Any]) -> StrategyConfig | TrendMagicStrategy
 
 
 def _validate(config: DownstreamConfig) -> None:
+    if config.walk_forward.head_kind == "supervised_experts":
+        if config.supervised_head is None:
+            raise ConfigError(
+                "walk_forward.head_kind=supervised_experts requires [supervised_head]"
+            )
+        if not 0.0 <= config.supervised_head.risk_penalty <= 1.0:
+            raise ConfigError("supervised_head.risk_penalty must be in [0, 1]")
+    elif config.supervised_head is not None:
+        raise ConfigError("[supervised_head] requires walk_forward.head_kind=supervised_experts")
     has_manifest_path = config.data.corpus_manifest_path is not None
     has_manifest_sha = bool(config.data.corpus_manifest_sha256)
     if config.data.file_format == "parquet":
