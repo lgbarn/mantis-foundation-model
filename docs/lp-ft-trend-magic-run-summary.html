@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MantisV2 LP-FT Trend Magic Run Summary</title>
+  <style>
+:root {
+  --fg: #1a1a1a;
+  --fg-muted: #57606a;
+  --bg: #ffffff;
+  --bg-soft: #f6f8fa;
+  --border: #d0d7de;
+  --accent: #0969da;
+  --pos: #1a7f37;
+  --neg: #cf222e;
+  --warn: #9a6700;
+  --code-bg: #f6f8fa;
+  --radius: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #e6edf3;
+    --fg-muted: #9198a1;
+    --bg: #0d1117;
+    --bg-soft: #161b22;
+    --border: #30363d;
+    --accent: #4493f8;
+    --pos: #3fb950;
+    --neg: #f85149;
+    --warn: #d29922;
+    --code-bg: #161b22;
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html { font-size: 100%; -webkit-text-size-adjust: 100%; }
+body {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 2.5rem 1.5rem 4rem;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 1rem;
+  line-height: 1.65;
+  color: var(--fg);
+  background: var(--bg);
+}
+h1, h2, h3, h4 { line-height: 1.25; font-weight: 600; margin: 2rem 0 1rem; }
+h1 { font-size: 2rem; padding-bottom: .3rem; border-bottom: 2px solid var(--border); margin-top: 0; }
+h2 { font-size: 1.5rem; padding-bottom: .25rem; border-bottom: 1px solid var(--border); }
+h3 { font-size: 1.25rem; }
+h4 { font-size: 1.05rem; color: var(--fg-muted); }
+p, ul, ol { margin: 0 0 1rem; }
+li { margin: .25rem 0; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+strong { font-weight: 600; }
+hr { border: 0; border-top: 1px solid var(--border); margin: 2rem 0; }
+blockquote {
+  margin: 1rem 0;
+  padding: .5rem 1rem;
+  border-left: 4px solid var(--border);
+  color: var(--fg-muted);
+  background: var(--bg-soft);
+}
+code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: .9em;
+  background: var(--code-bg);
+  padding: .15em .4em;
+  border-radius: 4px;
+}
+pre {
+  background: var(--code-bg);
+  padding: 1rem;
+  border-radius: var(--radius);
+  overflow-x: auto;
+  border: 1px solid var(--border);
+}
+pre code { background: none; padding: 0; }
+table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: .95rem; }
+th, td { padding: .5rem .75rem; border: 1px solid var(--border); text-align: left; }
+th { background: var(--bg-soft); font-weight: 600; }
+tbody tr:nth-child(even) { background: var(--bg-soft); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+img { max-width: 100%; height: auto; }
+svg { max-width: 100%; }
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+.stat {
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+}
+.stat .value { font-size: 1.6rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.stat .label { font-size: .8rem; color: var(--fg-muted); text-transform: uppercase; letter-spacing: .03em; }
+.pos { color: var(--pos); }
+.neg { color: var(--neg); }
+.callout { padding: .75rem 1rem; border-radius: var(--radius); border-left: 4px solid var(--accent); background: var(--bg-soft); margin: 1rem 0; }
+.callout.warn { border-left-color: var(--warn); }
+@media (max-width: 600px) {
+  body { padding: 1.5rem 1rem 3rem; }
+  h1 { font-size: 1.6rem; }
+  h2 { font-size: 1.3rem; }
+}
+@media print {
+  body { max-width: none; color: #000; background: #fff; }
+  a { color: #000; }
+}
+  </style>
+</head>
+<body>
+  <h1>MantisV2 LP-FT Trend Magic Run Summary</h1>
+  <p><strong>Status:</strong> downstream embedding is in progress. Foundation training, validated export, and downstream preparation are complete and verified. This report will be finalized only after the supervised walk-forward and promotion decision finish.</p>
+
+  <div class="stat-grid">
+    <div class="stat"><div class="value">10,000</div><div class="label">Training updates</div></div>
+    <div class="stat"><div class="value">2.485024</div><div class="label">Best validation loss</div></div>
+    <div class="stat"><div class="value">3,259,736</div><div class="label">Prepared states</div></div>
+    <div class="stat"><div class="value">3TF</div><div class="label">1m, 3m, 15m</div></div>
+  </div>
+
+  <div class="callout warn">
+    <strong>Current authorization boundary:</strong> the validated foundation export is a <code>diagnostic_candidate</code>. That role permits embedding and supervised diagnostic walk-forward work, but it prohibits Topstep simulation and sealed-holdout evaluation. Those stages remain fail-closed unless the recorded gates permit promotion.
+  </div>
+
+  <h2>Run identity</h2>
+  <table>
+    <tbody>
+      <tr><th>Foundation config</th><td><code>mantis-v2/configs/nextleg-runpod-cuda-3tf-lp-ft-s42-v1.toml</code></td></tr>
+      <tr><th>Foundation run</th><td><code>mantisv2-foundation-training-first-3tf-lp-ft-s42-v1</code></td></tr>
+      <tr><th>Training source</th><td><code>e2d89cfd33ddfb4d1d9489742554a2fca0131342</code></td></tr>
+      <tr><th>Diagnostic producer config</th><td><code>mantis-v2/configs/trend-magic-lp-ft-3tf-cuda-v1.toml</code></td></tr>
+      <tr><th>Producer source</th><td><code>8d4718c6c1858e1ea14757b4ca29ca2cc31a1d8f</code></td></tr>
+      <tr><th>Producer run</th><td><code>mantisv2-trend-magic-lp-ft-3tf-cuda-v1</code></td></tr>
+      <tr><th>Symbols</th><td>ES, NQ, RTY, YM, GC, CL, ZB</td></tr>
+      <tr><th>Timeframes</th><td>1m, 3m, 15m with decisions on closed 3m state bars</td></tr>
+    </tbody>
+  </table>
+
+  <h2>What was trained</h2>
+  <p>This experiment follows the paper-first LP-FT path, not the older LoRA path. Updates 1 through 2,000 trained the task heads while the pretrained MantisV2 encoder remained frozen. Updates 2,001 through 10,000 then performed full fine-tuning. No LoRA adapters were active. The experiment tests whether an initialized task head reduces destructive early movement of pretrained features before full fine-tuning.</p>
+  <p>The NextLeg foundation objective is not the final trading policy. It combines candle reconstruction and leg regression losses. Trend Magic later owns direction; the supervised entry head learns whether to enter or skip a directionally eligible state. Exit and sizing RL are deliberately a later stage and are not part of this run.</p>
+
+  <h2>Verified foundation results</h2>
+  <table>
+    <thead><tr><th>Artifact or metric</th><th>Verified value</th></tr></thead>
+    <tbody>
+      <tr><td>Epochs</td><td>50</td></tr>
+      <tr><td>Best epoch / step</td><td>44 / 9,000</td></tr>
+      <tr><td>Best validation total</td><td>2.485023617744446</td></tr>
+      <tr><td>Final validation total</td><td>2.4852067172527312</td></tr>
+      <tr><td>Best checkpoint SHA-256</td><td><code>79d4a7bd59baa7802582702353473a880b857931abced4c321d816317156c9a6</code></td></tr>
+      <tr><td>Latest checkpoint SHA-256</td><td><code>0228a61a1d637141fa5c97c0af5b5bf67e07a4c3296bec00687967c3c015081f</code></td></tr>
+      <tr><td>Estimated training Pod cost</td><td>$0.93</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Verified validated export</h2>
+  <p>The best checkpoint passed evaluation and native-to-safetensors parity at <code>atol=1e-5</code> and <code>rtol=1e-4</code>. The evaluation micro total was 2.4850239753723145 and the macro total was 2.4853941908589117.</p>
+  <table>
+    <thead><tr><th>Artifact</th><th>SHA-256</th></tr></thead>
+    <tbody>
+      <tr><td><code>export/model.safetensors</code></td><td><code>1efd62d395f820ebdd0377c386c63105c2d82e11381a63bd2d7947f3bc7c3a12</code></td></tr>
+      <tr><td>Evaluation</td><td><code>acfcdf8aa549ee83ab32b288b38de7c5563fcbd5f1c6809bdf10d161a47850a3</code></td></tr>
+      <tr><td>Export manifest</td><td><code>9f15f56a94455d406b7004dc3faa573852d57e77d96f54dd761fc32854317822</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>Downstream contract</h2>
+  <p>The diagnostic producer is pinned to the validated export manifest and weights hash. It creates examples from every eligible closed 3m Trend Magic state, not flips only. Entries occur at the next eligible open. Labels use a 0.5 ATR(20) initial stop, a strict 3R target, a 120-bar horizon, 0.03R costs, and stop-first collision handling. The reserved holdout remains locked.</p>
+  <p>Preparation completed with 3,259,736 rows across seven candidate Parquet files. The embedding contract digest is <code>818c03cfe419febdbee42c3f3c9c72663672d65cdc4a4077390627d1638bdaa0</code> and the prepared workflow digest is <code>92dd2dfeeb0888494a9708df32c41fe4fc5d33ac68b82869acccb8d9d061a044</code>.</p>
+
+  <h2>Repeatable command sequence</h2>
+  <p>Use an official RunPod PyTorch template. Put the resolved virtual environment on ephemeral <code>/tmp</code>, retain immutable inputs and artifacts on the network volume, and transfer source through a Git bundle created from a stable branch ref. Run the image CUDA smoke before source or corpus work and run the resolved <code>uv</code> CUDA smoke after <code>uv sync --frozen</code>.</p>
+  <pre><code>export UV_PROJECT_ENVIRONMENT=/tmp/mantis-venv
+export CUBLAS_WORKSPACE_CONFIG=:4096:8
+
+uv sync --frozen
+
+uv run --no-sync mantis-v2 train \
+  --config mantis-v2/configs/nextleg-runpod-cuda-3tf-lp-ft-s42-v1.toml
+
+uv run --no-sync mantis-v2 validated-export \
+  --config mantis-v2/configs/nextleg-runpod-cuda-3tf-lp-ft-s42-v1.toml
+
+uv run --no-sync mantis-v2 downstream-verify \
+  --config mantis-v2/configs/trend-magic-lp-ft-3tf-cuda-v1.toml
+
+uv run --no-sync mantis-v2 downstream-prepare \
+  --config mantis-v2/configs/trend-magic-lp-ft-3tf-cuda-v1.toml
+
+uv run --no-sync mantis-v2 downstream-embed \
+  --config mantis-v2/configs/trend-magic-lp-ft-3tf-cuda-v1.toml</code></pre>
+  <p>After embedding, compute and record the new manifest SHA-256. Create a fresh supervised consumer whose manifest path, manifest hash, producer config path, and producer config hash all match the completed producer. Commit that immutable consumer before running <code>downstream-verify</code> and <code>downstream-walk-forward</code>. Never reuse a direct-LoRA manifest or run identity.</p>
+
+  <h2>Resume and failure rules</h2>
+  <ul>
+    <li>Never overwrite an existing run identity and never start a duplicate command against it.</li>
+    <li>Training resumes only from a provenance-checked checkpoint. An atomic temporary checkpoint is not promoted until the write completes.</li>
+    <li>Embedding writes feature, metadata, and pair-receipt shards atomically. Preserve completed pairs after failure and resume only when committed provenance still matches.</li>
+    <li>Do not inspect or rebuild accepted Parquet on a billed GPU. Stage accepted data before GPU provisioning.</li>
+    <li>Terminate every Pod immediately after its verified stage and confirm the provider reports zero active Pods.</li>
+    <li>If a process stops, report the exact error, preserved artifacts, resume condition, and current billed state immediately.</li>
+  </ul>
+
+  <h2>Known caveat and correction</h2>
+  <p>The initial training process emitted CuBLAS and memory-efficient attention nondeterminism warnings because <code>CUBLAS_WORKSPACE_CONFIG</code> was not set before Python started. No result is represented as strictly deterministic. Later CUDA stages set <code>CUBLAS_WORKSPACE_CONFIG=:4096:8</code>; the attention implementation may still remain nondeterministic. This caveat is part of the provenance and any confirmation run must set the variable before training begins.</p>
+  <p>Full corpus provenance requires the <code>market/</code>, <code>raw/</code>, <code>repairs/</code>, and <code>rolls/</code> trees. Earlier preflights failed because raw data was omitted and repair/roll directories were flattened. The failure occurred before checkpoints were created, so no trained state was lost. The corrected bundle preserves the expected structure and hashes.</p>
+
+  <h2>Remaining gates</h2>
+  <ol>
+    <li>Complete the embedding manifest and verify every listed file hash, total row count, feature width, dtype, and finite sampled embeddings.</li>
+    <li>Fit the supervised shared entry head in walk-forward folds with bounded row sampling and early stopping.</li>
+    <li>Require every fold to converge, aggregate weighted log loss below <code>log(2)</code>, and aggregate weighted Brier below 0.25.</li>
+    <li>Record the promotion decision. If any gate fails, stop without simulation or holdout access.</li>
+    <li>Verify committed documentation, a clean pushed branch, deleted monitors, and zero active Pods.</li>
+  </ol>
+</body>
+</html>
