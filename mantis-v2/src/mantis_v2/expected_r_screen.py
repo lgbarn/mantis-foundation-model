@@ -38,7 +38,8 @@ class ExpectedRScreenConfig:
     slippage_ticks: float = 0.0
     session_timezone: str = "America/Chicago"
     session_start: str = "17:00"
-    session_exit: str = "15:10"
+    entry_start: str = "08:30"
+    session_exit: str = "15:00"
     train_start: str = "2023-07-01"
     train_end: str = "2025-07-01"
     validation_start: str = "2025-07-01"
@@ -324,10 +325,10 @@ class ExpectedRScreen:
         return cutoff
 
     def _in_session(self, timestamp: pd.Timestamp, close_timestamp: pd.Timestamp) -> bool:
-        start_hour, start_minute = (int(part) for part in self.config.session_start.split(":"))
+        start_hour, start_minute = (int(part) for part in self.config.entry_start.split(":"))
         end_hour, end_minute = (int(part) for part in self.config.session_exit.split(":"))
         local_time = timestamp.time().replace(tzinfo=None)
-        within_hours = local_time >= time(start_hour, start_minute) or local_time <= time(
+        within_hours = time(start_hour, start_minute) <= local_time <= time(
             end_hour, end_minute
         )
         return bool(within_hours and close_timestamp <= self._session_cutoff(timestamp))

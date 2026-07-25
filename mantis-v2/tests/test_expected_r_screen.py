@@ -69,13 +69,13 @@ def test_short_stop_and_target_use_next_open_and_costs() -> None:
 
 def test_session_exit_uses_last_completed_bar_before_cutoff() -> None:
     frame = _frame(1, [100.5, 100.5], [99.5, 99.5])
-    frame["timestamp"] = pd.date_range("2025-01-02T21:04:00Z", periods=4, freq="3min")
+    frame["timestamp"] = pd.date_range("2025-01-02T20:51:00Z", periods=4, freq="3min")
     result = ExpectedRScreen(
         ExpectedRScreenConfig(window_bars=2, timestamp_semantics="bar_close")
     ).generate_candidates(frame)
 
     assert result.iloc[0]["exit_reason"] == "session"
-    assert result.iloc[0]["outcome_ts"] == pd.Timestamp("2025-01-02T21:10:00Z")
+    assert result.iloc[0]["outcome_ts"] == pd.Timestamp("2025-01-02T21:00:00Z")
 
 
 def test_raw_bar_open_ohlcv_derives_context_and_records_close_decision() -> None:
