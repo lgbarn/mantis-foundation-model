@@ -480,6 +480,25 @@ uv run mantis-v2 downstream-walk-forward \
   --config mantis-v2/configs/trend-magic-direct-lora-3tf-supervised-cuda-v1.toml
 ```
 
+The paper-first LP-FT export has its own diagnostic producer and artifact
+identity. Run its stages separately from the exact committed checkout:
+
+```bash
+uv run mantis-v2 downstream-verify \
+  --config mantis-v2/configs/trend-magic-lp-ft-3tf-cuda-v1.toml
+uv run mantis-v2 downstream-prepare \
+  --config mantis-v2/configs/trend-magic-lp-ft-3tf-cuda-v1.toml
+uv run mantis-v2 downstream-embed \
+  --config mantis-v2/configs/trend-magic-lp-ft-3tf-cuda-v1.toml
+```
+
+Do not reuse the direct-LoRA embed manifest or run name. After LP-FT embedding
+finishes, create a distinct supervised consumer pinned to the new embed
+manifest SHA-256 and the LP-FT producer config SHA-256. Run only
+`downstream-verify` and `downstream-walk-forward` with that consumer. The LP-FT
+foundation role is `diagnostic_candidate`, so neither producer nor consumer may
+run simulation or unlock the holdout.
+
 The config caps each fit partition at 25,000 rows and uses validation early
 stopping so the first result arrives before any search or PPO work. Trend Magic
 owns direction; continuation, reversal, and fast-stop-risk heads only score the
