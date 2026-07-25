@@ -751,7 +751,34 @@ def _fit_arm(
             progress_label=progress_label,
         )
     )
-    result = screen.fit(owned, ridge_predictor=predictor)
+    threshold_selector = (
+        None
+        if comparison_device == "cpu"
+        else lambda rows, scores, desired: _cuda_threshold(
+            rows, scores, desired, progress_label=progress_label
+        )
+    )
+    interval_evaluator = (
+        None
+        if comparison_device == "cpu"
+        else lambda rows, outcomes, predictions, selected, training_mean: (
+            _cuda_paired_intervals(
+                screen,
+                rows,
+                outcomes,
+                predictions,
+                selected,
+                training_mean,
+                progress_label=progress_label,
+            )
+        )
+    )
+    result = screen.fit(
+        owned,
+        ridge_predictor=predictor,
+        threshold_selector=threshold_selector,
+        interval_evaluator=interval_evaluator,
+    )
     decisions = pd.to_datetime(candidates["decision_ts"], utc=True)
     outcomes = pd.to_datetime(candidates["outcome_ts"], utc=True)
     test = screen._date_mask(decisions, outcomes, screen.config.test_start, screen.config.test_end)
@@ -777,6 +804,8 @@ def _comparison_backend(device: Literal["cpu", "cuda"]) -> dict[str, Any]:
     return {
         "device": "cuda",
         "ridge_solver": "torch_weighted_fp64_cholesky",
+        "threshold_solver": "torch_parallel_recurrence",
+        "bootstrap_solver": "torch_weighted_fp64",
         "torch_version": torch.__version__,
         "cuda_version": torch.version.cuda,
         "gpu_name": torch.cuda.get_device_name(),
@@ -824,6 +853,108 @@ def _cuda_ridge_predict(
             values = (chunk - x_mean) @ coefficients + y_mean
             predictions[start:stop] = values.cpu().numpy()
     return predictions
+
+
+def _cuda_threshold(
+    rows: pd.DataFrame,
+    scores: np.ndarray,
+    desired: int,
+    *,
+    progress_label: str,
+) -> float:
+    if not torch.cuda.is_available():
+        raise FrozenExpectedRError("CUDA comparison requested but CUDA is unavailable")
+    print(f"frozen-screen-compare arm={progress_label} state=cuda_threshold", flush=True)
+    device = torch.device("cuda")
+    with torch.inference_mode():
+        thresholds = torch.as_tensor(
+            np.unique(scores), dtype=torch.float64, device=device
+        )
+        score_values = torch.as_tensor(scores, dtype=torch.float64, device=device)
+        entries = torch.as_tensor(
+            rows["entry_index"].to_numpy(dtype=np.int64), device=device
+        )
+        outcomes = torch.as_tensor(
+            rows["outcome_index"].to_numpy(dtype=np.int64), device=device
+        )
+        busy_until = torch.full_like(thresholds, -1, dtype=torch.int64)
+        selected_count = torch.zeros_like(thresholds, dtype=torch.int64)
+        for entry, outcome, score in zip(entries, outcomes, score_values, strict=True):
+            eligible = (entry > busy_until) & (score >= thresholds)
+            selected_count += eligible
+            busy_until = torch.where(eligible, outcome, busy_until)
+        difference = torch.abs(selected_count - desired)
+        best_difference = difference.min()
+        threshold = thresholds[difference == best_difference].max()
+    return float(threshold.cpu())
+
+
+def _cuda_paired_intervals(
+    screen: ExpectedRScreen,
+    rows: pd.DataFrame,
+    outcomes: np.ndarray,
+    predictions: np.ndarray,
+    selected: np.ndarray,
+    training_mean: float,
+    *,
+    progress_label: str,
+) -> dict[str, list[float] | None]:
+    days = screen._session_keys(rows["decision_ts"])
+    unique_days, day_codes = np.unique(days, return_inverse=True)
+    if len(unique_days) < 2 or not selected.any():
+        return {
+            "mse_improvement_over_constant": None,
+            "selected_expectancy": None,
+            "selected_minus_take_all": None,
+        }
+    if not torch.cuda.is_available():
+        raise FrozenExpectedRError("CUDA comparison requested but CUDA is unavailable")
+    print(f"frozen-screen-compare arm={progress_label} state=cuda_bootstrap", flush=True)
+    multiplicities = np.zeros(
+        (screen.config.bootstrap_replicates, len(unique_days)), dtype=np.int16
+    )
+    rng = np.random.default_rng(screen.config.seed)
+    for replicate in range(screen.config.bootstrap_replicates):
+        position = int(rng.integers(len(unique_days)))
+        for _ in range(len(unique_days)):
+            multiplicities[replicate, position] += 1
+            if rng.random() < screen.config.bootstrap_restart_probability:
+                position = int(rng.integers(len(unique_days)))
+            else:
+                position = (position + 1) % len(unique_days)
+    device = torch.device("cuda")
+    with torch.inference_mode():
+        day_weights = torch.as_tensor(multiplicities, dtype=torch.float64, device=device)
+        row_weights = day_weights[
+            :, torch.as_tensor(day_codes, dtype=torch.int64, device=device)
+        ]
+        outcome_values = torch.as_tensor(outcomes, dtype=torch.float64, device=device)
+        prediction_values = torch.as_tensor(predictions, dtype=torch.float64, device=device)
+        selected_values = torch.as_tensor(selected, dtype=torch.float64, device=device)
+        row_count = row_weights.sum(dim=1)
+        selected_weights = row_weights * selected_values
+        selected_count = selected_weights.sum(dim=1)
+        selected_means = (selected_weights @ outcome_values) / selected_count
+        take_all_means = (row_weights @ outcome_values) / row_count
+        differences = selected_means - take_all_means
+        constant_error = (training_mean - outcome_values).square()
+        prediction_error = (prediction_values - outcome_values).square()
+        mse_improvements = (
+            row_weights @ (constant_error - prediction_error)
+        ) / row_count
+
+    def interval(values: torch.Tensor) -> list[float] | None:
+        array = values.cpu().numpy()
+        finite = array[np.isfinite(array)]
+        if not len(finite):
+            return None
+        return [float(value) for value in np.quantile(finite, [0.025, 0.975])]
+
+    return {
+        "mse_improvement_over_constant": interval(mse_improvements),
+        "selected_expectancy": interval(selected_means),
+        "selected_minus_take_all": interval(differences),
+    }
 
 
 def _stationary_expectancy_interval(

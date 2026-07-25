@@ -127,6 +127,11 @@ _CONTEXT_COLUMNS = ("trend_magic_direction", "trend_magic_distance_r", "session_
 RidgePredictor = Callable[
     [np.ndarray, np.ndarray, np.ndarray, np.ndarray, float], np.ndarray
 ]
+ThresholdSelector = Callable[[pd.DataFrame, np.ndarray, int], float]
+IntervalEvaluator = Callable[
+    [pd.DataFrame, np.ndarray, np.ndarray, np.ndarray, float],
+    dict[str, list[float] | None],
+]
 
 
 def _clock(value: str) -> time:
@@ -413,6 +418,8 @@ class ExpectedRScreen:
         candidates: pd.DataFrame,
         *,
         ridge_predictor: RidgePredictor | None = None,
+        threshold_selector: ThresholdSelector | None = None,
+        interval_evaluator: IntervalEvaluator | None = None,
     ) -> dict[str, Any]:
         """Fit train-only scaling/ridge, freeze validation threshold, and evaluate test."""
         features = candidates.attrs.get("raw_features")
@@ -471,19 +478,26 @@ class ExpectedRScreen:
         desired = max(1, round(active_days * self.config.entries_per_active_session))
         validation_rows = candidates.loc[validation]
         validation_scores = predictions[validation]
-        thresholds = np.unique(validation_scores)
-        threshold = float(
-            min(
-                thresholds,
-                key=lambda value: (
-                    abs(
-                        int(self._executed_mask(validation_rows, validation_scores, value).sum())
-                        - desired
+        if threshold_selector is None:
+            thresholds = np.unique(validation_scores)
+            threshold = float(
+                min(
+                    thresholds,
+                    key=lambda value: (
+                        abs(
+                            int(
+                                self._executed_mask(
+                                    validation_rows, validation_scores, value
+                                ).sum()
+                            )
+                            - desired
+                        ),
+                        -value,
                     ),
-                    -value,
-                ),
+                )
             )
-        )
+        else:
+            threshold = threshold_selector(validation_rows, validation_scores, desired)
         test = masks["test"]
         selected = self._executed_mask(candidates.loc[test], predictions[test], threshold)
         test_y = targets[test]
@@ -493,8 +507,15 @@ class ExpectedRScreen:
         constant_mse = float(np.mean((train_mean - test_y) ** 2))
         selected_expectancy = float(selected_y.mean()) if len(selected_y) else None
         take_all = float(test_y.mean())
-        intervals = self._paired_intervals(
-            candidates.loc[test], test_y, predictions[test], selected, train_mean
+        interval_rows = candidates.loc[test]
+        intervals = (
+            self._paired_intervals(
+                interval_rows, test_y, predictions[test], selected, train_mean
+            )
+            if interval_evaluator is None
+            else interval_evaluator(
+                interval_rows, test_y, predictions[test], selected, train_mean
+            )
         )
         buckets = self._score_buckets(predictions[test], test_y)
         gate_parts = {

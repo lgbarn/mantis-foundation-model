@@ -131,8 +131,10 @@ a rerun verifies complete shards and resumes at the first uncommitted row.
 Comparison fits identical fixed-ridge raw and Mantis arms on the same row IDs,
 context, targets, uniqueness weights, threshold policy, and three anchored
 folds. The CUDA comparison fails closed when CUDA is unavailable and uses a
-weighted FP64 Cholesky ridge solve with progress markers; it never falls back to
-CPU. Representative CPU/GPU qualification requires prediction agreement within
+weighted FP64 Cholesky ridge solve, parallel threshold recurrence, and FP64
+bootstrap reductions with progress markers; it never falls back to the CPU
+implementations for those stages. Representative CPU/GPU qualification requires
+prediction agreement within
 0.001 (observed maximum absolute difference: 0.00080863) plus unchanged metric,
 selected-trade, expectancy, and final-selection assertions. This numerical
 solver tolerance does not relax any trading-quality or promotion gate. Mantis

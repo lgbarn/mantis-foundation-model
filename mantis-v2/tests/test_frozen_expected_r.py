@@ -260,6 +260,19 @@ def test_cuda_comparison_matches_cpu_predictions_metrics_and_selection(
             assert cuda_arm["test"]["selected_expectancy"] == pytest.approx(
                 cpu_arm["test"]["selected_expectancy"], abs=1e-12
             )
+            assert cuda_arm["threshold"]["value"] == pytest.approx(
+                cpu_arm["threshold"]["value"], abs=1e-3
+            )
+            assert cuda_arm["gate"] == cpu_arm["gate"]
+            cpu_intervals = cpu_arm["test"]["paired_stationary_day_block_intervals_95"]
+            cuda_intervals = cuda_arm["test"]["paired_stationary_day_block_intervals_95"]
+            assert cuda_intervals.keys() == cpu_intervals.keys()
+            for key, cpu_interval in cpu_intervals.items():
+                cuda_interval = cuda_intervals[key]
+                if cpu_interval is None:
+                    assert cuda_interval is None
+                else:
+                    np.testing.assert_allclose(cuda_interval, cpu_interval, atol=1e-12)
 
 
 def test_config_rejects_unknown_keys(tmp_path: Path) -> None:
