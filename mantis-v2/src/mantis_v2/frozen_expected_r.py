@@ -879,6 +879,11 @@ def _fit_arm(
         ridge_predictor=predictor,
         threshold_selector=threshold_selector,
         interval_evaluator=interval_evaluator,
+        stage_reporter=(
+            None
+            if progress is None
+            else lambda stage: progress.write(stage, fold=fold, arm=arm)
+        ),
     )
     decisions = pd.to_datetime(candidates["decision_ts"], utc=True)
     outcomes = pd.to_datetime(candidates["outcome_ts"], utc=True)

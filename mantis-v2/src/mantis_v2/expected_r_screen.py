@@ -420,6 +420,7 @@ class ExpectedRScreen:
         ridge_predictor: RidgePredictor | None = None,
         threshold_selector: ThresholdSelector | None = None,
         interval_evaluator: IntervalEvaluator | None = None,
+        stage_reporter: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         """Fit train-only scaling/ridge, freeze validation threshold, and evaluate test."""
         features = candidates.attrs.get("raw_features")
@@ -498,8 +499,14 @@ class ExpectedRScreen:
             )
         else:
             threshold = threshold_selector(validation_rows, validation_scores, desired)
+        if stage_reporter is not None:
+            stage_reporter("threshold_complete")
         test = masks["test"]
+        if stage_reporter is not None:
+            stage_reporter("test_selection_started")
         selected = self._executed_mask(candidates.loc[test], predictions[test], threshold)
+        if stage_reporter is not None:
+            stage_reporter("test_selection_complete")
         test_y = targets[test]
         selected_y = test_y[selected]
         train_mean = float(np.average(targets[train], weights=train_weight))
@@ -507,6 +514,8 @@ class ExpectedRScreen:
         constant_mse = float(np.mean((train_mean - test_y) ** 2))
         selected_expectancy = float(selected_y.mean()) if len(selected_y) else None
         take_all = float(test_y.mean())
+        if stage_reporter is not None:
+            stage_reporter("metrics_complete")
         interval_rows = candidates.loc[test]
         intervals = (
             self._paired_intervals(
@@ -517,7 +526,11 @@ class ExpectedRScreen:
                 interval_rows, test_y, predictions[test], selected, train_mean
             )
         )
+        if stage_reporter is not None:
+            stage_reporter("intervals_complete")
         buckets = self._score_buckets(predictions[test], test_y)
+        if stage_reporter is not None:
+            stage_reporter("buckets_complete")
         gate_parts = {
             "mse_beats_constant": mse < constant_mse,
             "expectancy_positive": bool(
@@ -538,6 +551,8 @@ class ExpectedRScreen:
                 candidates["row_id"], predictions, targets, weights, strict=True
             )
         ]
+        if stage_reporter is not None:
+            stage_reporter("rows_complete")
         source_sha = source_digest(Path(__file__).resolve().parents[3])
         artifact: dict[str, Any] = {
             "schema_version": 1,
