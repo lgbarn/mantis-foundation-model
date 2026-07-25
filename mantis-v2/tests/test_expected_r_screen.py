@@ -1,16 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
+from mantis_v2 import expected_r_screen
 from mantis_v2.expected_r_screen import (
     ExpectedRScreen,
     ExpectedRScreenConfig,
     ExpectedRScreenError,
 )
+from mantis_v2.rl_provenance import source_digest
 
 
 def _frame(direction: int, highs: list[float], lows: list[float]) -> pd.DataFrame:
@@ -38,6 +39,7 @@ def test_candidate_timestamps_are_causal_and_long_trail_matches_oracle() -> None
     config = ExpectedRScreenConfig(
         window_bars=2,
         round_trip_commission=1.0,
+        slippage_ticks=0.0,
         point_value=2.0,
         timestamp_semantics="bar_close",
     )
@@ -46,7 +48,7 @@ def test_candidate_timestamps_are_causal_and_long_trail_matches_oracle() -> None
 
     row = candidates.iloc[0]
     assert row["decision_ts"] == frame.iloc[1]["timestamp"]
-    assert row["entry_ts"] == frame.iloc[2]["timestamp"]
+    assert row["entry_ts"] == frame.iloc[1]["timestamp"]
     assert row["outcome_ts"] == frame.iloc[3]["timestamp"]
     assert row["gross_r"] == 1.75
     assert row["net_r"] == 1.25
@@ -55,6 +57,7 @@ def test_candidate_timestamps_are_causal_and_long_trail_matches_oracle() -> None
 def test_short_stop_and_target_use_next_open_and_costs() -> None:
     config = ExpectedRScreenConfig(
         window_bars=2,
+        round_trip_commission=0.0,
         slippage_ticks=1,
         tick_size=0.25,
         timestamp_semantics="bar_close",
@@ -70,6 +73,18 @@ def test_short_stop_and_target_use_next_open_and_costs() -> None:
     assert stopped["net_r"] == -1.25
     assert won["gross_r"] == 3.0
     assert won["net_r"] == 2.75
+
+
+def test_default_costs_match_one_mnq_contract() -> None:
+    candidate = (
+        ExpectedRScreen(ExpectedRScreenConfig(window_bars=2, timestamp_semantics="bar_close"))
+        .generate_candidates(_frame(1, [103.0], [100.0]))
+        .iloc[0]
+    )
+
+    expected_cost_r = 1.22 / 2.0 + 2 * 0.25
+    assert candidate["cost_r"] == pytest.approx(expected_cost_r)
+    assert candidate["net_r"] == pytest.approx(3.0 - expected_cost_r)
 
 
 def test_session_exit_uses_last_completed_bar_before_cutoff() -> None:
@@ -88,6 +103,22 @@ def test_entry_candidates_are_restricted_to_rth() -> None:
     frame["timestamp"] = pd.date_range("2025-01-03T02:00:00Z", periods=4, freq="3min")
 
     with pytest.raises(ExpectedRScreenError, match="no eligible candidates"):
+        ExpectedRScreen(ExpectedRScreenConfig(window_bars=2)).generate_candidates(frame)
+
+
+def test_non_three_minute_input_is_rejected() -> None:
+    frame = _frame(1, [100.5, 100.5], [99.5, 99.5])
+    frame["timestamp"] = pd.date_range("2025-01-02T14:30:00Z", periods=4, freq="1h")
+
+    with pytest.raises(ExpectedRScreenError, match="3-minute"):
+        ExpectedRScreen(ExpectedRScreenConfig(window_bars=2)).generate_candidates(frame)
+
+
+def test_sealed_2026_rows_are_rejected_before_labeling() -> None:
+    frame = _frame(1, [100.5, 100.5], [99.5, 99.5])
+    frame["timestamp"] = pd.date_range("2026-01-02T14:30:00Z", periods=4, freq="3min")
+
+    with pytest.raises(ExpectedRScreenError, match="sealed holdout"):
         ExpectedRScreen(ExpectedRScreenConfig(window_bars=2)).generate_candidates(frame)
 
 
@@ -154,10 +185,38 @@ def test_trading_session_keys_keep_overnight_rows_in_one_chicago_session() -> No
     )
 
 
+def test_average_uniqueness_matches_overlap_oracle() -> None:
+    starts = np.array([0, 1, 3])
+    ends = np.array([2, 3, 3])
+
+    weights = expected_r_screen._average_uniqueness(starts, ends)
+
+    np.testing.assert_allclose(weights, [2.0 / 3.0, 0.5, 0.5])
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"round_trip_commission": -1.0}, "execution costs"),
+        ({"bootstrap_replicates": 0}, "bootstrap_replicates"),
+        ({"timeframe_minutes": 5}, "timeframe_minutes"),
+        ({"atr_period": 0}, "indicator periods"),
+    ],
+)
+def test_invalid_screen_contract_is_rejected(changes: dict[str, object], message: str) -> None:
+    with pytest.raises(ExpectedRScreenError, match=message):
+        ExpectedRScreenConfig(**changes)
+
+
 def test_fit_retains_rows_freezes_threshold_and_reports_gate(tmp_path: Path) -> None:
     rng = np.random.default_rng(7)
-    rows = 512 + 300
-    timestamps = pd.date_range("2023-07-03T14:30:00Z", periods=rows, freq="1h")
+    blocks = (
+        pd.date_range("2023-07-03T14:30:00Z", periods=600, freq="3min"),
+        pd.date_range("2025-07-02T14:30:00Z", periods=250, freq="3min"),
+        pd.date_range("2025-10-02T14:30:00Z", periods=250, freq="3min"),
+    )
+    timestamps = blocks[0].append(blocks[1:])
+    rows = len(timestamps)
     close = 100.0 + rng.normal(0.0, 0.1, rows).cumsum()
     frame = pd.DataFrame(
         {
@@ -172,16 +231,7 @@ def test_fit_retains_rows_freezes_threshold_and_reports_gate(tmp_path: Path) -> 
             "risk_points": np.ones(rows),
         }
     )
-    # Exercise the chronology without needing multi-year fixture volume.
-    config = replace(
-        ExpectedRScreenConfig(window_bars=512, timestamp_semantics="bar_close"),
-        train_start="2023-07-24",
-        train_end="2023-07-27",
-        validation_start="2023-07-27",
-        validation_end="2023-07-30",
-        test_start="2023-07-30",
-        test_end="2023-08-07",
-    )
+    config = ExpectedRScreenConfig(window_bars=512, timestamp_semantics="bar_close")
     screen = ExpectedRScreen(config)
     candidates = screen.generate_candidates(frame)
     artifact_path = tmp_path / "screen.json"
@@ -192,6 +242,7 @@ def test_fit_retains_rows_freezes_threshold_and_reports_gate(tmp_path: Path) -> 
     assert artifact["splits"]["test"]["threshold"] == artifact["threshold"]["value"]
     assert artifact["features"]["window_bars"] == 512
     assert artifact["features"]["regularization"] == config.ridge_alpha
+    assert artifact["features"]["dtype"] == "float32"
     assert artifact["rows"]["count"] == len(candidates)
     assert artifact_path.is_file()
     assert set(artifact["gate"]) == {
@@ -200,3 +251,26 @@ def test_fit_retains_rows_freezes_threshold_and_reports_gate(tmp_path: Path) -> 
         "expectancy_positive",
         "expectancy_beats_take_all",
     }
+    assert artifact["source_sha256"] == source_digest(Path(__file__).resolve().parents[2])
+
+    with pytest.raises(ExpectedRScreenError, match="already exists"):
+        screen.run(frame, artifact_path)
+
+
+def test_stationary_intervals_are_seeded_and_report_expected_differences() -> None:
+    rows = pd.DataFrame(
+        {"decision_ts": pd.to_datetime(["2025-10-02T14:30:00Z", "2025-10-03T14:30:00Z"])}
+    )
+    outcomes = np.array([1.0, -1.0])
+    predictions = np.array([0.75, -0.75])
+    selected = np.array([True, False])
+    screen = ExpectedRScreen(ExpectedRScreenConfig(bootstrap_replicates=20, seed=11))
+
+    first = screen._paired_intervals(rows, outcomes, predictions, selected, 0.0)
+    second = screen._paired_intervals(rows, outcomes, predictions, selected, 0.0)
+
+    assert first == second
+    assert first["selected_expectancy"] == [1.0, 1.0]
+    difference = first["selected_minus_take_all"]
+    assert difference is not None
+    assert difference[0] >= 0.0

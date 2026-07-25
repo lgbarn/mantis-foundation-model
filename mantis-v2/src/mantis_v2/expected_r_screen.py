@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import Ridge
 
+from mantis_v2.rl_provenance import source_digest
 from mantis_v2.strategy import trend_magic_state, wilder_atr
 
 
@@ -34,8 +35,8 @@ class ExpectedRScreenConfig:
     horizon_bars: int = 120
     point_value: float = 2.0
     tick_size: float = 0.25
-    round_trip_commission: float = 0.0
-    slippage_ticks: float = 0.0
+    round_trip_commission: float = 1.22
+    slippage_ticks: float = 2.0
     session_timezone: str = "America/Chicago"
     session_start: str = "17:00"
     entry_start: str = "08:30"
@@ -81,10 +82,57 @@ class ExpectedRScreenConfig:
             raise ExpectedRScreenError("target_r must exceed trail_activation_r")
         if not 0 < self.bootstrap_restart_probability <= 1:
             raise ExpectedRScreenError("bootstrap_restart_probability must be in (0, 1]")
+        if self.bootstrap_replicates < 1:
+            raise ExpectedRScreenError("bootstrap_replicates must be >= 1")
+        if self.timeframe_minutes != 3:
+            raise ExpectedRScreenError("timeframe_minutes must be 3")
+        periods = (
+            self.atr_period,
+            self.cci_period,
+            self.trend_magic_atr_period,
+        )
+        if not all(period >= 1 for period in periods):
+            raise ExpectedRScreenError("indicator periods must be >= 1")
+        costs = (self.round_trip_commission, self.slippage_ticks)
+        if not all(np.isfinite(value) and value >= 0 for value in costs):
+            raise ExpectedRScreenError("execution costs must be finite and nonnegative")
+        split_dates = tuple(
+            pd.Timestamp(value)
+            for value in (
+                self.train_start,
+                self.train_end,
+                self.validation_start,
+                self.validation_end,
+                self.test_start,
+                self.test_end,
+            )
+        )
+        train_start, train_end, validation_start, validation_end, test_start, test_end = split_dates
+        if not (
+            train_start < train_end
+            and train_end <= validation_start < validation_end
+            and validation_end <= test_start < test_end
+        ):
+            raise ExpectedRScreenError("chronological split boundaries must be strictly ordered")
+        entry_start = _clock(self.entry_start)
+        session_exit = _clock(self.session_exit)
+        _clock(self.session_start)
+        if entry_start >= session_exit:
+            raise ExpectedRScreenError("entry_start must precede session_exit")
 
 
 _MARKET_COLUMNS = ("open", "high", "low", "close", "volume")
 _CONTEXT_COLUMNS = ("trend_magic_direction", "trend_magic_distance_r", "session_minute")
+
+
+def _clock(value: str) -> time:
+    try:
+        parsed = time.fromisoformat(value)
+    except ValueError as error:
+        raise ExpectedRScreenError(f"invalid session time: {value}") from error
+    if parsed.second or parsed.microsecond or parsed.tzinfo is not None:
+        raise ExpectedRScreenError(f"session time must be HH:MM: {value}")
+    return parsed
 
 
 def _sha256_json(payload: Any) -> str:
@@ -119,13 +167,29 @@ class ExpectedRScreen:
             raise ExpectedRScreenError(f"market frame missing columns: {', '.join(missing)}")
         data = frame.reset_index(drop=True).copy()
         timestamps = pd.to_datetime(data["timestamp"], utc=True, errors="raise")
+        bar_duration = pd.to_timedelta(self.config.timeframe_minutes, unit="min")
+        open_timestamps = (
+            timestamps
+            if self.config.timestamp_semantics == "bar_open"
+            else timestamps - bar_duration
+        )
         close_timestamps = (
-            timestamps + pd.to_timedelta(self.config.timeframe_minutes, unit="min")
+            timestamps + bar_duration
             if self.config.timestamp_semantics == "bar_open"
             else timestamps
         )
         if not timestamps.is_monotonic_increasing or timestamps.duplicated().any():
             raise ExpectedRScreenError("timestamps must be sorted and unique")
+        deltas = timestamps.diff().dropna().dt.total_seconds().to_numpy()
+        expected_seconds = self.config.timeframe_minutes * 60
+        if len(deltas) and (
+            float(deltas.min()) != expected_seconds
+            or not np.all(np.remainder(deltas, expected_seconds) == 0)
+        ):
+            raise ExpectedRScreenError("market frame must use 3-minute bars")
+        sealed_start = pd.Timestamp(self.config.test_end, tz="UTC")
+        if bool((close_timestamps >= sealed_start).any()):
+            raise ExpectedRScreenError("market frame reaches the sealed holdout")
         market = data.loc[:, _MARKET_COLUMNS]
         if not np.isfinite(market.to_numpy(dtype=np.float64)).all():
             raise ExpectedRScreenError("market values must be finite")
@@ -156,7 +220,7 @@ class ExpectedRScreen:
         for decision_index in range(first, len(data) - 1):
             side = int(direction[decision_index])
             risk = float(data.at[decision_index, "risk_points"])
-            entry_local = timestamps.iloc[decision_index + 1].tz_convert(
+            entry_local = open_timestamps.iloc[decision_index + 1].tz_convert(
                 self.config.session_timezone
             )
             entry_close_local = close_timestamps.iloc[decision_index + 1].tz_convert(
@@ -172,7 +236,7 @@ class ExpectedRScreen:
                 continue
             outcome = self._resolve(
                 data,
-                timestamps,
+                open_timestamps,
                 close_timestamps,
                 decision_index,
                 side,
@@ -181,7 +245,7 @@ class ExpectedRScreen:
             if outcome["exit_reason"] == "truncated":
                 continue
             window = data.loc[decision_index - self.config.window_bars + 1 : decision_index]
-            raw = window.loc[:, _MARKET_COLUMNS].to_numpy(dtype=np.float64).reshape(-1)
+            raw = window.loc[:, _MARKET_COLUMNS].to_numpy(dtype=np.float32).reshape(-1)
             local = timestamps.iloc[decision_index].tz_convert(self.config.session_timezone)
             context = np.array(
                 [
@@ -193,7 +257,7 @@ class ExpectedRScreen:
                     / risk,
                     (local.hour * 60 + local.minute) / 1440.0,
                 ],
-                dtype=np.float64,
+                dtype=np.float32,
             )
             features.append(np.concatenate((raw, context)))
             rows.append(
@@ -205,7 +269,7 @@ class ExpectedRScreen:
                     "entry_index": decision_index + 1,
                     "outcome_index": outcome["outcome_index"],
                     "decision_ts": close_timestamps.iloc[decision_index],
-                    "entry_ts": timestamps.iloc[decision_index + 1],
+                    "entry_ts": open_timestamps.iloc[decision_index + 1],
                     "outcome_ts": close_timestamps.iloc[outcome["outcome_index"]],
                     "direction": side,
                     "entry_price": float(data.at[decision_index + 1, "open"]),
@@ -220,7 +284,7 @@ class ExpectedRScreen:
             candidates["entry_index"].to_numpy(dtype=np.int64),
             candidates["outcome_index"].to_numpy(dtype=np.int64),
         )
-        candidates.attrs["raw_features"] = np.vstack(features)
+        candidates.attrs["raw_features"] = np.asarray(features, dtype=np.float32)
         candidates.attrs["data_sha256"] = _sha256_json(
             {
                 "columns": [*sorted(required), *sorted(context_columns)],
@@ -236,14 +300,14 @@ class ExpectedRScreen:
     def _resolve(
         self,
         frame: pd.DataFrame,
-        timestamps: pd.Series,
+        open_timestamps: pd.Series,
         close_timestamps: pd.Series,
         decision_index: int,
         side: int,
         risk: float,
     ) -> dict[str, Any]:
         entry_index = decision_index + 1
-        entry_local = timestamps.iloc[entry_index].tz_convert(
+        entry_local = open_timestamps.iloc[entry_index].tz_convert(
             ZoneInfo(self.config.session_timezone)
         )
         entry = float(frame.at[entry_index, "open"])
@@ -255,14 +319,7 @@ class ExpectedRScreen:
         exit_price = float(frame.at[end, "close"])
         reason = "horizon" if end == entry_index + self.config.horizon_bars - 1 else "truncated"
         outcome_index = end
-        cutoff_hour, cutoff_minute = (int(part) for part in self.config.session_exit.split(":"))
-        cutoff = time(cutoff_hour, cutoff_minute)
-        cutoff_local = entry_local.replace(
-            hour=cutoff.hour, minute=cutoff.minute, second=0, microsecond=0
-        )
-        start_hour, start_minute = (int(part) for part in self.config.session_start.split(":"))
-        if entry_local.time().replace(tzinfo=None) >= time(start_hour, start_minute):
-            cutoff_local += pd.offsets.Day(1)
+        cutoff_local = self._session_cutoff(entry_local)
         for index in range(entry_index, end + 1):
             local_close = close_timestamps.iloc[index].tz_convert(
                 ZoneInfo(self.config.session_timezone)
@@ -311,32 +368,35 @@ class ExpectedRScreen:
         }
 
     def _session_cutoff(self, timestamp: pd.Timestamp) -> pd.Timestamp:
-        start_hour, start_minute = (int(part) for part in self.config.session_start.split(":"))
-        end_hour, end_minute = (int(part) for part in self.config.session_exit.split(":"))
+        start = _clock(self.config.session_start)
+        end = _clock(self.config.session_exit)
         local_time = timestamp.time().replace(tzinfo=None)
         cutoff = timestamp.replace(
-            hour=end_hour,
-            minute=end_minute,
+            hour=end.hour,
+            minute=end.minute,
             second=0,
             microsecond=0,
         )
-        if local_time >= time(start_hour, start_minute):
+        if local_time >= start:
             cutoff += pd.offsets.Day(1)
         return cutoff
 
     def _in_session(self, timestamp: pd.Timestamp, close_timestamp: pd.Timestamp) -> bool:
-        start_hour, start_minute = (int(part) for part in self.config.entry_start.split(":"))
-        end_hour, end_minute = (int(part) for part in self.config.session_exit.split(":"))
+        start = _clock(self.config.entry_start)
+        end = _clock(self.config.session_exit)
         local_time = timestamp.time().replace(tzinfo=None)
-        within_hours = time(start_hour, start_minute) <= local_time <= time(end_hour, end_minute)
+        within_hours = start <= local_time <= end
         return bool(within_hours and close_timestamp <= self._session_cutoff(timestamp))
 
     def run(self, frame: pd.DataFrame, artifact_path: Path) -> dict[str, Any]:
         """Generate, fit, and atomically publish the pass or stopped artifact."""
+        temporary = artifact_path.with_suffix(artifact_path.suffix + ".tmp")
+        if artifact_path.exists() or temporary.exists():
+            raise ExpectedRScreenError(f"artifact path already exists: {artifact_path}")
         artifact = self.fit(self.generate_candidates(frame))
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = artifact_path.with_suffix(artifact_path.suffix + ".tmp")
-        temporary.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n")
+        with temporary.open("x") as stream:
+            stream.write(json.dumps(artifact, indent=2, sort_keys=True) + "\n")
         temporary.replace(artifact_path)
         return artifact
 
@@ -372,11 +432,16 @@ class ExpectedRScreen:
                 candidates.loc[mask, "outcome_index"].to_numpy(dtype=np.int64),
             )
         train_weight = weights[train]
-        mean = np.average(features[train], axis=0, weights=train_weight)
-        variance = np.average((features[train] - mean) ** 2, axis=0, weights=train_weight)
+        mean, variance = self._weighted_stats(features, train, train_weight)
         scale = np.sqrt(variance)
         scale[scale == 0] = 1.0
-        scaled = (features - mean) / scale
+        mean32 = mean.astype(np.float32)
+        scale32 = scale.astype(np.float32)
+        for start in range(0, len(features), 4096):
+            chunk = features[start : start + 4096]
+            chunk -= mean32
+            chunk /= scale32
+        scaled = features
         model = Ridge(alpha=self.config.ridge_alpha, fit_intercept=True, solver="lsqr")
         targets = candidates["net_r"].to_numpy(dtype=np.float64)
         model.fit(scaled[train], targets[train], sample_weight=train_weight)
@@ -428,7 +493,7 @@ class ExpectedRScreen:
                 candidates["row_id"], predictions, targets, weights, strict=True
             )
         ]
-        source_sha = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+        source_sha = source_digest(Path(__file__).resolve().parents[3])
         artifact: dict[str, Any] = {
             "schema_version": 1,
             "status": "passed" if all(gate_parts.values()) else "stopped",
@@ -440,6 +505,7 @@ class ExpectedRScreen:
                 "market_columns": list(_MARKET_COLUMNS),
                 "context_columns": list(_CONTEXT_COLUMNS),
                 "regularization": self.config.ridge_alpha,
+                "dtype": str(features.dtype),
                 "scaler_fit": "train_only_weighted",
             },
             "rows": {"count": len(candidates), "values": rows_payload},
@@ -469,6 +535,26 @@ class ExpectedRScreen:
         }
         artifact["artifact_sha256"] = _sha256_json(artifact)
         return artifact
+
+    @staticmethod
+    def _weighted_stats(
+        features: np.ndarray,
+        train_mask: np.ndarray,
+        weights: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        indices = np.flatnonzero(train_mask)
+        total_weight = float(weights.sum())
+        feature_sum = np.zeros(features.shape[1], dtype=np.float64)
+        square_sum = np.zeros(features.shape[1], dtype=np.float64)
+        for start in range(0, len(indices), 1024):
+            selected = indices[start : start + 1024]
+            chunk = features[selected]
+            chunk_weights = weights[start : start + len(selected), np.newaxis]
+            feature_sum += np.sum(chunk * chunk_weights, axis=0, dtype=np.float64)
+            square_sum += np.sum(chunk * chunk * chunk_weights, axis=0, dtype=np.float64)
+        mean = feature_sum / total_weight
+        variance = np.maximum(square_sum / total_weight - mean * mean, 0.0)
+        return mean, variance
 
     @staticmethod
     def _date_mask(
