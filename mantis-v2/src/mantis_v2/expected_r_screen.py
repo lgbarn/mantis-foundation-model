@@ -426,6 +426,14 @@ class ExpectedRScreen:
         features = candidates.attrs.get("raw_features")
         if not isinstance(features, np.ndarray) or len(features) != len(candidates):
             raise ExpectedRScreenError("candidates are missing bound raw-window features")
+        original_attrs = candidates.attrs.copy()
+        try:
+            del candidates.attrs["raw_features"]
+            working_candidates = candidates.copy(deep=False)
+        finally:
+            candidates.attrs.clear()
+            candidates.attrs.update(original_attrs)
+        candidates = working_candidates
         decision = pd.to_datetime(candidates["decision_ts"], utc=True)
         outcome = pd.to_datetime(candidates["outcome_ts"], utc=True)
         masks = {

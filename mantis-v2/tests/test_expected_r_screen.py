@@ -353,6 +353,10 @@ def test_fit_retains_rows_freezes_threshold_and_reports_gate(tmp_path: Path) -> 
 
 
 def test_empty_test_selection_emits_strict_json_null() -> None:
+    class FeatureArray(np.ndarray):
+        def __deepcopy__(self, _memo: object) -> FeatureArray:
+            raise AssertionError("feature matrix must not be copied with DataFrame attrs")
+
     timestamps = pd.to_datetime(
         [
             "2024-01-02T15:00:00Z",
@@ -374,15 +378,17 @@ def test_empty_test_selection_emits_strict_json_null() -> None:
             "net_r": np.array([0.0, 1.0, 10.0, 11.0, -10.0, -11.0]),
         }
     )
-    candidates.attrs["raw_features"] = np.array(
+    features = np.array(
         [[0.0], [1.0], [10.0], [11.0], [-10.0], [-11.0]], dtype=np.float32
-    )
+    ).view(FeatureArray)
+    candidates.attrs["raw_features"] = features
     candidates.attrs["data_sha256"] = "fixture"
 
     artifact = ExpectedRScreen().fit(candidates)
 
     assert artifact["test"]["selected_trades"] == 0
     assert artifact["test"]["selected_expectancy"] is None
+    assert candidates.attrs["raw_features"] is features
     json.dumps(artifact, allow_nan=False)
 
 
