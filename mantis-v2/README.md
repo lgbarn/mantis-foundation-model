@@ -134,11 +134,12 @@ folds. The CUDA comparison fails closed when CUDA is unavailable and uses a
 weighted FP64 Cholesky ridge solve, parallel threshold recurrence, and FP64
 bootstrap reductions with progress markers; it never falls back to the CPU
 implementations for those stages. Representative CPU/GPU qualification requires
-prediction agreement within
-0.001 (observed maximum absolute difference: 0.00080863) plus unchanged metric,
-selected-trade, expectancy, and final-selection assertions. This numerical
-solver tolerance does not relax any trading-quality or promotion gate. Mantis
-is selected only with at least two fold wins and a positive pooled
+prediction and prediction-derived interval agreement within 0.001 (observed
+maximum absolute differences: 0.00080863 and 0.000077325), MSE agreement within
+1e-4 relative or 1e-6 absolute, and exact selected-trade, outcome-only interval,
+expectancy, gate, status, and final-selection assertions. These numerical solver
+tolerances do not relax any trading-quality or promotion gate. Mantis is selected
+only with at least two fold wins and a positive pooled
 selected-expectancy interval. Otherwise qualifying raw is selected; if neither
 qualifies the durable result is `stopped`. TensorBoard, fine-tuning, PPO, and the
 sealed 2026 holdout are not part of this stage.

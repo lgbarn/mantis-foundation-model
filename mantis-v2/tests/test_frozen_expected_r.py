@@ -272,7 +272,10 @@ def test_cuda_comparison_matches_cpu_predictions_metrics_and_selection(
                 if cpu_interval is None:
                     assert cuda_interval is None
                 else:
-                    np.testing.assert_allclose(cuda_interval, cpu_interval, atol=1e-12)
+                    tolerance = 1e-3 if key == "mse_improvement_over_constant" else 1e-12
+                    np.testing.assert_allclose(
+                        cuda_interval, cpu_interval, atol=tolerance
+                    )
 
 
 def test_config_rejects_unknown_keys(tmp_path: Path) -> None:
