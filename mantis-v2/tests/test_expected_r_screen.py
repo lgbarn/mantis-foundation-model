@@ -5,7 +5,12 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from mantis_v2.expected_r_screen import ExpectedRScreen, ExpectedRScreenConfig
+import pytest
+from mantis_v2.expected_r_screen import (
+    ExpectedRScreen,
+    ExpectedRScreenConfig,
+    ExpectedRScreenError,
+)
 
 
 def _frame(direction: int, highs: list[float], lows: list[float]) -> pd.DataFrame:
@@ -76,6 +81,14 @@ def test_session_exit_uses_last_completed_bar_before_cutoff() -> None:
 
     assert result.iloc[0]["exit_reason"] == "session"
     assert result.iloc[0]["outcome_ts"] == pd.Timestamp("2025-01-02T21:00:00Z")
+
+
+def test_entry_candidates_are_restricted_to_rth() -> None:
+    frame = _frame(1, [100.5, 100.5], [99.5, 99.5])
+    frame["timestamp"] = pd.date_range("2025-01-03T02:00:00Z", periods=4, freq="3min")
+
+    with pytest.raises(ExpectedRScreenError, match="no eligible candidates"):
+        ExpectedRScreen(ExpectedRScreenConfig(window_bars=2)).generate_candidates(frame)
 
 
 def test_raw_bar_open_ohlcv_derives_context_and_records_close_decision() -> None:
