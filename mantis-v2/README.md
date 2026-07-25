@@ -162,11 +162,16 @@ installs no LoRA adapters and does not repeat warm-up in the second phase.
 Run the candidate on a prepared CUDA Pod in this order:
 
 ```bash
+export CUBLAS_WORKSPACE_CONFIG=:4096:8
 uv run mantis-v2 train \
   --config mantis-v2/configs/nextleg-runpod-cuda-3tf-lp-ft-s42-v1.toml
 uv run mantis-v2 validated-export \
   --config mantis-v2/configs/nextleg-runpod-cuda-3tf-lp-ft-s42-v1.toml
 ```
+
+The environment variable must be set before Python starts. CUDA
+memory-efficient attention can still be nondeterministic; retain that warning
+as provenance unless the attention implementation is separately qualified.
 
 The first command is resumable across the head-to-fine-tune transition. Export
 accepts only the validation-selected fine-tune-phase checkpoint and remains a

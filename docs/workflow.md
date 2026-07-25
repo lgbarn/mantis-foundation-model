@@ -206,11 +206,17 @@ cosine decay across its exact 8,000-update phase budget.
 On the supported RunPod image:
 
 ```bash
+export CUBLAS_WORKSPACE_CONFIG=:4096:8
 uv run mantis-v2 train \
   --config mantis-v2/configs/nextleg-runpod-cuda-3tf-lp-ft-s42-v1.toml
 uv run mantis-v2 validated-export \
   --config mantis-v2/configs/nextleg-runpod-cuda-3tf-lp-ft-s42-v1.toml
 ```
+
+Set `CUBLAS_WORKSPACE_CONFIG` before the Python process starts. PyTorch may still
+report that memory-efficient attention is nondeterministic; preserve that
+warning in the run provenance and do not describe a CUDA run as bitwise
+reproducible unless the intended attention path has been separately qualified.
 
 Do not add LoRA to this run. Do not apply temperature scaling to the NextLeg
 regression outputs. Downstream Trend Magic classification remains a later,
