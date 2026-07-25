@@ -396,7 +396,7 @@ class ExpectedRScreen:
         artifact = self.fit(self.generate_candidates(frame))
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
         with temporary.open("x") as stream:
-            stream.write(json.dumps(artifact, indent=2, sort_keys=True) + "\n")
+            stream.write(json.dumps(artifact, allow_nan=False, indent=2, sort_keys=True) + "\n")
         temporary.replace(artifact_path)
         return artifact
 
@@ -437,11 +437,11 @@ class ExpectedRScreen:
         scale[scale == 0] = 1.0
         mean32 = mean.astype(np.float32)
         scale32 = scale.astype(np.float32)
-        for start in range(0, len(features), 4096):
-            chunk = features[start : start + 4096]
+        scaled = features.copy()
+        for start in range(0, len(scaled), 4096):
+            chunk = scaled[start : start + 4096]
             chunk -= mean32
             chunk /= scale32
-        scaled = features
         model = Ridge(alpha=self.config.ridge_alpha, fit_intercept=True, solver="lsqr")
         targets = candidates["net_r"].to_numpy(dtype=np.float64)
         model.fit(scaled[train], targets[train], sample_weight=train_weight)
@@ -471,7 +471,7 @@ class ExpectedRScreen:
         train_mean = float(np.average(targets[train], weights=train_weight))
         mse = float(np.mean((predictions[test] - test_y) ** 2))
         constant_mse = float(np.mean((train_mean - test_y) ** 2))
-        selected_expectancy = float(selected_y.mean()) if len(selected_y) else float("nan")
+        selected_expectancy = float(selected_y.mean()) if len(selected_y) else None
         take_all = float(test_y.mean())
         intervals = self._paired_intervals(
             candidates.loc[test], test_y, predictions[test], selected, train_mean
@@ -479,8 +479,12 @@ class ExpectedRScreen:
         buckets = self._score_buckets(predictions[test], test_y)
         gate_parts = {
             "mse_beats_constant": mse < constant_mse,
-            "expectancy_positive": bool(len(selected_y) and selected_expectancy > 0),
-            "expectancy_beats_take_all": bool(len(selected_y) and selected_expectancy > take_all),
+            "expectancy_positive": bool(
+                selected_expectancy is not None and selected_expectancy > 0
+            ),
+            "expectancy_beats_take_all": bool(
+                selected_expectancy is not None and selected_expectancy > take_all
+            ),
         }
         rows_payload = [
             {

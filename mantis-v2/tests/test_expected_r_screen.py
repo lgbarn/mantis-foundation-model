@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -234,8 +235,12 @@ def test_fit_retains_rows_freezes_threshold_and_reports_gate(tmp_path: Path) -> 
     config = ExpectedRScreenConfig(window_bars=512, timestamp_semantics="bar_close")
     screen = ExpectedRScreen(config)
     candidates = screen.generate_candidates(frame)
+    raw_features = candidates.attrs["raw_features"].copy()
     artifact_path = tmp_path / "screen.json"
     artifact = screen.run(frame, artifact_path)
+
+    screen.fit(candidates)
+    np.testing.assert_array_equal(candidates.attrs["raw_features"], raw_features)
 
     assert len(candidates) < rows - config.window_bars
     assert artifact["threshold"]["selected_on"] == "validation"
@@ -255,6 +260,40 @@ def test_fit_retains_rows_freezes_threshold_and_reports_gate(tmp_path: Path) -> 
 
     with pytest.raises(ExpectedRScreenError, match="already exists"):
         screen.run(frame, artifact_path)
+
+
+def test_empty_test_selection_emits_strict_json_null() -> None:
+    timestamps = pd.to_datetime(
+        [
+            "2024-01-02T15:00:00Z",
+            "2024-01-03T15:00:00Z",
+            "2025-07-02T15:00:00Z",
+            "2025-07-03T15:00:00Z",
+            "2025-10-02T15:00:00Z",
+            "2025-10-03T15:00:00Z",
+        ]
+    )
+    candidates = pd.DataFrame(
+        {
+            "row_id": [str(index) for index in range(6)],
+            "decision_ts": timestamps,
+            "outcome_ts": timestamps + pd.Timedelta(minutes=3),
+            "entry_index": np.arange(0, 12, 2),
+            "outcome_index": np.arange(0, 12, 2),
+            "average_uniqueness": np.ones(6),
+            "net_r": np.array([0.0, 1.0, 10.0, 11.0, -10.0, -11.0]),
+        }
+    )
+    candidates.attrs["raw_features"] = np.array(
+        [[0.0], [1.0], [10.0], [11.0], [-10.0], [-11.0]], dtype=np.float32
+    )
+    candidates.attrs["data_sha256"] = "fixture"
+
+    artifact = ExpectedRScreen().fit(candidates)
+
+    assert artifact["test"]["selected_trades"] == 0
+    assert artifact["test"]["selected_expectancy"] is None
+    json.dumps(artifact, allow_nan=False)
 
 
 def test_stationary_intervals_are_seeded_and_report_expected_differences() -> None:
