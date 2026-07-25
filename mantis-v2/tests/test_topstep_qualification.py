@@ -68,6 +68,13 @@ def test_replay_enforces_next_bar_session_exit_daily_stop_and_stop_breaker() -> 
     with pytest.raises(TopstepQualificationError, match="next bar"):
         qualification.replay((_day(2, stale),))
 
+    stale = replace(
+        _decision(date(2026, 1, 2)),
+        decision_ts=datetime(2026, 1, 1, 15, 0, tzinfo=UTC),
+    )
+    with pytest.raises(TopstepQualificationError, match="stale"):
+        qualification.replay((_day(2, stale),))
+
     late = replace(_decision(date(2026, 1, 2)), exit_ts=datetime(2026, 1, 2, 21, 1, tzinfo=UTC))
     with pytest.raises(TopstepQualificationError, match="force-flat"):
         qualification.replay((_day(2, late),))
@@ -157,7 +164,7 @@ def test_days_must_be_complete_chronological_and_decisions_non_overlapping() -> 
         qualification.qualify((_day(3), _day(2)), source_hash="b" * 64)
     overlapping = replace(
         _decision(date(2026, 1, 2), decision_bar=4),
-        decision_ts=datetime(2026, 1, 2, 15, 4, tzinfo=UTC),
+        decision_ts=datetime(2026, 1, 2, 15, 2, tzinfo=UTC),
         entry_ts=datetime(2026, 1, 2, 15, 5, tzinfo=UTC),
         exit_ts=datetime(2026, 1, 2, 15, 8, tzinfo=UTC),
     )

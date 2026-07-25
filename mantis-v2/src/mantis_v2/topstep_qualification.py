@@ -8,7 +8,7 @@ import math
 import random
 import statistics
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from typing import Literal
 from zoneinfo import ZoneInfo
 
@@ -36,6 +36,7 @@ class Topstep100KRules:
     strategy_entry_start: str = "08:30"
     strategy_entry_end: str = "15:00"
     strategy_force_flat: str = "15:00"
+    strategy_bar_minutes: int = 3
     maximum_minis: int = 10
     maximum_micros: int = 100
     maximum_mnq: int = 10
@@ -359,6 +360,10 @@ class TopstepQualification:
             raise TopstepQualificationError("decision timestamps are not ordered")
         if decision.entry_bar != decision.decision_bar + 1:
             raise TopstepQualificationError("entry must fill on the next bar")
+        if decision.entry_ts - decision.decision_ts != timedelta(
+            minutes=self.rules.strategy_bar_minutes
+        ):
+            raise TopstepQualificationError("decision is stale or not filled on the next bar")
         values = (
             decision.decision_bar,
             decision.entry_bar,
@@ -384,16 +389,21 @@ class TopstepQualification:
         zone = ZoneInfo(self.rules.session_timezone)
         local_entry = decision.entry_ts.astimezone(zone)
         local_exit = decision.exit_ts.astimezone(zone)
+        local_decision = decision.decision_ts.astimezone(zone)
+        decision_clock = local_decision.time().replace(tzinfo=None)
         entry_clock = local_entry.time().replace(tzinfo=None)
         local_exit_clock = local_exit.time().replace(tzinfo=None)
         entry_start = time.fromisoformat(self.rules.strategy_entry_start)
         entry_end = time.fromisoformat(self.rules.strategy_entry_end)
         force_flat = time.fromisoformat(self.rules.strategy_force_flat)
         if (
-            self.account_session_date(decision.entry_ts) != session_date
+            self.account_session_date(decision.decision_ts) != session_date
+            or self.account_session_date(decision.entry_ts) != session_date
             or self.account_session_date(decision.exit_ts) != session_date
         ):
             raise TopstepQualificationError("decision crosses the Topstep account session")
+        if not entry_start <= decision_clock < entry_end:
+            raise TopstepQualificationError("decision is outside the strategy RTH window")
         if not entry_start <= entry_clock < entry_end:
             raise TopstepQualificationError("entry is outside the strategy RTH window")
         if local_exit_clock > force_flat:
