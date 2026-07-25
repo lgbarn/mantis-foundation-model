@@ -37,6 +37,7 @@ def _frame(direction: int, highs: list[float], lows: list[float]) -> pd.DataFram
 def test_candidate_timestamps_are_causal_and_long_trail_matches_oracle() -> None:
     # Decision at row 1, fill at row 2. Price reaches 2.5R, then gives back 0.75R.
     frame = _frame(1, [102.5, 102.0], [100.0, 101.7])
+    frame.loc[3, "open"] = 102.0
     config = ExpectedRScreenConfig(
         window_bars=2,
         round_trip_commission=1.0,
@@ -74,6 +75,45 @@ def test_short_stop_and_target_use_next_open_and_costs() -> None:
     assert stopped["net_r"] == -1.25
     assert won["gross_r"] == 3.0
     assert won["net_r"] == 2.75
+
+
+def test_gap_through_stop_fills_at_adverse_open() -> None:
+    frame = _frame(1, [100.5, 100.0], [99.5, 96.0])
+    frame.loc[3, "open"] = 97.0
+    candidate = (
+        ExpectedRScreen(
+            ExpectedRScreenConfig(
+                window_bars=2,
+                round_trip_commission=0.0,
+                slippage_ticks=0.0,
+                timestamp_semantics="bar_close",
+            )
+        )
+        .generate_candidates(frame)
+        .iloc[0]
+    )
+
+    assert candidate["exit_reason"] == "stop"
+    assert candidate["exit_price"] == 97.0
+    assert candidate["gross_r"] == -3.0
+
+
+def test_same_bar_stop_and_target_contact_uses_stop_first() -> None:
+    candidate = (
+        ExpectedRScreen(
+            ExpectedRScreenConfig(
+                window_bars=2,
+                round_trip_commission=0.0,
+                slippage_ticks=0.0,
+                timestamp_semantics="bar_close",
+            )
+        )
+        .generate_candidates(_frame(1, [103.0], [99.0]))
+        .iloc[0]
+    )
+
+    assert candidate["exit_reason"] == "stop"
+    assert candidate["gross_r"] == -1.0
 
 
 def test_default_costs_match_one_mnq_contract() -> None:
@@ -152,6 +192,10 @@ def test_raw_bar_open_ohlcv_derives_context_and_records_close_decision() -> None
     assert first["entry_ts"] == timestamps[decision_index + 1]
     assert first["decision_ts"] == first["entry_ts"]
     assert np.isfinite(first["risk_points"])
+    decision_local = first["decision_ts"].tz_convert("America/Chicago")
+    expected_session_minute = (decision_local.hour * 60 + decision_local.minute) / 1440.0
+    feature = candidates.attrs["raw_features"][0]
+    assert feature[-1] == pytest.approx(expected_session_minute)
 
 
 def test_split_mask_purges_outcomes_crossing_the_boundary() -> None:

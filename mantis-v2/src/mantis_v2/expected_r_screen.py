@@ -246,7 +246,7 @@ class ExpectedRScreen:
                 continue
             window = data.loc[decision_index - self.config.window_bars + 1 : decision_index]
             raw = window.loc[:, _MARKET_COLUMNS].to_numpy(dtype=np.float32).reshape(-1)
-            local = timestamps.iloc[decision_index].tz_convert(self.config.session_timezone)
+            local = close_timestamps.iloc[decision_index].tz_convert(self.config.session_timezone)
             context = np.array(
                 [
                     side,
@@ -331,6 +331,7 @@ class ExpectedRScreen:
                 break
             high = float(frame.at[index, "high"])
             low = float(frame.at[index, "low"])
+            bar_open = float(frame.at[index, "open"])
             stop_hit = low <= stop if side > 0 else high >= stop
             target_hit = high >= target if side > 0 else low <= target
             trail_price = entry + side * trail_r * risk if trail_r is not None else None
@@ -338,14 +339,24 @@ class ExpectedRScreen:
                 low <= trail_price if side > 0 else high >= trail_price
             )
             if stop_hit:
-                exit_price, reason, outcome_index = stop, "stop", index
+                gap = bar_open < stop if side > 0 else bar_open > stop
+                exit_price, reason, outcome_index = (
+                    bar_open if gap else stop,
+                    "stop",
+                    index,
+                )
                 break
             if target_hit:
                 exit_price, reason, outcome_index = target, "target", index
                 break
             if trail_hit:
                 assert trail_price is not None
-                exit_price, reason, outcome_index = trail_price, "trail", index
+                gap = bar_open < trail_price if side > 0 else bar_open > trail_price
+                exit_price, reason, outcome_index = (
+                    bar_open if gap else trail_price,
+                    "trail",
+                    index,
+                )
                 break
             favorable = (high - entry) / risk if side > 0 else (entry - low) / risk
             peak_r = max(peak_r, favorable)
