@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -79,6 +80,23 @@ def test_atomic_embedding_resume_skips_complete_shards(tmp_path: Path) -> None:
     assert FakeModel.calls == 14  # Parity reruns; only the remaining four rows are embedded.
     assert result["rows"] == 6
     assert len(result["shards"]) == 3
+
+
+def test_input_manifest_remains_valid_after_directory_move(tmp_path: Path) -> None:
+    candidates = _candidates(6)
+    manifest = write_frozen_input(
+        candidates,
+        np.ones((6, 5, 512), dtype=np.float32),
+        np.zeros((6, 3), dtype=np.float32),
+        tmp_path / "source",
+    )
+    shutil.move(tmp_path / "source", tmp_path / "remote")
+
+    _, moved_candidates, _, _ = FrozenMantisEmbedder(
+        FrozenExpectedRConfig()
+    ).validate_input(tmp_path / "remote" / manifest.name)
+
+    assert moved_candidates["row_id"].tolist() == candidates["row_id"].tolist()
 
 
 def test_comparison_rejects_mismatched_rows() -> None:

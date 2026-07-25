@@ -148,8 +148,14 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
     os.replace(temporary, path)
 
 
-def _file_record(path: Path) -> dict[str, Any]:
-    return {"path": str(path.resolve()), "size": path.stat().st_size, "sha256": sha256_file(path)}
+def _file_record(path: Path, *, portable: bool = False) -> dict[str, Any]:
+    recorded_path = path.name if portable else str(path.resolve())
+    return {"path": recorded_path, "size": path.stat().st_size, "sha256": sha256_file(path)}
+
+
+def _record_path(record: dict[str, Any], parent: Path) -> Path:
+    path = Path(str(record.get("path", "")))
+    return path if path.is_absolute() else parent / path
 
 
 def write_frozen_input(
@@ -192,9 +198,9 @@ def write_frozen_input(
         "schema_version": 1,
         "rows": len(candidates),
         "row_ids_sha256": _json_digest(candidates["row_id"].tolist()),
-        "candidates": _file_record(candidates_path),
-        "windows": _file_record(windows_path),
-        "context": _file_record(context_path),
+        "candidates": _file_record(candidates_path, portable=True),
+        "windows": _file_record(windows_path, portable=True),
+        "context": _file_record(context_path, portable=True),
         "shape": list(values.shape),
         "dtype": str(values.dtype),
         "preprocessing": "native_mantis_v2",
@@ -415,10 +421,10 @@ class FrozenMantisEmbedder:
             raise FrozenExpectedRError("custom preprocessing is prohibited")
         candidate_record = manifest.get("candidates", {})
         window_record = manifest.get("windows", {})
-        candidates_path = Path(str(candidate_record.get("path", "")))
-        windows_path = Path(str(window_record.get("path", "")))
+        candidates_path = _record_path(candidate_record, manifest_path.parent)
+        windows_path = _record_path(window_record, manifest_path.parent)
         context_record = manifest.get("context", {})
-        context_path = Path(str(context_record.get("path", "")))
+        context_path = _record_path(context_record, manifest_path.parent)
         if not candidates_path.is_file() or sha256_file(candidates_path) != candidate_record.get(
             "sha256"
         ):
