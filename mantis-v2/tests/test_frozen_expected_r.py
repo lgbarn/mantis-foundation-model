@@ -289,15 +289,20 @@ def test_cuda_threshold_is_exact_and_bounded() -> None:
     scores = rng.normal(size=rows)
     frame = pd.DataFrame({"entry_index": entries, "outcome_index": outcomes})
     desired = 160
+
+    def selected_count(threshold: float) -> int:
+        count = 0
+        busy_until = -1
+        for entry, outcome, score in zip(entries, outcomes, scores, strict=True):
+            if entry > busy_until and score >= threshold:
+                count += 1
+                busy_until = int(outcome)
+        return count
+
     expected = min(
         np.unique(scores),
         key=lambda threshold: (
-            abs(
-                int(frozen_expected_r.ExpectedRScreen._executed_mask(
-                    frame, scores, float(threshold)
-                ).sum())
-                - desired
-            ),
+            abs(selected_count(float(threshold)) - desired),
             -threshold,
         ),
     )
