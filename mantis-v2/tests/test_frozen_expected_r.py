@@ -45,6 +45,7 @@ def test_contract_pins_official_layer_pooling_and_rejects_adaptation() -> None:
 
 def test_input_is_content_bound_and_rejects_modified_rows(tmp_path: Path) -> None:
     candidates = _candidates(6)
+    candidates.attrs["raw_features"] = np.ones((6, 2563), dtype=np.float32)
     windows = np.ones((6, 5, 512), dtype=np.float32)
     manifest = write_frozen_input(candidates, windows, np.zeros((6, 3)), tmp_path / "input")
 

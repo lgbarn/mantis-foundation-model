@@ -181,7 +181,9 @@ def write_frozen_input(
     candidates_path = output / "candidates.parquet"
     windows_path = output / "windows.npy"
     context_path = output / "context.npy"
-    candidates.reset_index(drop=True).to_parquet(candidates_path, index=False)
+    candidate_table = candidates.reset_index(drop=True).copy()
+    candidate_table.attrs = {}
+    candidate_table.to_parquet(candidates_path, index=False)
     with windows_path.open("wb") as stream:
         np.save(stream, values, allow_pickle=False)
     with context_path.open("wb") as stream:
