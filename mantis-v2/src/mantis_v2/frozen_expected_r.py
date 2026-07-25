@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, fields
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
@@ -24,6 +26,58 @@ from mantis_v2.rl_provenance import source_digest
 
 class FrozenExpectedRError(RuntimeError):
     """Raised when the official frozen expected-R contract is violated."""
+
+
+class _ComparisonProgress:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.started = time.monotonic()
+        self.stage_started: dict[tuple[str, str | None, str | None], float] = {}
+        self.sequence = 0
+
+    def write(
+        self,
+        stage: str,
+        *,
+        fold: str | None = None,
+        arm: str | None = None,
+        thresholds_done: int = 0,
+        thresholds_total: int = 0,
+        bootstrap_done: int = 0,
+        bootstrap_total: int = 0,
+        terminal_state: Literal["running", "complete", "failed"] = "running",
+    ) -> None:
+        now = time.monotonic()
+        key = (stage, fold, arm)
+        stage_started = self.stage_started.setdefault(key, now)
+        stage_elapsed = max(now - stage_started, 0.0)
+        done, total = (
+            (thresholds_done, thresholds_total)
+            if thresholds_total
+            else (bootstrap_done, bootstrap_total)
+        )
+        throughput = done / stage_elapsed if done and stage_elapsed > 0 else None
+        eta = (total - done) / throughput if throughput and total >= done else None
+        self.sequence += 1
+        _atomic_json(
+            self.path,
+            {
+                "schema_version": 1,
+                "sequence": self.sequence,
+                "stage": stage,
+                "fold": fold,
+                "arm": arm,
+                "thresholds_done": thresholds_done,
+                "thresholds_total": thresholds_total,
+                "bootstrap_done": bootstrap_done,
+                "bootstrap_total": bootstrap_total,
+                "elapsed_seconds": now - self.started,
+                "throughput_per_second": throughput,
+                "eta_seconds": eta,
+                "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                "terminal_state": terminal_state,
+            },
+        )
 
 
 _SOURCE_REVISION = "0c94f8ceb9f1d1421dd292ed917090df8c31605b"
@@ -276,17 +330,34 @@ def compare_frozen_artifacts(
     config: FrozenExpectedRConfig,
     *,
     comparison_device: Literal["cpu", "cuda"] = "cpu",
+    progress_path: Path | None = None,
 ) -> dict[str, Any]:
     if output.exists() or output.with_suffix(output.suffix + ".tmp").exists():
         raise FrozenExpectedRError(f"comparison output already exists: {output}")
-    candidates, raw, mantis = load_frozen_embeddings(
-        input_manifest_path, embedding_manifest_path, config
-    )
-    result = compare_frozen_to_raw(
-        candidates, raw, mantis, config, comparison_device=comparison_device
-    )
     output.parent.mkdir(parents=True, exist_ok=True)
+    progress = _ComparisonProgress(
+        progress_path or output.with_name(f"{output.stem}.progress.json")
+    )
+    progress.path.parent.mkdir(parents=True, exist_ok=True)
+    progress.write("loading")
+    try:
+        candidates, raw, mantis = load_frozen_embeddings(
+            input_manifest_path, embedding_manifest_path, config
+        )
+        progress.write("loaded")
+        result = compare_frozen_to_raw(
+            candidates,
+            raw,
+            mantis,
+            config,
+            comparison_device=comparison_device,
+            progress=progress,
+        )
+    except Exception:
+        progress.write("failed", terminal_state="failed")
+        raise
     _atomic_json(output, result)
+    progress.write("complete", terminal_state="complete")
     return result
 
 
@@ -581,6 +652,7 @@ def compare_frozen_to_raw(
     *,
     maximum_workers: int = 2,
     comparison_device: Literal["cpu", "cuda"] = "cpu",
+    progress: _ComparisonProgress | None = None,
 ) -> dict[str, Any]:
     """Compare both ridge arms on identical rows under the initial date gate."""
     raw = np.asarray(raw_features, dtype=np.float32)
@@ -600,16 +672,29 @@ def compare_frozen_to_raw(
         raise FrozenExpectedRError("CUDA comparison requested but CUDA is unavailable")
     context = raw[:, -config.context_width :]
     combined = np.concatenate((mantis, context), axis=1)
-    workers = 1 if comparison_device == "cuda" else maximum_workers
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        completed = list(
-            executor.map(
-                lambda fold: _fit_fold(
-                    fold, candidates, raw, combined, config, comparison_device
-                ),
-                _ANCHORED_FOLDS,
+    if comparison_device == "cuda":
+        completed = [
+            _fit_fold(
+                fold, candidates, raw, combined, config, comparison_device, progress
             )
-        )
+            for fold in _ANCHORED_FOLDS
+        ]
+    else:
+        with ThreadPoolExecutor(max_workers=maximum_workers) as executor:
+            completed = list(
+                executor.map(
+                    lambda fold: _fit_fold(
+                        fold,
+                        candidates,
+                        raw,
+                        combined,
+                        config,
+                        comparison_device,
+                        progress,
+                    ),
+                    _ANCHORED_FOLDS,
+                )
+            )
     fold_results = [item[0] for item in completed]
     raw_wins = 0
     mantis_wins = 0
@@ -659,6 +744,7 @@ def _fit_fold(
     combined: np.ndarray,
     config: FrozenExpectedRConfig,
     comparison_device: Literal["cpu", "cuda"],
+    progress: _ComparisonProgress | None = None,
 ) -> tuple[
     dict[str, Any],
     bool,
@@ -668,6 +754,8 @@ def _fit_fold(
 ]:
     name, train_start, train_end, validation_start, validation_end, test_start, test_end = fold
     print(f"frozen-screen-compare fold={name} state=started", flush=True)
+    if progress is not None:
+        progress.write("fold_started", fold=name)
     screen = ExpectedRScreen(
         ExpectedRScreenConfig(
             ridge_alpha=config.ridge_alpha,
@@ -682,9 +770,11 @@ def _fit_fold(
             test_end=test_end,
         )
     )
-    raw_result = _fit_arm(screen, candidates, raw, comparison_device, f"{name}:raw")
+    raw_result = _fit_arm(
+        screen, candidates, raw, comparison_device, f"{name}:raw", progress
+    )
     mantis_result = _fit_arm(
-        screen, candidates, combined, comparison_device, f"{name}:mantis"
+        screen, candidates, combined, comparison_device, f"{name}:mantis", progress
     )
     raw_expectancy = raw_result["test"]["selected_expectancy"]
     mantis_expectancy = mantis_result["test"]["selected_expectancy"]
@@ -725,6 +815,8 @@ def _fit_fold(
         },
     }
     print(f"frozen-screen-compare fold={name} state=complete", flush=True)
+    if progress is not None:
+        progress.write("fold_complete", fold=name)
     return result, raw_passed, mantis_passed, raw_observations, mantis_observations
 
 
@@ -734,8 +826,12 @@ def _fit_arm(
     features: np.ndarray,
     comparison_device: Literal["cpu", "cuda"],
     progress_label: str,
+    progress: _ComparisonProgress | None = None,
 ) -> dict[str, Any]:
     print(f"frozen-screen-compare arm={progress_label} state=started", flush=True)
+    fold, _separator, arm = progress_label.partition(":")
+    if progress is not None:
+        progress.write("arm_started", fold=fold, arm=arm)
     owned = candidates.copy()
     owned.attrs["raw_features"] = features
     owned.attrs["data_sha256"] = _json_digest(owned["row_id"].tolist())
@@ -755,7 +851,11 @@ def _fit_arm(
         None
         if comparison_device == "cpu"
         else lambda rows, scores, desired: cuda_threshold(
-            rows, scores, desired, progress_label=progress_label
+            rows,
+            scores,
+            desired,
+            progress_label=progress_label,
+            progress=progress,
         )
     )
     interval_evaluator = (
@@ -770,6 +870,7 @@ def _fit_arm(
                 selected,
                 training_mean,
                 progress_label=progress_label,
+                progress=progress,
             )
         )
     )
@@ -795,6 +896,8 @@ def _fit_arm(
         screen._session_keys(candidates.loc[test, "decision_ts"])[selected].astype(str).tolist()
     )
     print(f"frozen-screen-compare arm={progress_label} state=complete", flush=True)
+    if progress is not None:
+        progress.write("arm_complete", fold=fold, arm=arm)
     return result
 
 
@@ -861,10 +964,17 @@ def cuda_threshold(
     desired: int,
     *,
     progress_label: str,
+    progress: _ComparisonProgress | None = None,
 ) -> float:
     if not torch.cuda.is_available():
         raise FrozenExpectedRError("CUDA comparison requested but CUDA is unavailable")
     print(f"frozen-screen-compare arm={progress_label} state=cuda_threshold", flush=True)
+    fold, _separator, arm = progress_label.partition(":")
+    threshold_total = int(np.unique(scores).size)
+    if progress is not None:
+        progress.write(
+            "cuda_threshold", fold=fold, arm=arm, thresholds_total=threshold_total
+        )
     device = torch.device("cuda")
     with torch.inference_mode():
         thresholds = torch.as_tensor(
@@ -886,7 +996,16 @@ def cuda_threshold(
         difference = torch.abs(selected_count - desired)
         best_difference = difference.min()
         threshold = thresholds[difference == best_difference].max()
-    return float(threshold.cpu())
+    selected_threshold = float(threshold.cpu())
+    if progress is not None:
+        progress.write(
+            "cuda_threshold",
+            fold=fold,
+            arm=arm,
+            thresholds_done=threshold_total,
+            thresholds_total=threshold_total,
+        )
+    return selected_threshold
 
 
 def _cuda_paired_intervals(
@@ -898,6 +1017,7 @@ def _cuda_paired_intervals(
     training_mean: float,
     *,
     progress_label: str,
+    progress: _ComparisonProgress | None = None,
 ) -> dict[str, list[float] | None]:
     days = screen._session_keys(rows["decision_ts"])
     unique_days, day_codes = np.unique(days, return_inverse=True)
@@ -910,6 +1030,14 @@ def _cuda_paired_intervals(
     if not torch.cuda.is_available():
         raise FrozenExpectedRError("CUDA comparison requested but CUDA is unavailable")
     print(f"frozen-screen-compare arm={progress_label} state=cuda_bootstrap", flush=True)
+    fold, _separator, arm = progress_label.partition(":")
+    if progress is not None:
+        progress.write(
+            "cuda_bootstrap",
+            fold=fold,
+            arm=arm,
+            bootstrap_total=screen.config.bootstrap_replicates,
+        )
     multiplicities = np.zeros(
         (screen.config.bootstrap_replicates, len(unique_days)), dtype=np.int16
     )
@@ -950,11 +1078,20 @@ def _cuda_paired_intervals(
             return None
         return [float(value) for value in np.quantile(finite, [0.025, 0.975])]
 
-    return {
+    result = {
         "mse_improvement_over_constant": interval(mse_improvements),
         "selected_expectancy": interval(selected_means),
         "selected_minus_take_all": interval(differences),
     }
+    if progress is not None:
+        progress.write(
+            "cuda_bootstrap",
+            fold=fold,
+            arm=arm,
+            bootstrap_done=screen.config.bootstrap_replicates,
+            bootstrap_total=screen.config.bootstrap_replicates,
+        )
+    return result
 
 
 def _stationary_expectancy_interval(

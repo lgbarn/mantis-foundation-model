@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import threading
 import time
 from pathlib import Path
 
@@ -180,6 +181,66 @@ def test_cuda_comparison_fails_closed_when_cuda_is_unavailable(
             FrozenExpectedRConfig(),
             comparison_device="cuda",
         )
+
+
+def test_cuda_comparison_bypasses_executor_on_calling_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    caller = threading.get_ident()
+    observed: list[int] = []
+
+    def fit_fold(*_args: object, **_kwargs: object) -> tuple[object, ...]:
+        observed.append(threading.get_ident())
+        return ({"name": "fold"}, False, False, [], [])
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(frozen_expected_r, "_fit_fold", fit_fold)
+    monkeypatch.setattr(
+        frozen_expected_r,
+        "_comparison_backend",
+        lambda _device: {"device": "cuda"},
+    )
+    candidates = _candidates()
+    features = np.ones((len(candidates), 3), dtype=np.float32)
+
+    result = compare_frozen_to_raw(
+        candidates,
+        features,
+        features,
+        FrozenExpectedRConfig(bootstrap_replicates=2),
+        comparison_device="cuda",
+    )
+
+    assert observed == [caller, caller, caller]
+    assert result["comparison_backend"] == {"device": "cuda"}
+
+
+def test_comparison_progress_is_atomic_and_monotonic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ticks = iter((10.0, 10.0, 12.0))
+    monkeypatch.setattr(frozen_expected_r.time, "monotonic", lambda: next(ticks))
+    path = tmp_path / "progress.json"
+    progress = frozen_expected_r._ComparisonProgress(path)
+
+    progress.write("cuda_threshold", fold="fold_1", arm="raw", thresholds_total=100)
+    first = json.loads(path.read_text())
+    progress.write(
+        "cuda_threshold",
+        fold="fold_1",
+        arm="raw",
+        thresholds_done=100,
+        thresholds_total=100,
+    )
+    second = json.loads(path.read_text())
+
+    assert first["sequence"] == 1
+    assert second["sequence"] == 2
+    assert second["elapsed_seconds"] >= first["elapsed_seconds"]
+    assert second["thresholds_done"] >= first["thresholds_done"]
+    assert second["throughput_per_second"] == 50.0
+    assert second["eta_seconds"] == 0.0
+    assert not path.with_suffix(".json.tmp").exists()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA parity requires a GPU")
