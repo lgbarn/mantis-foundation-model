@@ -117,7 +117,7 @@ svg { max-width: 100%; }
 </head>
 <body>
   <h1>MantisV2 LP-FT Trend Magic Run Summary</h1>
-  <p><strong>Status:</strong> downstream embedding is in progress. Foundation training, validated export, and downstream preparation are complete and verified. This report will be finalized only after the supervised walk-forward and promotion decision finish.</p>
+  <p><strong>Status:</strong> foundation training, validated export, downstream preparation, and embedding are complete and verified. The pinned supervised consumer is ready. This report will be finalized only after the supervised walk-forward and promotion decision finish.</p>
 
   <div class="stat-grid">
     <div class="stat"><div class="value">10,000</div><div class="label">Training updates</div></div>
@@ -177,6 +177,21 @@ svg { max-width: 100%; }
   <p>The diagnostic producer is pinned to the validated export manifest and weights hash. It creates examples from every eligible closed 3m Trend Magic state, not flips only. Entries occur at the next eligible open. Labels use a 0.5 ATR(20) initial stop, a strict 3R target, a 120-bar horizon, 0.03R costs, and stop-first collision handling. The reserved holdout remains locked.</p>
   <p>Preparation completed with 3,259,736 rows across seven candidate Parquet files. The embedding contract digest is <code>818c03cfe419febdbee42c3f3c9c72663672d65cdc4a4077390627d1638bdaa0</code> and the prepared workflow digest is <code>92dd2dfeeb0888494a9708df32c41fe4fc5d33ac68b82869acccb8d9d061a044</code>.</p>
 
+  <h2>Verified embedding</h2>
+  <p>Embedding completed in 7,162.54 seconds at 455.11 rows per second. It produced 400 atomic feature/metadata pairs occupying 25,280,949,347 bytes. The independent audit reread all 24 GB, recomputed every listed hash, checked every Parquet row count and NPY shape, and sampled three rows from every shard for finiteness.</p>
+  <table>
+    <thead><tr><th>Check</th><th>Verified result</th></tr></thead>
+    <tbody>
+      <tr><td>Rows</td><td>3,259,736</td></tr>
+      <tr><td>Feature width and dtype</td><td>3840, float16</td></tr>
+      <tr><td>Listed files rehashed</td><td>800 / 800</td></tr>
+      <tr><td>Sampled finite values</td><td>4,608,000</td></tr>
+      <tr><td>Embedding manifest SHA-256</td><td><code>8898ef08a4fd560c6f83325286123139d30a638b97a4ac46fe333a0777fba79a</code></td></tr>
+      <tr><td>Foundation weights SHA-256</td><td><code>1efd62d395f820ebdd0377c386c63105c2d82e11381a63bd2d7947f3bc7c3a12</code></td></tr>
+      <tr><td>Audit errors</td><td>0</td></tr>
+    </tbody>
+  </table>
+
   <h2>Repeatable command sequence</h2>
   <p>Use an official RunPod PyTorch template. Put the resolved virtual environment on ephemeral <code>/tmp</code>, retain immutable inputs and artifacts on the network volume, and transfer source through a Git bundle created from a stable branch ref. Run the image CUDA smoke before source or corpus work and run the resolved <code>uv</code> CUDA smoke after <code>uv sync --frozen</code>.</p>
   <pre><code>export UV_PROJECT_ENVIRONMENT=/tmp/mantis-venv
@@ -197,8 +212,18 @@ uv run --no-sync mantis-v2 downstream-prepare \
   --config mantis-v2/configs/trend-magic-lp-ft-3tf-cuda-v1.toml
 
 uv run --no-sync mantis-v2 downstream-embed \
-  --config mantis-v2/configs/trend-magic-lp-ft-3tf-cuda-v1.toml</code></pre>
-  <p>After embedding, compute and record the new manifest SHA-256. Create a fresh supervised consumer whose manifest path, manifest hash, producer config path, and producer config hash all match the completed producer. Commit that immutable consumer before running <code>downstream-verify</code> and <code>downstream-walk-forward</code>. Never reuse a direct-LoRA manifest or run identity.</p>
+  --config mantis-v2/configs/trend-magic-lp-ft-3tf-cuda-v1.toml
+
+uv run --no-sync mantis-v2 downstream-verify \
+  --config mantis-v2/configs/trend-magic-lp-ft-3tf-supervised-cuda-v1.toml
+
+uv run --no-sync mantis-v2 downstream-walk-forward \
+  --config mantis-v2/configs/trend-magic-lp-ft-3tf-supervised-cuda-v1.toml</code></pre>
+  <p>The supervised consumer uses the fresh run identity <code>mantisv2-trend-magic-lp-ft-supervised-entry-cuda-v1</code>. It pins the completed embed manifest SHA-256 and producer config SHA-256 <code>3eca2bbdcfab6ea60df3c282eacde58562a023e255b73ff1bcb7cfe075a3df39</code>. Its workflow digest is <code>1e4a40927e99eea2536270c9d70ff1f33d3d40e78cc2997fe5218740cb953a0c</code>. Never reuse a direct-LoRA manifest or run identity.</p>
+
+  <p>After a verified stage, stop billing with the current official CLI commands:</p>
+  <pre><code>runpodctl pod delete &lt;pod-id&gt;
+runpodctl pod list</code></pre>
 
   <h2>Resume and failure rules</h2>
   <ul>
@@ -216,7 +241,6 @@ uv run --no-sync mantis-v2 downstream-embed \
 
   <h2>Remaining gates</h2>
   <ol>
-    <li>Complete the embedding manifest and verify every listed file hash, total row count, feature width, dtype, and finite sampled embeddings.</li>
     <li>Fit the supervised shared entry head in walk-forward folds with bounded row sampling and early stopping.</li>
     <li>Require every fold to converge, aggregate weighted log loss below <code>log(2)</code>, and aggregate weighted Brier below 0.25.</li>
     <li>Record the promotion decision. If any gate fails, stop without simulation or holdout access.</li>

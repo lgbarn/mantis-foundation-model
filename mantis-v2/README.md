@@ -425,9 +425,25 @@ interrupted duplicate process; do not resume it.
 producer for the validated paper-first LP-FT export. Its foundation manifest
 and weights hash are pinned to the completed LP-FT run. Run `downstream-verify`,
 `downstream-prepare`, and `downstream-embed` as separate commands. Do not reuse
-direct-LoRA embeddings or run identities. Create and pin a distinct supervised
-consumer only after the LP-FT embed manifest exists; simulation and holdout
-remain locked while the export role is `diagnostic_candidate`.
+direct-LoRA embeddings or run identities. Its completed embedding has 3,259,736
+rows, 400 atomic feature/metadata pairs, width 3840, and manifest SHA-256
+`8898ef08a4fd560c6f83325286123139d30a638b97a4ac46fe333a0777fba79a`.
+The post-run audit recomputed all 800 listed file hashes and confirmed float16
+shape, Parquet row counts, and finite sampled embeddings.
+
+`configs/trend-magic-lp-ft-3tf-supervised-cuda-v1.toml` is the pinned LP-FT
+supervised consumer. It uses a fresh run identity and pins the completed embed
+manifest plus producer-config hashes. Run only the head stages:
+
+```bash
+uv run mantis-v2 downstream-verify \
+  --config mantis-v2/configs/trend-magic-lp-ft-3tf-supervised-cuda-v1.toml
+uv run mantis-v2 downstream-walk-forward \
+  --config mantis-v2/configs/trend-magic-lp-ft-3tf-supervised-cuda-v1.toml
+```
+
+Simulation and holdout remain locked while the export role is
+`diagnostic_candidate`.
 
 The completed `head-c0001-v2` walk-forward converged on all eight folds but
 failed both primary proper-score gates (weighted log loss 0.695306 and weighted

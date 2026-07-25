@@ -498,12 +498,27 @@ uv run mantis-v2 downstream-embed \
   --config mantis-v2/configs/trend-magic-lp-ft-3tf-cuda-v1.toml
 ```
 
-Do not reuse the direct-LoRA embed manifest or run name. After LP-FT embedding
-finishes, create a distinct supervised consumer pinned to the new embed
-manifest SHA-256 and the LP-FT producer config SHA-256. Run only
-`downstream-verify` and `downstream-walk-forward` with that consumer. The LP-FT
-foundation role is `diagnostic_candidate`, so neither producer nor consumer may
-run simulation or unlock the holdout.
+Do not reuse the direct-LoRA embed manifest or run name. The completed LP-FT
+embedding contains 3,259,736 rows in 400 feature/metadata pairs. Its manifest
+SHA-256 is
+`8898ef08a4fd560c6f83325286123139d30a638b97a4ac46fe333a0777fba79a`.
+An independent post-run audit recomputed all 800 listed file hashes, checked
+every Parquet row count and NPY shape, confirmed float16 width 3840, and found
+all 4,608,000 sampled embedding values finite.
+
+The distinct supervised consumer is
+`trend-magic-lp-ft-3tf-supervised-cuda-v1.toml`. It pins that manifest and the
+LP-FT producer config SHA-256. Run only its verify and walk-forward commands:
+
+```bash
+uv run mantis-v2 downstream-verify \
+  --config mantis-v2/configs/trend-magic-lp-ft-3tf-supervised-cuda-v1.toml
+uv run mantis-v2 downstream-walk-forward \
+  --config mantis-v2/configs/trend-magic-lp-ft-3tf-supervised-cuda-v1.toml
+```
+
+The LP-FT foundation role is `diagnostic_candidate`, so neither producer nor
+consumer may run simulation or unlock the holdout.
 
 The config caps each fit partition at 25,000 rows and uses validation early
 stopping so the first result arrives before any search or PPO work. Trend Magic
