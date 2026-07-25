@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from mantis_v2 import frozen_expected_r
 from mantis_v2.frozen_expected_r import (
     FrozenExpectedRConfig,
     FrozenExpectedRError,
@@ -106,6 +107,57 @@ def test_comparison_rejects_mismatched_rows() -> None:
 
     with pytest.raises(FrozenExpectedRError, match="identical candidate rows"):
         compare_frozen_to_raw(candidates, raw, mantis, FrozenExpectedRConfig())
+
+
+def test_parallel_comparison_is_numerically_identical_to_serial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidates = _candidates(240)
+    dates = pd.date_range("2024-01-01T15:00:00Z", periods=len(candidates), freq="D")
+    candidates["decision_ts"] = dates
+    candidates["outcome_ts"] = dates + pd.Timedelta(minutes=30)
+    monkeypatch.setattr(
+        frozen_expected_r,
+        "_ANCHORED_FOLDS",
+        (
+            (
+                "fold_1",
+                "2024-01-01",
+                "2024-03-01",
+                "2024-03-01",
+                "2024-04-01",
+                "2024-04-01",
+                "2024-05-01",
+            ),
+            (
+                "fold_2",
+                "2024-01-01",
+                "2024-05-01",
+                "2024-05-01",
+                "2024-06-01",
+                "2024-06-01",
+                "2024-07-01",
+            ),
+            (
+                "fold_3",
+                "2024-01-01",
+                "2024-07-01",
+                "2024-07-01",
+                "2024-08-01",
+                "2024-08-01",
+                "2024-09-01",
+            ),
+        ),
+    )
+    rng = np.random.default_rng(86)
+    raw = rng.normal(size=(len(candidates), 3)).astype(np.float32)
+    mantis = rng.normal(size=(len(candidates), 12)).astype(np.float32)
+    config = FrozenExpectedRConfig(bootstrap_replicates=10)
+
+    serial = compare_frozen_to_raw(candidates, raw, mantis, config, maximum_workers=1)
+    parallel = compare_frozen_to_raw(candidates, raw, mantis, config, maximum_workers=3)
+
+    assert parallel == serial
 
 
 def test_config_rejects_unknown_keys(tmp_path: Path) -> None:

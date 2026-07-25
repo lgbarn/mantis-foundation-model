@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
@@ -573,6 +574,8 @@ def compare_frozen_to_raw(
     raw_features: np.ndarray,
     mantis_features: np.ndarray,
     config: FrozenExpectedRConfig,
+    *,
+    maximum_workers: int = 3,
 ) -> dict[str, Any]:
     """Compare both ridge arms on identical rows under the initial date gate."""
     raw = np.asarray(raw_features, dtype=np.float32)
@@ -586,64 +589,26 @@ def compare_frozen_to_raw(
         or not np.isfinite(mantis).all()
     ):
         raise FrozenExpectedRError("raw and Mantis features must be finite matrices")
+    if maximum_workers < 1 or maximum_workers > len(_ANCHORED_FOLDS):
+        raise FrozenExpectedRError("comparison workers must be in [1, 3]")
     context = raw[:, -config.context_width :]
     combined = np.concatenate((mantis, context), axis=1)
-    fold_results: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=maximum_workers) as executor:
+        completed = list(
+            executor.map(
+                lambda fold: _fit_fold(fold, candidates, raw, combined, config),
+                _ANCHORED_FOLDS,
+            )
+        )
+    fold_results = [item[0] for item in completed]
     raw_wins = 0
     mantis_wins = 0
     selected_outcomes: dict[str, list[tuple[str, float]]] = {"raw": [], "mantis": []}
-    for fold in _ANCHORED_FOLDS:
-        name, train_start, train_end, validation_start, validation_end, test_start, test_end = fold
-        screen = ExpectedRScreen(
-            ExpectedRScreenConfig(
-                ridge_alpha=config.ridge_alpha,
-                bootstrap_replicates=config.bootstrap_replicates,
-                bootstrap_restart_probability=config.bootstrap_restart_probability,
-                seed=config.seed,
-                train_start=train_start,
-                train_end=train_end,
-                validation_start=validation_start,
-                validation_end=validation_end,
-                test_start=test_start,
-                test_end=test_end,
-            )
-        )
-        raw_result = _fit_arm(screen, candidates, raw)
-        mantis_result = _fit_arm(screen, candidates, combined)
-        raw_expectancy = raw_result["test"]["selected_expectancy"]
-        mantis_expectancy = mantis_result["test"]["selected_expectancy"]
-        gate = {
-            "mse_beats_raw": mantis_result["test"]["mse"] < raw_result["test"]["mse"],
-            "expectancy_beats_raw": bool(
-                raw_expectancy is not None
-                and mantis_expectancy is not None
-                and mantis_expectancy > raw_expectancy
-            ),
-        }
-        mantis_passed = bool(mantis_result["gate"]["passed"] and all(gate.values()))
-        raw_passed = bool(raw_result["gate"]["passed"])
+    for _fold_result, raw_passed, mantis_passed, raw_observations, mantis_observations in completed:
         raw_wins += int(raw_passed)
         mantis_wins += int(mantis_passed)
-        raw_selected = raw_result.pop("selected_realized_net_r")
-        raw_sessions = raw_result.pop("selected_session_keys")
-        mantis_selected = mantis_result.pop("selected_realized_net_r")
-        mantis_sessions = mantis_result.pop("selected_session_keys")
-        selected_outcomes["raw"].extend(zip(raw_sessions, raw_selected, strict=True))
-        selected_outcomes["mantis"].extend(zip(mantis_sessions, mantis_selected, strict=True))
-        fold_results.append(
-            {
-                "name": name,
-                "raw": raw_result,
-                "mantis": mantis_result,
-                "mantis_vs_raw_gate": {
-                    "passed": mantis_passed,
-                    **gate,
-                    "paired_stationary_day_block_intervals_95": (
-                        _paired_model_intervals(screen, candidates, raw_result, mantis_result)
-                    ),
-                },
-            }
-        )
+        selected_outcomes["raw"].extend(raw_observations)
+        selected_outcomes["mantis"].extend(mantis_observations)
     mantis_interval = _stationary_expectancy_interval(selected_outcomes["mantis"], config)
     raw_interval = _stationary_expectancy_interval(selected_outcomes["raw"], config)
     if mantis_wins >= 2 and mantis_interval is not None and mantis_interval[0] > 0:
@@ -674,6 +639,79 @@ def compare_frozen_to_raw(
     }
     result["artifact_sha256"] = _json_digest(result)
     return result
+
+
+def _fit_fold(
+    fold: tuple[str, str, str, str, str, str, str],
+    candidates: pd.DataFrame,
+    raw: np.ndarray,
+    combined: np.ndarray,
+    config: FrozenExpectedRConfig,
+) -> tuple[
+    dict[str, Any],
+    bool,
+    bool,
+    list[tuple[str, float]],
+    list[tuple[str, float]],
+]:
+    name, train_start, train_end, validation_start, validation_end, test_start, test_end = fold
+    print(f"frozen-screen-compare fold={name} state=started", flush=True)
+    screen = ExpectedRScreen(
+        ExpectedRScreenConfig(
+            ridge_alpha=config.ridge_alpha,
+            bootstrap_replicates=config.bootstrap_replicates,
+            bootstrap_restart_probability=config.bootstrap_restart_probability,
+            seed=config.seed,
+            train_start=train_start,
+            train_end=train_end,
+            validation_start=validation_start,
+            validation_end=validation_end,
+            test_start=test_start,
+            test_end=test_end,
+        )
+    )
+    raw_result = _fit_arm(screen, candidates, raw)
+    mantis_result = _fit_arm(screen, candidates, combined)
+    raw_expectancy = raw_result["test"]["selected_expectancy"]
+    mantis_expectancy = mantis_result["test"]["selected_expectancy"]
+    gate = {
+        "mse_beats_raw": mantis_result["test"]["mse"] < raw_result["test"]["mse"],
+        "expectancy_beats_raw": bool(
+            raw_expectancy is not None
+            and mantis_expectancy is not None
+            and mantis_expectancy > raw_expectancy
+        ),
+    }
+    mantis_passed = bool(mantis_result["gate"]["passed"] and all(gate.values()))
+    raw_passed = bool(raw_result["gate"]["passed"])
+    raw_observations = list(
+        zip(
+            raw_result.pop("selected_session_keys"),
+            raw_result.pop("selected_realized_net_r"),
+            strict=True,
+        )
+    )
+    mantis_observations = list(
+        zip(
+            mantis_result.pop("selected_session_keys"),
+            mantis_result.pop("selected_realized_net_r"),
+            strict=True,
+        )
+    )
+    result = {
+        "name": name,
+        "raw": raw_result,
+        "mantis": mantis_result,
+        "mantis_vs_raw_gate": {
+            "passed": mantis_passed,
+            **gate,
+            "paired_stationary_day_block_intervals_95": _paired_model_intervals(
+                screen, candidates, raw_result, mantis_result
+            ),
+        },
+    }
+    print(f"frozen-screen-compare fold={name} state=complete", flush=True)
+    return result, raw_passed, mantis_passed, raw_observations, mantis_observations
 
 
 def _fit_arm(
