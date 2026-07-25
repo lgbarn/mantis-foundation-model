@@ -30,7 +30,12 @@ def _frame(direction: int, highs: list[float], lows: list[float]) -> pd.DataFram
 def test_candidate_timestamps_are_causal_and_long_trail_matches_oracle() -> None:
     # Decision at row 1, fill at row 2. Price reaches 2.5R, then gives back 0.75R.
     frame = _frame(1, [102.5, 102.0], [100.0, 101.7])
-    config = ExpectedRScreenConfig(window_bars=2, round_trip_commission=1.0, point_value=2.0)
+    config = ExpectedRScreenConfig(
+        window_bars=2,
+        round_trip_commission=1.0,
+        point_value=2.0,
+        timestamp_semantics="bar_close",
+    )
 
     candidates = ExpectedRScreen(config).generate_candidates(frame)
 
@@ -43,7 +48,12 @@ def test_candidate_timestamps_are_causal_and_long_trail_matches_oracle() -> None
 
 
 def test_short_stop_and_target_use_next_open_and_costs() -> None:
-    config = ExpectedRScreenConfig(window_bars=2, slippage_ticks=1, tick_size=0.25)
+    config = ExpectedRScreenConfig(
+        window_bars=2,
+        slippage_ticks=1,
+        tick_size=0.25,
+        timestamp_semantics="bar_close",
+    )
     stopped = ExpectedRScreen(config).generate_candidates(_frame(-1, [101.0], [99.5])).iloc[0]
     won = (
         ExpectedRScreen(config)
@@ -60,10 +70,52 @@ def test_short_stop_and_target_use_next_open_and_costs() -> None:
 def test_session_exit_uses_last_completed_bar_before_cutoff() -> None:
     frame = _frame(1, [100.5, 100.5], [99.5, 99.5])
     frame["timestamp"] = pd.date_range("2025-01-02T21:04:00Z", periods=4, freq="3min")
-    result = ExpectedRScreen(ExpectedRScreenConfig(window_bars=2)).generate_candidates(frame)
+    result = ExpectedRScreen(
+        ExpectedRScreenConfig(window_bars=2, timestamp_semantics="bar_close")
+    ).generate_candidates(frame)
 
     assert result.iloc[0]["exit_reason"] == "session"
     assert result.iloc[0]["outcome_ts"] == pd.Timestamp("2025-01-02T21:10:00Z")
+
+
+def test_raw_bar_open_ohlcv_derives_context_and_records_close_decision() -> None:
+    close = np.linspace(100.0, 110.0, 10)
+    timestamps = pd.date_range("2025-01-02T14:30:00Z", periods=10, freq="3min")
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "open": close,
+            "high": close + 0.5,
+            "low": close - 0.5,
+            "close": close,
+            "volume": np.ones(10),
+        }
+    )
+    config = ExpectedRScreenConfig(
+        window_bars=2,
+        horizon_bars=1,
+        atr_period=2,
+        cci_period=3,
+        trend_magic_atr_period=2,
+    )
+
+    candidates = ExpectedRScreen(config).generate_candidates(frame)
+
+    first = candidates.iloc[0]
+    decision_index = int(first["decision_index"])
+    assert first["decision_ts"] == timestamps[decision_index] + pd.Timedelta(minutes=3)
+    assert first["entry_ts"] == timestamps[decision_index + 1]
+    assert first["decision_ts"] == first["entry_ts"]
+    assert np.isfinite(first["risk_points"])
+
+
+def test_split_mask_purges_outcomes_crossing_the_boundary() -> None:
+    decisions = pd.Series(pd.to_datetime(["2025-06-30T23:00:00Z", "2025-06-30T20:00:00Z"]))
+    outcomes = pd.Series(pd.to_datetime(["2025-07-01T00:00:00Z", "2025-06-30T23:00:00Z"]))
+
+    mask = ExpectedRScreen._date_mask(decisions, outcomes, "2023-07-01", "2025-07-01")
+
+    np.testing.assert_array_equal(mask, [False, True])
 
 
 def test_fit_retains_rows_freezes_threshold_and_reports_gate(tmp_path: Path) -> None:
@@ -86,7 +138,7 @@ def test_fit_retains_rows_freezes_threshold_and_reports_gate(tmp_path: Path) -> 
     )
     # Exercise the chronology without needing multi-year fixture volume.
     config = replace(
-        ExpectedRScreenConfig(window_bars=512),
+        ExpectedRScreenConfig(window_bars=512, timestamp_semantics="bar_close"),
         train_start="2023-07-24",
         train_end="2023-07-27",
         validation_start="2023-07-27",
