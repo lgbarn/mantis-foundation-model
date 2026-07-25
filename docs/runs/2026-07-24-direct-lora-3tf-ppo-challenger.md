@@ -125,6 +125,55 @@ learned policy's accepted-trade count. The v3 source searches a bounded,
 deterministic probability and seed grid centered on learned participation while
 still requiring an exact accepted-trade match. All v2 evidence remains preserved.
 
+## Bounded qualification result
+
+The v3 bounded qualification completed on 2026-07-24 at source revision
+`f57268bee5591651bed4d4046a91b2bed4408fba`. Environment validation passed before
+training:
+
+- Finite observations: passed
+- Causal prefix: passed
+- Action masks: 192,479 comparisons with zero mismatches
+- Independent replay oracles: 17 of 17 passed
+- Throughput: median 6,976.134 steps/second against a 5,000 steps/second gate
+- Sealed holdout accessed: false
+
+The bounded training command then completed exactly one PPO update for each of
+the five development seeds. Every run reported finite gradients and deterministic
+checkpoint reload. The aggregate summary is:
+
+| Seed | Timesteps | Total loss | Enter rate | Outcome |
+| --- | ---: | ---: | ---: | --- |
+| 42 | 4,894 | 0.006513 | 80.95% | 21 BLOW, 0 PASS |
+| 43 | 5,942 | 0.000299 | 33.33% | 21 BLOW, 0 PASS |
+| 44 | 5,172 | 0.020357 | 52.38% | 21 BLOW, 0 PASS |
+| 45 | 6,489 | 0.005982 | 14.29% | 21 BLOW, 0 PASS |
+| 46 | 7,549 | -0.013016 | 23.81% | 21 BLOW, 0 PASS |
+
+The aggregate result is 0 passes and 105 account blows. The generated
+`seed-summary.json` therefore records `quality_claim = false`. This is the expected
+interpretation of a one-update pipeline qualification: the environment, optimizer,
+checkpoint, reload, and provenance path work, but the resulting policies are not
+trained enough for performance evaluation or use.
+
+Artifacts are preserved under:
+
+```text
+/workspace/mantis/runs/rl-entry-topstep-100k-direct-lora-3tf-v3/
+```
+
+Each seed has a nonempty `manifest.json`, `metrics.json`, `state.json`,
+`checkpoints/update-000001/bundle.json`, and
+`checkpoints/update-000001/checkpoint.pt`. All five runs bind to config SHA-256
+`0bbe932fb0b30a2da575b779e3048cafd86e28100e39e844feea8ab825f3c799` and the
+same immutable source revision above.
+
+Pod `mgcg3d3xcw4op9` was deleted after the audit. A subsequent official CLI query
+returned an empty Pod list. The remaining RunPod balance was $110.73 and the only
+continuing charge was the $0.015/hour network volume. Pod billing had posted $2.70
+for the first two hourly buckets at the time of teardown; the final partial hour
+was not yet itemized, so it must not be reported as an exact final Pod cost.
+
 ## Advancement gates
 
 Advance beyond the bounded update only when all of the following are true:
