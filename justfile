@@ -51,8 +51,8 @@ frozen-screen-prepare market output config="mantis-v2/configs/frozen-expected-r-
 frozen-screen-embed input output config="mantis-v2/configs/frozen-expected-r-v1.json":
     uv run mantis-v2 frozen-screen-embed --config {{quote(config)}} --input {{quote(input)}} --output {{quote(output)}}
 
-frozen-screen-compare input embeddings output config="mantis-v2/configs/frozen-expected-r-v1.json":
-    uv run mantis-v2 frozen-screen-compare --config {{quote(config)}} --input {{quote(input)}} --embeddings {{quote(embeddings)}} --output {{quote(output)}}
+frozen-screen-compare input embeddings output config="mantis-v2/configs/frozen-expected-r-v1.json" comparison_device="cpu":
+    uv run mantis-v2 frozen-screen-compare --config {{quote(config)}} --input {{quote(input)}} --embeddings {{quote(embeddings)}} --output {{quote(output)}} --comparison-device {{quote(comparison_device)}}
 
 frozen-screen-preflight input embedding_output checks exact_command hourly_rate deadline_hours output:
     uv run mantis-v2 frozen-screen-preflight --input {{quote(input)}} --embedding-output {{quote(embedding_output)}} --checks {{quote(checks)}} --exact-command {{quote(exact_command)}} --hourly-rate {{quote(hourly_rate)}} --deadline-hours {{quote(deadline_hours)}} --output {{quote(output)}}

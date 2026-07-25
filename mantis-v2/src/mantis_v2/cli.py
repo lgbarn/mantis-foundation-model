@@ -413,6 +413,7 @@ def _parser() -> argparse.ArgumentParser:
     frozen_compare.add_argument("--input", required=True, type=Path)
     frozen_compare.add_argument("--embeddings", required=True, type=Path)
     frozen_compare.add_argument("--output", required=True, type=Path)
+    frozen_compare.add_argument("--comparison-device", choices=("cpu", "cuda"), default="cpu")
     frozen_preflight = subparsers.add_parser("frozen-screen-preflight")
     frozen_preflight.add_argument("--input", required=True, type=Path)
     frozen_preflight.add_argument("--embedding-output", required=True, type=Path)
@@ -662,7 +663,11 @@ def main() -> None:
         elif args.command == "frozen-screen-compare":
             frozen_config = FrozenExpectedRConfig.from_json(args.config)
             result = compare_frozen_artifacts(
-                args.input, args.embeddings, args.output, frozen_config
+                args.input,
+                args.embeddings,
+                args.output,
+                frozen_config,
+                comparison_device=args.comparison_device,
             )
         elif args.command == "frozen-screen-preflight":
             checks_receipt = _load_matrix_json(args.checks)

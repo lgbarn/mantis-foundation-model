@@ -274,13 +274,17 @@ def compare_frozen_artifacts(
     embedding_manifest_path: Path,
     output: Path,
     config: FrozenExpectedRConfig,
+    *,
+    comparison_device: Literal["cpu", "cuda"] = "cpu",
 ) -> dict[str, Any]:
     if output.exists() or output.with_suffix(output.suffix + ".tmp").exists():
         raise FrozenExpectedRError(f"comparison output already exists: {output}")
     candidates, raw, mantis = load_frozen_embeddings(
         input_manifest_path, embedding_manifest_path, config
     )
-    result = compare_frozen_to_raw(candidates, raw, mantis, config)
+    result = compare_frozen_to_raw(
+        candidates, raw, mantis, config, comparison_device=comparison_device
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
     _atomic_json(output, result)
     return result
@@ -576,6 +580,7 @@ def compare_frozen_to_raw(
     config: FrozenExpectedRConfig,
     *,
     maximum_workers: int = 2,
+    comparison_device: Literal["cpu", "cuda"] = "cpu",
 ) -> dict[str, Any]:
     """Compare both ridge arms on identical rows under the initial date gate."""
     raw = np.asarray(raw_features, dtype=np.float32)
@@ -591,12 +596,17 @@ def compare_frozen_to_raw(
         raise FrozenExpectedRError("raw and Mantis features must be finite matrices")
     if maximum_workers < 1 or maximum_workers > 2:
         raise FrozenExpectedRError("comparison workers must be in [1, 2]")
+    if comparison_device == "cuda" and not torch.cuda.is_available():
+        raise FrozenExpectedRError("CUDA comparison requested but CUDA is unavailable")
     context = raw[:, -config.context_width :]
     combined = np.concatenate((mantis, context), axis=1)
-    with ThreadPoolExecutor(max_workers=maximum_workers) as executor:
+    workers = 1 if comparison_device == "cuda" else maximum_workers
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         completed = list(
             executor.map(
-                lambda fold: _fit_fold(fold, candidates, raw, combined, config),
+                lambda fold: _fit_fold(
+                    fold, candidates, raw, combined, config, comparison_device
+                ),
                 _ANCHORED_FOLDS,
             )
         )
@@ -624,6 +634,7 @@ def compare_frozen_to_raw(
         "schema_version": 1,
         "config_sha256": config.digest,
         "row_ids_sha256": _json_digest(candidates["row_id"].tolist()),
+        "comparison_backend": _comparison_backend(comparison_device),
         "initial_screen": fold_results[-1],
         "folds": fold_results,
         "promotion": {
@@ -647,6 +658,7 @@ def _fit_fold(
     raw: np.ndarray,
     combined: np.ndarray,
     config: FrozenExpectedRConfig,
+    comparison_device: Literal["cpu", "cuda"],
 ) -> tuple[
     dict[str, Any],
     bool,
@@ -670,8 +682,10 @@ def _fit_fold(
             test_end=test_end,
         )
     )
-    raw_result = _fit_arm(screen, candidates, raw)
-    mantis_result = _fit_arm(screen, candidates, combined)
+    raw_result = _fit_arm(screen, candidates, raw, comparison_device, f"{name}:raw")
+    mantis_result = _fit_arm(
+        screen, candidates, combined, comparison_device, f"{name}:mantis"
+    )
     raw_expectancy = raw_result["test"]["selected_expectancy"]
     mantis_expectancy = mantis_result["test"]["selected_expectancy"]
     gate = {
@@ -715,12 +729,29 @@ def _fit_fold(
 
 
 def _fit_arm(
-    screen: ExpectedRScreen, candidates: pd.DataFrame, features: np.ndarray
+    screen: ExpectedRScreen,
+    candidates: pd.DataFrame,
+    features: np.ndarray,
+    comparison_device: Literal["cpu", "cuda"],
+    progress_label: str,
 ) -> dict[str, Any]:
+    print(f"frozen-screen-compare arm={progress_label} state=started", flush=True)
     owned = candidates.copy()
     owned.attrs["raw_features"] = features
     owned.attrs["data_sha256"] = _json_digest(owned["row_id"].tolist())
-    result = screen.fit(owned)
+    predictor = (
+        None
+        if comparison_device == "cpu"
+        else lambda scaled, train, targets, weights, alpha: _cuda_ridge_predict(
+            scaled,
+            train,
+            targets,
+            weights,
+            alpha,
+            progress_label=progress_label,
+        )
+    )
+    result = screen.fit(owned, ridge_predictor=predictor)
     decisions = pd.to_datetime(candidates["decision_ts"], utc=True)
     outcomes = pd.to_datetime(candidates["outcome_ts"], utc=True)
     test = screen._date_mask(decisions, outcomes, screen.config.test_start, screen.config.test_end)
@@ -736,7 +767,63 @@ def _fit_arm(
     result["selected_session_keys"] = (
         screen._session_keys(candidates.loc[test, "decision_ts"])[selected].astype(str).tolist()
     )
+    print(f"frozen-screen-compare arm={progress_label} state=complete", flush=True)
     return result
+
+
+def _comparison_backend(device: Literal["cpu", "cuda"]) -> dict[str, Any]:
+    if device == "cpu":
+        return {"device": "cpu", "ridge_solver": "sklearn_lsqr"}
+    return {
+        "device": "cuda",
+        "ridge_solver": "torch_weighted_fp64_cholesky",
+        "torch_version": torch.__version__,
+        "cuda_version": torch.version.cuda,
+        "gpu_name": torch.cuda.get_device_name(),
+    }
+
+
+def _cuda_ridge_predict(
+    features: np.ndarray,
+    train: np.ndarray,
+    targets: np.ndarray,
+    weights: np.ndarray,
+    alpha: float,
+    *,
+    progress_label: str,
+) -> np.ndarray:
+    if not torch.cuda.is_available():
+        raise FrozenExpectedRError("CUDA comparison requested but CUDA is unavailable")
+    print(f"frozen-screen-compare arm={progress_label} state=cuda_transfer", flush=True)
+    device = torch.device("cuda")
+    with torch.inference_mode():
+        x_train = torch.as_tensor(features[train], dtype=torch.float64, device=device)
+        y_train = torch.as_tensor(targets[train], dtype=torch.float64, device=device)
+        train_weight = torch.as_tensor(weights[train], dtype=torch.float64, device=device)
+        weight_sum = train_weight.sum()
+        x_mean = (x_train * train_weight[:, None]).sum(dim=0) / weight_sum
+        y_mean = (y_train * train_weight).sum() / weight_sum
+        centered_x = x_train - x_mean
+        centered_y = y_train - y_mean
+        print(f"frozen-screen-compare arm={progress_label} state=cuda_gram", flush=True)
+        gram = centered_x.T @ (centered_x * train_weight[:, None])
+        gram.diagonal().add_(alpha)
+        right_hand_side = centered_x.T @ (centered_y * train_weight)
+        print(f"frozen-screen-compare arm={progress_label} state=cuda_solve", flush=True)
+        factor = torch.linalg.cholesky(gram)
+        coefficients = torch.cholesky_solve(
+            right_hand_side[:, None], factor
+        ).squeeze(1)
+        predictions = np.empty(len(features), dtype=np.float64)
+        print(f"frozen-screen-compare arm={progress_label} state=cuda_predict", flush=True)
+        for start in range(0, len(features), 4096):
+            stop = min(start + 4096, len(features))
+            chunk = torch.as_tensor(
+                features[start:stop], dtype=torch.float64, device=device
+            )
+            values = (chunk - x_mean) @ coefficients + y_mean
+            predictions[start:stop] = values.cpu().numpy()
+    return predictions
 
 
 def _stationary_expectancy_interval(

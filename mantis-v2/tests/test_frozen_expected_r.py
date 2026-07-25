@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 from mantis_v2 import frozen_expected_r
 from mantis_v2.frozen_expected_r import (
     FrozenExpectedRConfig,
@@ -160,6 +161,105 @@ def test_parallel_comparison_is_numerically_identical_to_serial(
     assert parallel == serial
     with pytest.raises(FrozenExpectedRError, match=r"comparison workers must be in \[1, 2\]"):
         compare_frozen_to_raw(candidates, raw, mantis, config, maximum_workers=3)
+
+
+def test_cuda_comparison_fails_closed_when_cuda_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidates = _candidates()
+    features = np.ones((len(candidates), 3), dtype=np.float32)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    with pytest.raises(FrozenExpectedRError, match="CUDA comparison requested"):
+        compare_frozen_to_raw(
+            candidates,
+            features,
+            features,
+            FrozenExpectedRConfig(),
+            comparison_device="cuda",
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA parity requires a GPU")
+def test_cuda_comparison_matches_cpu_predictions_metrics_and_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidates = _candidates(240)
+    dates = pd.date_range("2024-01-01T15:00:00Z", periods=len(candidates), freq="D")
+    candidates["decision_ts"] = dates
+    candidates["outcome_ts"] = dates + pd.Timedelta(minutes=30)
+    monkeypatch.setattr(
+        frozen_expected_r,
+        "_ANCHORED_FOLDS",
+        (
+            (
+                "fold_1",
+                "2024-01-01",
+                "2024-03-01",
+                "2024-03-01",
+                "2024-04-01",
+                "2024-04-01",
+                "2024-05-01",
+            ),
+            (
+                "fold_2",
+                "2024-01-01",
+                "2024-05-01",
+                "2024-05-01",
+                "2024-06-01",
+                "2024-06-01",
+                "2024-07-01",
+            ),
+            (
+                "fold_3",
+                "2024-01-01",
+                "2024-07-01",
+                "2024-07-01",
+                "2024-08-01",
+                "2024-08-01",
+                "2024-09-01",
+            ),
+        ),
+    )
+    rng = np.random.default_rng(86)
+    raw = rng.normal(size=(len(candidates), 15)).astype(np.float32)
+    mantis = rng.normal(size=(len(candidates), 12)).astype(np.float32)
+    config = FrozenExpectedRConfig(bootstrap_replicates=10)
+
+    cpu = compare_frozen_to_raw(candidates, raw, mantis, config, maximum_workers=1)
+    cuda = compare_frozen_to_raw(
+        candidates,
+        raw,
+        mantis,
+        config,
+        maximum_workers=1,
+        comparison_device="cuda",
+    )
+
+    assert cuda["comparison_backend"]["device"] == "cuda"
+    assert cuda["selected"] == cpu["selected"]
+    assert cuda["status"] == cpu["status"]
+    for cpu_fold, cuda_fold in zip(cpu["folds"], cuda["folds"], strict=True):
+        for arm in ("raw", "mantis"):
+            cpu_arm = cpu_fold[arm]
+            cuda_arm = cuda_fold[arm]
+            cpu_predictions = np.asarray(
+                [row["prediction"] for row in cpu_arm["rows"]["values"]]
+            )
+            cuda_predictions = np.asarray(
+                [row["prediction"] for row in cuda_arm["rows"]["values"]]
+            )
+            np.testing.assert_allclose(cuda_predictions, cpu_predictions, rtol=1e-4, atol=1e-4)
+            assert cuda_arm["test"]["mse"] == pytest.approx(
+                cpu_arm["test"]["mse"], rel=1e-4, abs=1e-6
+            )
+            assert (
+                cuda_arm["test"]["selected_trades"]
+                == cpu_arm["test"]["selected_trades"]
+            )
+            assert cuda_arm["test"]["selected_expectancy"] == pytest.approx(
+                cpu_arm["test"]["selected_expectancy"], abs=1e-12
+            )
 
 
 def test_config_rejects_unknown_keys(tmp_path: Path) -> None:

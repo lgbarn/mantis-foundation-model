@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import time
 from pathlib import Path
@@ -123,6 +124,9 @@ class ExpectedRScreenConfig:
 
 _MARKET_COLUMNS = ("open", "high", "low", "close", "volume")
 _CONTEXT_COLUMNS = ("trend_magic_direction", "trend_magic_distance_r", "session_minute")
+RidgePredictor = Callable[
+    [np.ndarray, np.ndarray, np.ndarray, np.ndarray, float], np.ndarray
+]
 
 
 def _clock(value: str) -> time:
@@ -404,7 +408,12 @@ class ExpectedRScreen:
         temporary.replace(artifact_path)
         return artifact
 
-    def fit(self, candidates: pd.DataFrame) -> dict[str, Any]:
+    def fit(
+        self,
+        candidates: pd.DataFrame,
+        *,
+        ridge_predictor: RidgePredictor | None = None,
+    ) -> dict[str, Any]:
         """Fit train-only scaling/ridge, freeze validation threshold, and evaluate test."""
         features = candidates.attrs.get("raw_features")
         if not isinstance(features, np.ndarray) or len(features) != len(candidates):
@@ -446,10 +455,17 @@ class ExpectedRScreen:
             chunk = scaled[start : start + 4096]
             chunk -= mean32
             chunk /= scale32
-        model = Ridge(alpha=self.config.ridge_alpha, fit_intercept=True, solver="lsqr")
         targets = candidates["net_r"].to_numpy(dtype=np.float64)
-        model.fit(scaled[train], targets[train], sample_weight=train_weight)
-        predictions = model.predict(scaled)
+        if ridge_predictor is None:
+            model = Ridge(alpha=self.config.ridge_alpha, fit_intercept=True, solver="lsqr")
+            model.fit(scaled[train], targets[train], sample_weight=train_weight)
+            predictions = model.predict(scaled)
+        else:
+            predictions = ridge_predictor(
+                scaled, train, targets, weights, self.config.ridge_alpha
+            )
+            if predictions.shape != targets.shape or not np.isfinite(predictions).all():
+                raise ExpectedRScreenError("ridge predictor returned invalid predictions")
         validation = masks["validation"]
         active_days = np.unique(self._session_keys(decision[validation])).size
         desired = max(1, round(active_days * self.config.entries_per_active_session))

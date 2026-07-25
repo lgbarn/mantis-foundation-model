@@ -115,7 +115,8 @@ just frozen-screen-embed \
 just frozen-screen-compare \
   /external/frozen-screen-v1/input/manifest.json \
   /external/frozen-screen-v1/embed/manifest.json \
-  /external/frozen-screen-v1/selection.json
+  /external/frozen-screen-v1/selection.json \
+  mantis-v2/configs/frozen-expected-r-v1.json cuda
 ```
 
 The preflight receipt requires the four focused checks to pass in under 60
@@ -129,7 +130,9 @@ a rerun verifies complete shards and resumes at the first uncommitted row.
 
 Comparison fits identical fixed-ridge raw and Mantis arms on the same row IDs,
 context, targets, uniqueness weights, threshold policy, and three anchored
-folds. Mantis is selected only with at least two fold wins and a positive pooled
+folds. The CUDA comparison fails closed when CUDA is unavailable and uses a
+weighted FP64 Cholesky ridge solve with progress markers; it never falls back to
+CPU. Mantis is selected only with at least two fold wins and a positive pooled
 selected-expectancy interval. Otherwise qualifying raw is selected; if neither
 qualifies the durable result is `stopped`. TensorBoard, fine-tuning, PPO, and the
 sealed 2026 holdout are not part of this stage.
