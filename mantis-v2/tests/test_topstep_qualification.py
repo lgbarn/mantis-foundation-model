@@ -68,8 +68,8 @@ def test_replay_enforces_next_bar_session_exit_daily_stop_and_stop_breaker() -> 
     with pytest.raises(TopstepQualificationError, match="next bar"):
         qualification.replay((_day(2, stale),))
 
-    late = replace(_decision(date(2026, 1, 2)), exit_ts=datetime(2026, 1, 2, 21, 11, tzinfo=UTC))
-    with pytest.raises(TopstepQualificationError, match="session exit"):
+    late = replace(_decision(date(2026, 1, 2)), exit_ts=datetime(2026, 1, 2, 21, 1, tzinfo=UTC))
+    with pytest.raises(TopstepQualificationError, match="force-flat"):
         qualification.replay((_day(2, late),))
 
     stopped_once = _decision(date(2026, 1, 2), exit_ticks=79980)
@@ -167,3 +167,25 @@ def test_days_must_be_complete_chronological_and_decisions_non_overlapping() -> 
     invalid_worst = replace(_decision(date(2026, 1, 2)), worst_ticks=80001)
     with pytest.raises(TopstepQualificationError, match="worst price"):
         qualification.replay((_day(2, invalid_worst),))
+
+
+def test_account_day_and_strategy_rth_use_separate_chicago_clocks() -> None:
+    qualification = TopstepQualification(Topstep100KRules())
+    evening = replace(
+        _decision(date(2026, 1, 3)),
+        decision_ts=datetime(2026, 1, 2, 23, 0, tzinfo=UTC),
+        entry_ts=datetime(2026, 1, 2, 23, 3, tzinfo=UTC),
+        exit_ts=datetime(2026, 1, 2, 23, 6, tzinfo=UTC),
+    )
+    assert qualification.account_session_date(evening.entry_ts) == date(2026, 1, 3)
+    with pytest.raises(TopstepQualificationError, match="outside the strategy RTH"):
+        qualification.replay((_day(3, evening),))
+
+    before_open = replace(
+        _decision(date(2026, 1, 2)),
+        decision_ts=datetime(2026, 1, 2, 14, 23, tzinfo=UTC),
+        entry_ts=datetime(2026, 1, 2, 14, 26, tzinfo=UTC),
+        exit_ts=datetime(2026, 1, 2, 14, 29, tzinfo=UTC),
+    )
+    with pytest.raises(TopstepQualificationError, match="outside the strategy RTH"):
+        qualification.replay((_day(2, before_open),))

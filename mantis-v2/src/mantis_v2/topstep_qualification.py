@@ -31,8 +31,11 @@ class Topstep100KRules:
     consistency_limit: float = 0.50
     minimum_trading_days: int = 2
     session_timezone: str = "America/Chicago"
-    session_start: str = "17:00"
-    session_exit: str = "15:10"
+    account_session_start: str = "17:00"
+    account_session_end: str = "16:00"
+    strategy_entry_start: str = "08:30"
+    strategy_entry_end: str = "15:00"
+    strategy_force_flat: str = "15:00"
     maximum_minis: int = 10
     maximum_micros: int = 100
     maximum_mnq: int = 10
@@ -192,6 +195,20 @@ class TopstepQualification:
         """Replay complete chronological days against the pinned account rules."""
         self._validate_days(days, chronological=True)
         return self._replay(days)
+
+    def account_session_date(self, timestamp: datetime) -> date:
+        """Map an aware timestamp to its 17:00-16:00 CT Topstep account day."""
+        if timestamp.tzinfo is None:
+            raise TopstepQualificationError("account timestamp must include a timezone")
+        local = timestamp.astimezone(ZoneInfo(self.rules.session_timezone))
+        clock = local.time().replace(tzinfo=None)
+        start = time.fromisoformat(self.rules.account_session_start)
+        end = time.fromisoformat(self.rules.account_session_end)
+        if clock >= start:
+            return date.fromordinal(local.date().toordinal() + 1)
+        if clock <= end:
+            return local.date()
+        raise TopstepQualificationError("timestamp falls outside the Topstep account session")
 
     def qualify(
         self, days: tuple[QualificationDay, ...], *, source_hash: str
@@ -367,24 +384,20 @@ class TopstepQualification:
         zone = ZoneInfo(self.rules.session_timezone)
         local_entry = decision.entry_ts.astimezone(zone)
         local_exit = decision.exit_ts.astimezone(zone)
-        start_clock = time.fromisoformat(self.rules.session_start)
-        exit_clock = time.fromisoformat(self.rules.session_exit)
-        entry_session = (
-            date.fromordinal(local_entry.date().toordinal() + 1)
-            if local_entry.time().replace(tzinfo=None) >= start_clock
-            else local_entry.date()
-        )
-        exit_session = (
-            date.fromordinal(local_exit.date().toordinal() + 1)
-            if local_exit.time().replace(tzinfo=None) >= start_clock
-            else local_exit.date()
-        )
+        entry_clock = local_entry.time().replace(tzinfo=None)
+        local_exit_clock = local_exit.time().replace(tzinfo=None)
+        entry_start = time.fromisoformat(self.rules.strategy_entry_start)
+        entry_end = time.fromisoformat(self.rules.strategy_entry_end)
+        force_flat = time.fromisoformat(self.rules.strategy_force_flat)
         if (
-            entry_session != session_date
-            or exit_session != session_date
-            or local_exit.time().replace(tzinfo=None) > exit_clock
+            self.account_session_date(decision.entry_ts) != session_date
+            or self.account_session_date(decision.exit_ts) != session_date
         ):
-            raise TopstepQualificationError("decision violates the configured session exit")
+            raise TopstepQualificationError("decision crosses the Topstep account session")
+        if not entry_start <= entry_clock < entry_end:
+            raise TopstepQualificationError("entry is outside the strategy RTH window")
+        if local_exit_clock > force_flat:
+            raise TopstepQualificationError("decision violates the strategy force-flat time")
 
     def _replay(self, days: tuple[QualificationDay, ...]) -> AccountReplay:
         rules = self.rules
