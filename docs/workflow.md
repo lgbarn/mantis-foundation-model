@@ -190,6 +190,32 @@ CPU. It does not qualify production embeddings or trading results.
 just verify-upstream
 ```
 
+## Paper-first LP-FT candidate
+
+The single supported LP-FT experiment uses
+`mantis-v2/configs/nextleg-runpod-cuda-3tf-lp-ft-s42-v1.toml`. Run `train`
+before `validated-export`. The training stage first freezes the encoder and
+warms the existing NextLeg heads, then hashes the transition parent, unfreezes
+the full encoder without installing LoRA, and starts a fresh lower-learning-rate
+optimizer. Checkpoint state records both phase-local update counts, the selected
+stage-two phase, the transition-parent digest, and the trainable parameter
+identity so resume cannot silently cross experiments. Full fine-tuning starts
+at its configured `1e-5` learning rate with no repeated warm-up, then follows
+cosine decay across its exact 8,000-update phase budget.
+
+On the supported RunPod image:
+
+```bash
+uv run mantis-v2 train \
+  --config mantis-v2/configs/nextleg-runpod-cuda-3tf-lp-ft-s42-v1.toml
+uv run mantis-v2 validated-export \
+  --config mantis-v2/configs/nextleg-runpod-cuda-3tf-lp-ft-s42-v1.toml
+```
+
+Do not add LoRA to this run. Do not apply temperature scaling to the NextLeg
+regression outputs. Downstream Trend Magic classification remains a later,
+unchanged proper-score gate over a frozen validated export.
+
 This command:
 
 1. Downloads or reuses the exact pinned Hub revision.

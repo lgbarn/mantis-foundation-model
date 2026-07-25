@@ -115,10 +115,11 @@ def test_checkpoint_round_trips_and_binds_adaptation_state(tmp_path: Path) -> No
     optimizer = torch.optim.AdamW(model.parameters())
     state: dict[str, object] = {
         "phase": "lora",
+        "stage_two_phase": "lora",
         "phase_updates": 6,
         "total_updates": 10,
         "warm_start_updates": 4,
-        "lora_updates": 6,
+        "stage_two_updates": 6,
         "transition_parent": "a" * 64,
         "optimizer_identity": "b" * 64,
         "trainable_parameters": 8,
@@ -131,6 +132,27 @@ def test_checkpoint_round_trips_and_binds_adaptation_state(tmp_path: Path) -> No
     assert load_checkpoint(path, model, optimizer, provenance(), state) == (4, 10)
     with pytest.raises(CheckpointError, match="adaptation state mismatch"):
         load_checkpoint(path, model, optimizer, provenance(), {**state, "total_updates": 11})
+
+
+def test_checkpoint_preserves_legacy_lora_adaptation_for_export_repair(tmp_path: Path) -> None:
+    model = nn.Linear(3, 2)
+    optimizer = torch.optim.AdamW(model.parameters())
+    legacy: dict[str, object] = {
+        "phase": "lora",
+        "phase_updates": 6,
+        "total_updates": 10,
+        "warm_start_updates": 4,
+        "lora_updates": 6,
+        "transition_parent": "a" * 64,
+        "optimizer_identity": "b" * 64,
+        "trainable_parameters": 8,
+        "frozen_parameters": 12,
+    }
+    path = tmp_path / "legacy-adaptation.pt"
+    save_checkpoint(path, model, optimizer, 3, 10, provenance(), legacy)
+
+    assert checkpoint_adaptation_state(path, provenance()) == legacy
+    assert load_checkpoint(path, model, optimizer, provenance(), legacy) == (4, 10)
 
 
 def test_checkpoint_wraps_structurally_malformed_safe_payload(tmp_path: Path) -> None:

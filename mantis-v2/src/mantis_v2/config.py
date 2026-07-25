@@ -27,6 +27,7 @@ ModelMode = Literal[
     "lora_r8_alpha16",
     "lora_r16_alpha32",
     "lora_r8_alpha16_head_warmstart",
+    "lp_ft",
 ]
 
 
@@ -84,24 +85,46 @@ class TrainingConfig:
     warmup_epochs: int
     early_stopping_patience: int
 
-    def learning_rate_for_step(self, step: int, steps_per_epoch: int) -> float:
+    def learning_rate_for_step(
+        self,
+        step: int,
+        steps_per_epoch: int,
+        *,
+        base_learning_rate: float | None = None,
+        total_steps_override: int | None = None,
+        warmup_steps_override: int | None = None,
+    ) -> float:
         """Return the upstream per-update linear-warmup and cosine-decay rate."""
         if steps_per_epoch <= 0:
             raise ValueError("steps_per_epoch must be positive")
+        learning_rate = self.learning_rate if base_learning_rate is None else base_learning_rate
         total_steps = self.epochs * steps_per_epoch
+        if total_steps_override is not None:
+            if total_steps_override <= 0:
+                raise ValueError("total_steps_override must be positive")
+            total_steps = total_steps_override
         if not 1 <= step <= total_steps:
             raise ValueError(f"step must be in [1, {total_steps}]")
-        warmup_steps = self.warmup_epochs * steps_per_epoch
-        if warmup_steps and step < warmup_steps:
-            return self.learning_rate * step / warmup_steps
+        if warmup_steps_override is not None and warmup_steps_override < 0:
+            raise ValueError("warmup_steps_override must be nonnegative")
+        configured_warmup = (
+            self.warmup_epochs * steps_per_epoch
+            if warmup_steps_override is None
+            else warmup_steps_override
+        )
+        warmup_steps = min(configured_warmup, total_steps)
+        if warmup_steps and step <= warmup_steps:
+            return learning_rate * step / warmup_steps
         if not warmup_steps:
             if total_steps == 1:
-                return self.learning_rate
+                return learning_rate
             progress = (step - 1) / (total_steps - 1)
-            return self.learning_rate * 0.5 * (1.0 + math.cos(math.pi * progress))
+            return learning_rate * 0.5 * (1.0 + math.cos(math.pi * progress))
         decay_steps = total_steps - warmup_steps
+        if decay_steps == 0:
+            return learning_rate
         progress = (step - warmup_steps) / decay_steps
-        return self.learning_rate * 0.5 * (1.0 + math.cos(math.pi * progress))
+        return learning_rate * 0.5 * (1.0 + math.cos(math.pi * progress))
 
 
 @dataclass(frozen=True)
@@ -110,6 +133,14 @@ class AdaptationConfig:
     total_updates: int
     lora_rank: int
     lora_alpha: int
+
+
+@dataclass(frozen=True)
+class LPFTConfig:
+    warm_start_updates: int
+    total_updates: int
+    finetune_learning_rate: float
+    finetune_warmup_updates: int
 
 
 @dataclass(frozen=True)
@@ -143,7 +174,7 @@ class PipelineConfig:
     data: DataConfig
     model: ModelConfig
     training: TrainingConfig
-    adaptation: AdaptationConfig | None
+    adaptation: AdaptationConfig | LPFTConfig | None
     target: TargetConfig
     evaluation: EvaluationConfig
     export: ExportConfig
@@ -336,9 +367,10 @@ def load_config(path: str | Path) -> PipelineConfig:
             "lora_r8_alpha16",
             "lora_r16_alpha32",
             "lora_r8_alpha16_head_warmstart",
+            "lp_ft",
         },
     )
-    adaptation: AdaptationConfig | None = None
+    adaptation: AdaptationConfig | LPFTConfig | None = None
     adaptation_raw = raw.get("adaptation")
     if mode == "lora_r8_alpha16_head_warmstart":
         adaptation_values = _section(
@@ -360,8 +392,48 @@ def load_config(path: str | Path) -> PipelineConfig:
             lora_rank=8,
             lora_alpha=16,
         )
+    elif mode == "lp_ft":
+        adaptation_values = _section(
+            raw,
+            "adaptation",
+            {
+                "warm_start_updates",
+                "total_updates",
+                "finetune_learning_rate",
+                "finetune_warmup_updates",
+            },
+        )
+        warm_start_updates = _positive(
+            adaptation_values["warm_start_updates"], "adaptation.warm_start_updates"
+        )
+        total_updates = _positive(adaptation_values["total_updates"], "adaptation.total_updates")
+        if warm_start_updates >= total_updates:
+            raise ConfigError("adaptation.warm_start_updates must be less than total_updates")
+        finetune_learning_rate = _number(
+            adaptation_values["finetune_learning_rate"],
+            "adaptation.finetune_learning_rate",
+        )
+        if finetune_learning_rate <= 0:
+            raise ConfigError("adaptation.finetune_learning_rate must be > 0")
+        finetune_warmup_updates = _positive(
+            adaptation_values["finetune_warmup_updates"],
+            "adaptation.finetune_warmup_updates",
+            allow_zero=True,
+        )
+        if finetune_warmup_updates >= total_updates - warm_start_updates:
+            raise ConfigError(
+                "adaptation.finetune_warmup_updates must be less than fine-tune updates"
+            )
+        adaptation = LPFTConfig(
+            warm_start_updates=warm_start_updates,
+            total_updates=total_updates,
+            finetune_learning_rate=finetune_learning_rate,
+            finetune_warmup_updates=finetune_warmup_updates,
+        )
     elif adaptation_raw is not None:
-        raise ConfigError("[adaptation] requires model.mode lora_r8_alpha16_head_warmstart")
+        raise ConfigError(
+            "[adaptation] requires model.mode lora_r8_alpha16_head_warmstart or lp_ft"
+        )
     validation_fraction = _number(data["validation_fraction"], "data.validation_fraction")
     if not 0.0 < validation_fraction < 1.0:
         raise ConfigError("data.validation_fraction must be between 0 and 1")

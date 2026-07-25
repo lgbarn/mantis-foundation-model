@@ -149,6 +149,32 @@ validated-exports each cell, then writes a non-promoting immutable
 `screen-decision.json`; it
 does not run downstream, RL, simulation, Optuna, or the rejected 4TF matrix.
 
+### Paper-first 3TF LP-FT candidate
+
+`configs/nextleg-runpod-cuda-3tf-lp-ft-s42-v1.toml` is the isolated LP-FT
+candidate. It starts from the pinned official MantisV2 checkpoint, trains only
+the existing candle and leg heads for 2,000 updates, then carries those exact
+head tensors into 8,000 updates of full encoder fine-tuning. The transition
+creates a fresh AdamW optimizer and changes the learning rate from `1e-4` for
+head warm-up to an immediate `1e-5` cosine decay for full fine-tuning. It
+installs no LoRA adapters and does not repeat warm-up in the second phase.
+
+Run the candidate on a prepared CUDA Pod in this order:
+
+```bash
+uv run mantis-v2 train \
+  --config mantis-v2/configs/nextleg-runpod-cuda-3tf-lp-ft-s42-v1.toml
+uv run mantis-v2 validated-export \
+  --config mantis-v2/configs/nextleg-runpod-cuda-3tf-lp-ft-s42-v1.toml
+```
+
+The first command is resumable across the head-to-fine-tune transition. Export
+accepts only the validation-selected fine-tune-phase checkpoint and remains a
+diagnostic candidate until its downstream proper-score gate passes. This is an
+LP-FT mechanism test, not a direct replication of the NeurIPS result: the paper
+studies cross-entropy classification, while NextLeg uses candle MSE and leg
+SmoothL1. Temperature scaling is therefore not part of this foundation run.
+
 `rl-dry-run` validates the locked entry-only RL experiment without training or
 reading the sealed holdout. It rehashes the source, dependency lock, corpus,
 embeddings, foundation export, and foundation weights before atomically writing

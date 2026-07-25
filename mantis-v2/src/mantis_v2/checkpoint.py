@@ -160,20 +160,30 @@ def checkpoint_adaptation_state(path: Path, provenance: Provenance) -> dict[str,
         raise CheckpointError("checkpoint adaptation state must be a mapping")
     required = {
         "phase",
+        "stage_two_phase",
         "phase_updates",
         "total_updates",
         "warm_start_updates",
-        "lora_updates",
+        "stage_two_updates",
         "transition_parent",
         "optimizer_identity",
         "trainable_parameters",
         "frozen_parameters",
     }
-    if set(adaptation) != required:
+    legacy_required = (required - {"stage_two_phase", "stage_two_updates"}) | {"lora_updates"}
+    if set(adaptation) == required:
+        stage_two_phase = adaptation["stage_two_phase"]
+        stage_two_key = "stage_two_updates"
+    elif set(adaptation) == legacy_required:
+        stage_two_phase = "lora"
+        stage_two_key = "lora_updates"
+    else:
         raise CheckpointError("checkpoint adaptation state schema mismatch")
-    if adaptation["phase"] not in {"warm_start", "lora"}:
+    if stage_two_phase not in {"lora", "finetune"}:
+        raise CheckpointError("checkpoint adaptation stage-two phase is invalid")
+    if adaptation["phase"] not in {"warm_start", stage_two_phase}:
         raise CheckpointError("checkpoint adaptation phase is invalid")
-    for key in ("phase_updates", "total_updates", "warm_start_updates", "lora_updates"):
+    for key in ("phase_updates", "total_updates", "warm_start_updates", stage_two_key):
         value = adaptation[key]
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise CheckpointError(f"checkpoint adaptation {key} is invalid")
@@ -182,18 +192,20 @@ def checkpoint_adaptation_state(path: Path, provenance: Provenance) -> dict[str,
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise CheckpointError(f"checkpoint adaptation {key} is invalid")
     warm_updates = cast(int, adaptation["warm_start_updates"])
-    lora_updates = cast(int, adaptation["lora_updates"])
+    stage_two_updates = cast(int, adaptation[stage_two_key])
     phase_updates = cast(int, adaptation["phase_updates"])
-    if adaptation["total_updates"] != warm_updates + lora_updates:
+    if adaptation["total_updates"] != warm_updates + stage_two_updates:
         raise CheckpointError("checkpoint adaptation total_updates is inconsistent")
-    if phase_updates != (warm_updates if adaptation["phase"] == "warm_start" else lora_updates):
+    if phase_updates != (
+        warm_updates if adaptation["phase"] == "warm_start" else stage_two_updates
+    ):
         raise CheckpointError("checkpoint adaptation phase_updates is inconsistent")
     transition_parent = adaptation["transition_parent"]
     if adaptation["phase"] == "warm_start":
-        if lora_updates != 0 or transition_parent is not None:
+        if stage_two_updates != 0 or transition_parent is not None:
             raise CheckpointError("warm-start checkpoint has invalid transition identity")
     elif not isinstance(transition_parent, str) or len(transition_parent) != 64:
-        raise CheckpointError("LoRA checkpoint transition parent is invalid")
+        raise CheckpointError("stage-two checkpoint transition parent is invalid")
     optimizer_identity = adaptation["optimizer_identity"]
     if not isinstance(optimizer_identity, str) or len(optimizer_identity) != 64:
         raise CheckpointError("checkpoint optimizer identity is invalid")

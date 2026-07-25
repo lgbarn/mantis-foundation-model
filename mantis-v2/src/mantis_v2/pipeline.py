@@ -305,11 +305,45 @@ def _optimizer(model: NextLegModel, config: PipelineConfig) -> torch.optim.Optim
     parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     if not parameters:
         raise PipelineError("freeze policy left no trainable parameters")
+    learning_rate = config.training.learning_rate
+    if getattr(model, "adaptation_phase", None) == "finetune":
+        finetune_learning_rate = getattr(config.adaptation, "finetune_learning_rate", None)
+        if finetune_learning_rate is None:
+            raise PipelineError("LP-FT phase requires adaptation.finetune_learning_rate")
+        learning_rate = finetune_learning_rate
     return torch.optim.AdamW(
         parameters,
-        lr=config.training.learning_rate,
+        lr=learning_rate,
         weight_decay=config.training.weight_decay,
     )
+
+
+def _stage_two_phase(config: PipelineConfig) -> str:
+    if config.model.mode == "lora_r8_alpha16_head_warmstart":
+        return "lora"
+    if config.model.mode == "lp_ft":
+        return "finetune"
+    raise PipelineError("two-stage adaptation requires a supported model mode")
+
+
+def _phase_schedule_steps(model: NextLegModel, config: PipelineConfig) -> int | None:
+    phase = getattr(model, "adaptation_phase", None)
+    if config.adaptation is None or phase is None:
+        return None
+    if phase == "warm_start":
+        return config.adaptation.warm_start_updates
+    if phase == _stage_two_phase(config):
+        return config.adaptation.total_updates - config.adaptation.warm_start_updates
+    raise PipelineError(f"unsupported adaptation phase for scheduling: {phase}")
+
+
+def _phase_warmup_steps(model: NextLegModel, config: PipelineConfig) -> int | None:
+    if getattr(model, "adaptation_phase", None) != "finetune":
+        return None
+    warmup_updates = getattr(config.adaptation, "finetune_warmup_updates", None)
+    if warmup_updates is None:
+        raise PipelineError("LP-FT phase requires adaptation.finetune_warmup_updates")
+    return int(warmup_updates)
 
 
 def _model_state_digest(model: NextLegModel) -> str:
@@ -331,16 +365,18 @@ def _adaptation_state(
     model: NextLegModel,
     phase: str,
     warm_start_updates: int,
-    lora_updates: int,
+    stage_two_updates: int,
+    stage_two_phase: str,
     transition_parent: str | None,
 ) -> dict[str, object]:
-    phase_updates = warm_start_updates if phase == "warm_start" else lora_updates
+    phase_updates = warm_start_updates if phase == "warm_start" else stage_two_updates
     return {
         "phase": phase,
+        "stage_two_phase": stage_two_phase,
         "phase_updates": phase_updates,
-        "total_updates": warm_start_updates + lora_updates,
+        "total_updates": warm_start_updates + stage_two_updates,
         "warm_start_updates": warm_start_updates,
-        "lora_updates": lora_updates,
+        "stage_two_updates": stage_two_updates,
         "transition_parent": transition_parent,
         "optimizer_identity": _optimizer_identity(model, phase),
         "trainable_parameters": sum(
@@ -396,6 +432,9 @@ def _run_epoch(
                 learning_rate = config.training.learning_rate_for_step(
                     completed_steps + batches + 1,
                     steps_per_epoch,
+                    base_learning_rate=float(optimizer.defaults["lr"]),
+                    total_steps_override=_phase_schedule_steps(model, config),
+                    warmup_steps_override=_phase_warmup_steps(model, config),
                 )
                 for parameter_group in optimizer.param_groups:
                     parameter_group["lr"] = learning_rate
@@ -561,9 +600,10 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
     model = _model(config, device)
     optimizer = _optimizer(model, config)
     bundled = config.adaptation is not None
+    stage_two_phase = _stage_two_phase(config) if bundled else "standard"
     phase = "warm_start" if bundled else "standard"
     warm_start_updates = 0
-    lora_updates = 0
+    stage_two_updates = 0
     transition_parent: str | None = None
     checkpoint_path = root / "checkpoints" / "latest.pt"
     pending_checkpoint = checkpoint_path.with_name("pending.pt")
@@ -573,28 +613,31 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
     history: list[dict[str, Any]] = []
 
     def restore(path: Path) -> tuple[int, int, torch.optim.Optimizer]:
-        nonlocal phase, warm_start_updates, lora_updates, transition_parent
+        nonlocal phase, warm_start_updates, stage_two_updates, transition_parent
         state = checkpoint_adaptation_state(path, provenance)
         if bundled:
             if state is None:
                 raise PipelineError("bundled checkpoint has no adaptation state")
             phase = cast(str, state["phase"])
             warm_start_updates = cast(int, state["warm_start_updates"])
-            lora_updates = cast(int, state["lora_updates"])
+            stage_two_updates = cast(int, state["stage_two_updates"])
             transition_parent = cast(str | None, state["transition_parent"])
+            if state["stage_two_phase"] != stage_two_phase:
+                raise PipelineError("checkpoint adaptation stage-two phase mismatch")
             model.set_adaptation_phase(phase)
             if config.adaptation is None:
                 raise PipelineError("bundled checkpoint has no adaptation config")
             if (
                 warm_start_updates > config.adaptation.warm_start_updates
-                or warm_start_updates + lora_updates > config.adaptation.total_updates
+                or warm_start_updates + stage_two_updates > config.adaptation.total_updates
             ):
                 raise PipelineError("checkpoint adaptation update budget exceeds config")
             reconstructed = _adaptation_state(
                 model,
                 phase,
                 warm_start_updates,
-                lora_updates,
+                stage_two_updates,
+                stage_two_phase,
                 transition_parent,
             )
             if state != reconstructed:
@@ -609,7 +652,7 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
             provenance,
             state,
         )
-        if bundled and restored_step != warm_start_updates + lora_updates:
+        if bundled and restored_step != warm_start_updates + stage_two_updates:
             raise PipelineError("checkpoint total update count is inconsistent")
         return next_epoch, restored_step, restored_optimizer
 
@@ -631,7 +674,7 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
                 global_step = 0
                 phase = "warm_start" if bundled else "standard"
                 warm_start_updates = 0
-                lora_updates = 0
+                stage_two_updates = 0
                 transition_parent = None
                 resume_source = None
             else:
@@ -707,7 +750,7 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
     stopped_early = bool(
         config.training.early_stopping_patience
         and epochs_without_improvement >= config.training.early_stopping_patience
-        and (not bundled or phase == "lora")
+        and (not bundled or phase == stage_two_phase)
     )
     end_epoch = config.training.epochs
     if process_epoch_limit is not None:
@@ -718,7 +761,7 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
                 break
             if phase == "warm_start" and warm_start_updates >= config.adaptation.warm_start_updates:
                 transition_parent = _model_state_digest(model)
-                phase = "lora"
+                phase = stage_two_phase
                 model.set_adaptation_phase(phase)
                 optimizer = _optimizer(model, config)
                 best_validation = math.inf
@@ -739,7 +782,7 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
                 else total_remaining
             )
             max_steps = min(configured_steps, total_remaining, phase_remaining)
-            completed_steps = warm_start_updates if phase == "warm_start" else lora_updates
+            completed_steps = warm_start_updates if phase == "warm_start" else stage_two_updates
         train_telemetry: dict[str, float] = {}
         validation_telemetry: dict[str, float] = {}
         train_metrics, steps = _run_epoch(
@@ -766,7 +809,7 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
             if phase == "warm_start":
                 warm_start_updates += steps
             else:
-                lora_updates += steps
+                stage_two_updates += steps
         learning_rate = float(optimizer.param_groups[0]["lr"])
         improved = validation_metrics["total"] < best_validation
         if improved:
@@ -786,7 +829,8 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
                 model,
                 phase,
                 warm_start_updates,
-                lora_updates,
+                stage_two_updates,
+                stage_two_phase,
                 transition_parent,
             )
             if bundled
@@ -797,7 +841,7 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
         stopped_early = bool(
             config.training.early_stopping_patience
             and epochs_without_improvement >= config.training.early_stopping_patience
-            and (not bundled or phase == "lora")
+            and (not bundled or phase == stage_two_phase)
         )
         process_stop = epoch + 1 == end_epoch and end_epoch < config.training.epochs
         checkpoint_due = (
@@ -877,7 +921,8 @@ def train(config: PipelineConfig, *, process_epoch_limit: int | None = None) -> 
             model,
             phase,
             warm_start_updates,
-            lora_updates,
+            stage_two_updates,
+            stage_two_phase,
             transition_parent,
         )
         if bundled
@@ -941,9 +986,12 @@ def _load_trained(
                 snapshot.write(block)
         adaptation = checkpoint_adaptation_state(snapshot_path, provenance)
         if config.adaptation is not None:
-            if adaptation is None or adaptation.get("phase") != "lora":
-                raise PipelineError("validated export requires a completed LoRA-phase checkpoint")
-            model.set_adaptation_phase("lora")
+            required_phase = _stage_two_phase(config)
+            if adaptation is None or adaptation.get("phase") != required_phase:
+                raise PipelineError(
+                    f"validated export requires a completed {required_phase}-phase checkpoint"
+                )
+            model.set_adaptation_phase(required_phase)
             optimizer = _optimizer(model, config)
         elif adaptation is not None:
             raise PipelineError("standard checkpoint contains adaptation state")
@@ -1016,9 +1064,12 @@ def _load_export_repair(config: PipelineConfig) -> _LoadedTrained:
     optimizer = _optimizer(model, config)
     adaptation = checkpoint_adaptation_state(checkpoint_path, recorded)
     if config.adaptation is not None:
-        if adaptation is None or adaptation.get("phase") != "lora":
-            raise PipelineError("validated export requires a completed LoRA-phase checkpoint")
-        model.set_adaptation_phase("lora")
+        required_phase = _stage_two_phase(config)
+        if adaptation is None or adaptation.get("phase") != required_phase:
+            raise PipelineError(
+                f"validated export requires a completed {required_phase}-phase checkpoint"
+            )
+        model.set_adaptation_phase(required_phase)
         optimizer = _optimizer(model, config)
     elif adaptation is not None:
         raise PipelineError("standard checkpoint contains adaptation state")
@@ -1148,7 +1199,8 @@ def _validated_evaluation(
         eligible_epochs = [
             epoch
             for epoch, record in enumerate(history)
-            if config.adaptation is None or record.get("adaptation", {}).get("phase") == "lora"
+            if config.adaptation is None
+            or record.get("adaptation", {}).get("phase") == _stage_two_phase(config)
         ]
         best_epoch = min(
             eligible_epochs,

@@ -154,6 +154,7 @@ class NextLegModel(nn.Module):
         self.feature_count = feature_count
         self.horizon_count = len(target_config.horizons)
         self.mode = model_config.mode
+        self.adaptation_phase: str | None = None
         self._apply_freeze_policy()
 
     def _apply_freeze_policy(self) -> None:
@@ -162,7 +163,7 @@ class NextLegModel(nn.Module):
                 parameter.requires_grad = False
         elif self.mode == "transformer_finetune":
             self.encoder.freeze_outside_transformer()
-        elif self.mode == "lora_r8_alpha16_head_warmstart":
+        elif self.mode in {"lora_r8_alpha16_head_warmstart", "lp_ft"}:
             self.set_adaptation_phase("warm_start")
         elif self.mode.startswith("lora_"):
             self.encoder.freeze_for_lora()
@@ -171,18 +172,26 @@ class NextLegModel(nn.Module):
                 parameter.requires_grad = False
 
     def set_adaptation_phase(self, phase: str) -> None:
-        if self.mode != "lora_r8_alpha16_head_warmstart":
-            raise ModelContractError("adaptation phases require bundled LoRA mode")
-        if phase not in {"warm_start", "lora"}:
+        expected_stage_two = {
+            "lora_r8_alpha16_head_warmstart": "lora",
+            "lp_ft": "finetune",
+        }.get(self.mode)
+        if expected_stage_two is None:
+            raise ModelContractError("adaptation phases require a two-stage mode")
+        if phase not in {"warm_start", expected_stage_two}:
             raise ModelContractError(f"unsupported adaptation phase: {phase}")
         for parameter in self.parameters():
             parameter.requires_grad = False
         if phase == "lora":
             self.encoder.freeze_for_lora()
+        elif phase == "finetune":
+            for parameter in self.encoder.parameters():
+                parameter.requires_grad = True
         for parameter in self.candle_head.parameters():
             parameter.requires_grad = True
         for parameter in self.leg_head.parameters():
             parameter.requires_grad = True
+        self.adaptation_phase = phase
 
     def forward(self, context: torch.Tensor) -> NextLegOutput:
         embedding = self.encoder(context)

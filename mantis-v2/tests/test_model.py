@@ -129,6 +129,52 @@ def test_transformer_finetune_freezes_only_upstream_token_generator(
     assert all(parameter.requires_grad for parameter in model.leg_head.parameters())
 
 
+def test_lp_ft_preserves_warmed_heads_and_unfreezes_encoder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_config(ROOT / "configs" / "nextleg.toml")
+
+    class FakeMantisV2(nn.Module):
+        def __init__(self, **_: object) -> None:
+            super().__init__()
+            self.encoder_weight = nn.Parameter(torch.ones(1))
+
+        def from_pretrained(self, *_: object, **__: object) -> nn.Module:
+            return self
+
+        def forward(self, value: torch.Tensor) -> torch.Tensor:
+            return torch.zeros((len(value), 256), dtype=value.dtype, device=value.device)
+
+    monkeypatch.setattr(model_module, "MantisV2", FakeMantisV2)
+    monkeypatch.setattr(model_module, "download_verified_weights", lambda _: Path("verified"))
+    model = NextLegModel(
+        replace(config.model, mode="lp_ft"),
+        config.target,
+        5,
+        torch.device("cpu"),
+    )
+
+    assert model.adaptation_phase == "warm_start"
+    assert all(not parameter.requires_grad for parameter in model.encoder.parameters())
+    warmed_heads = {
+        name: tensor.clone()
+        for name, tensor in model.state_dict().items()
+        if name.startswith(("candle_head.", "leg_head."))
+    }
+
+    model.set_adaptation_phase("finetune")
+
+    assert model.adaptation_phase == "finetune"
+    assert all(parameter.requires_grad for parameter in model.encoder.parameters())
+    assert all(not parameter.requires_grad for parameter in model.adapter.parameters())
+    assert all(parameter.requires_grad for parameter in model.candle_head.parameters())
+    assert all(parameter.requires_grad for parameter in model.leg_head.parameters())
+    for name, tensor in warmed_heads.items():
+        assert torch.equal(tensor, model.state_dict()[name])
+    with pytest.raises(ModelContractError, match="unsupported adaptation phase"):
+        model.set_adaptation_phase("lora")
+
+
 @pytest.mark.parametrize(
     ("mode", "rank", "alpha"),
     [

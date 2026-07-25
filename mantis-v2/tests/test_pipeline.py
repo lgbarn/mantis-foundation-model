@@ -17,6 +17,9 @@ from mantis_v2.pipeline import (
     _assert_export_repair_provenance,
     _assert_run_writable,
     _loader,
+    _optimizer,
+    _phase_schedule_steps,
+    _phase_warmup_steps,
     _stratified_validation_indices,
     _stream_macro_metrics,
     _validation_state,
@@ -43,13 +46,54 @@ class FakeBundledModel(torch.nn.Module):
         self.candle_head = torch.nn.Linear(1, 1)
         self.leg_head = torch.nn.Linear(1, 1)
         self.phase = "warm_start"
+        self.adaptation_phase = "warm_start"
 
     def set_adaptation_phase(self, phase: str) -> None:
         self.phase = phase
-        self.base.requires_grad = False
+        self.adaptation_phase = phase
+        self.base.requires_grad = phase == "finetune"
         self.lora.requires_grad = phase == "lora"
         for parameter in (*self.candle_head.parameters(), *self.leg_head.parameters()):
             parameter.requires_grad = True
+
+
+def test_lp_ft_transition_uses_fresh_lower_rate_optimizer() -> None:
+    config = load_config(ROOT / "configs" / "nextleg-runpod-cuda-3tf-lp-ft-s42-v1.toml")
+    model = FakeBundledModel()
+    warm_optimizer = _optimizer(model, config)
+    assert _phase_schedule_steps(model, config) == 2000
+    warmed_heads = {
+        name: tensor.clone()
+        for name, tensor in model.state_dict().items()
+        if name.startswith(("candle_head.", "leg_head."))
+    }
+
+    model.set_adaptation_phase("finetune")
+    finetune_optimizer = _optimizer(model, config)
+
+    assert warm_optimizer.defaults["lr"] == pytest.approx(1e-4)
+    assert _phase_schedule_steps(model, config) == 8000
+    assert _phase_warmup_steps(model, config) == 0
+    assert finetune_optimizer.defaults["lr"] == pytest.approx(1e-5)
+    assert config.training.learning_rate_for_step(
+        8000,
+        config.training.max_steps_per_epoch,
+        base_learning_rate=finetune_optimizer.defaults["lr"],
+        total_steps_override=_phase_schedule_steps(model, config),
+        warmup_steps_override=_phase_warmup_steps(model, config),
+    ) == pytest.approx(0.0)
+    assert config.training.learning_rate_for_step(
+        1,
+        config.training.max_steps_per_epoch,
+        base_learning_rate=finetune_optimizer.defaults["lr"],
+        total_steps_override=_phase_schedule_steps(model, config),
+        warmup_steps_override=_phase_warmup_steps(model, config),
+    ) == pytest.approx(1e-5)
+    assert finetune_optimizer is not warm_optimizer
+    assert model.base.requires_grad
+    assert not model.lora.requires_grad
+    for name, tensor in warmed_heads.items():
+        assert torch.equal(tensor, model.state_dict()[name])
 
 
 def test_stream_group_metrics_are_equal_weight_macros_not_row_weighted() -> None:
@@ -939,7 +983,8 @@ def test_bundled_adaptation_resumes_across_transition_and_obeys_total_ceiling(
     } == {key: value for key, value in complete["provenance"].items() if key != "config_digest"}
     assert complete["adaptation"]["phase"] == "lora"
     assert complete["adaptation"]["warm_start_updates"] == 4
-    assert complete["adaptation"]["lora_updates"] == 6
+    assert complete["adaptation"]["stage_two_phase"] == "lora"
+    assert complete["adaptation"]["stage_two_updates"] == 6
     assert complete["adaptation"]["total_updates"] == 10
     resumed_history = json.loads(
         (tmp_path / f"bundled-resume-{partial_epochs}" / "metrics.json").read_text()

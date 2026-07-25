@@ -113,6 +113,32 @@ def test_training_first_three_timeframe_ab_configs_are_paired() -> None:
     assert warm.adaptation is not None
     assert warm.adaptation.warm_start_updates == 2000
     assert warm.adaptation.total_updates == 10000
+    assert "finetune_learning_rate" not in warm.canonical_json()
+
+
+def test_lp_ft_config_is_two_stage_without_lora() -> None:
+    config = load_config(ROOT / "configs" / "nextleg-runpod-cuda-3tf-lp-ft-s42-v1.toml")
+
+    assert config.model.mode == "lp_ft"
+    assert config.data.intervals == ("1min", "3min", "15min")
+    assert config.adaptation is not None
+    assert config.adaptation.warm_start_updates == 2000
+    assert config.adaptation.total_updates == 10000
+    assert config.adaptation.finetune_learning_rate == pytest.approx(1e-5)
+    assert config.adaptation.finetune_warmup_updates == 0
+    assert not hasattr(config.adaptation, "lora_rank")
+    assert not hasattr(config.adaptation, "lora_alpha")
+
+
+def test_lp_ft_rejects_nonpositive_finetune_learning_rate(tmp_path: Path) -> None:
+    source = (ROOT / "configs" / "nextleg-runpod-cuda-3tf-lp-ft-s42-v1.toml").read_text()
+    path = tmp_path / "invalid-lp-ft.toml"
+    path.write_text(
+        source.replace("finetune_learning_rate = 0.00001", "finetune_learning_rate = 0")
+    )
+
+    with pytest.raises(ConfigError, match="adaptation.finetune_learning_rate must be > 0"):
+        load_config(path)
 
 
 @pytest.mark.parametrize(

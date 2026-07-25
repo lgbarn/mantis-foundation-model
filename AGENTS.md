@@ -118,6 +118,15 @@ explained plainly.
 
 Use `uv` for Python environments and dependency locking, and `just` for discoverable repository commands. Do not install packages without explicit user approval.
 
+### Pause and stop notifications
+
+Never leave the user guessing whether work is active. Immediately send a concise
+status notification whenever the current process stops, work pauses, execution
+waits on a test, subagent, provider, approval, or external condition, or no task
+process is running. State what stopped or is waiting, why, the exact condition
+that resumes work, and whether any billed resource remains active. Send another
+notification as soon as execution resumes. Do not silently wait between stages.
+
 RunPod's supported PyTorch image includes `uv` but not `just`. Remote Pod commands
 must therefore invoke `uv run mantis-v2 ...` directly after `uv sync --frozen`.
 Rsyncing to a RunPod network volume must use `--no-owner --no-group`; the mounted
