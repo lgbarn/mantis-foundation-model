@@ -282,7 +282,7 @@ def test_cuda_comparison_matches_cpu_predictions_metrics_and_selection(
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA threshold requires a GPU")
 def test_cuda_threshold_is_exact_and_bounded() -> None:
-    rows = 2048
+    rows = 4096
     rng = np.random.default_rng(860)
     entries = np.arange(rows, dtype=np.int64) * 2
     outcomes = entries + rng.integers(1, 25, size=rows)
