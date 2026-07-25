@@ -11,12 +11,14 @@ import pandas as pd
 import pytest
 import torch
 from mantis_v2 import frozen_expected_r
+from mantis_v2.cli import _parser
 from mantis_v2.frozen_expected_r import (
     FrozenExpectedRConfig,
     FrozenExpectedRError,
     FrozenMantisEmbedder,
     compare_frozen_to_raw,
     cuda_threshold,
+    validate_paid_runner_contract,
     write_frozen_input,
     write_paid_preflight,
 )
@@ -27,9 +29,11 @@ def _candidates(rows: int = 90) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "row_id": [f"row-{index:04d}" for index in range(rows)],
+            "feature_start_ts": dates - pd.Timedelta(minutes=511 * 3),
             "decision_ts": dates,
             "outcome_ts": dates + pd.Timedelta(minutes=30),
             "entry_index": np.arange(rows) * 2,
+            "feature_start_index": np.arange(rows) * 2 - 512,
             "outcome_index": np.arange(rows) * 2 + 1,
             "average_uniqueness": np.ones(rows),
             "net_r": np.tile([-1.0, 1.5, 2.0], rows // 3),
@@ -87,6 +91,96 @@ def test_atomic_embedding_resume_skips_complete_shards(tmp_path: Path) -> None:
     assert len(result["shards"]) == 3
 
 
+def test_partial_resume_rejects_changed_selected_precision(tmp_path: Path) -> None:
+    candidates = _candidates(6)
+    manifest = write_frozen_input(
+        candidates,
+        np.ones((6, 5, 512), dtype=np.float32),
+        np.zeros((6, 3), dtype=np.float32),
+        tmp_path / "input",
+    )
+
+    class PassingModel:
+        def __call__(self, values: np.ndarray, _precision: str) -> np.ndarray:
+            return np.ones((len(values), 2560), dtype=np.float32)
+
+    class FailingModel:
+        def __call__(self, values: np.ndarray, precision: str) -> np.ndarray:
+            factor = 1.0 if precision == "fp32" else 2.0
+            return np.full((len(values), 2560), factor, dtype=np.float32)
+
+    config = FrozenExpectedRConfig(shard_rows=2)
+    FrozenMantisEmbedder(config, model_factory=lambda _config: PassingModel()).embed(
+        manifest, tmp_path / "embed", maximum_shards=1
+    )
+    with pytest.raises(FrozenExpectedRError, match="stale embedding shard receipt"):
+        FrozenMantisEmbedder(config, model_factory=lambda _config: FailingModel()).embed(
+            manifest, tmp_path / "embed"
+        )
+
+
+def test_completed_embedding_rejects_changed_config_and_modified_shard(tmp_path: Path) -> None:
+    candidates = _candidates(3)
+    manifest = write_frozen_input(
+        candidates,
+        np.ones((3, 5, 512), dtype=np.float32),
+        np.zeros((3, 3), dtype=np.float32),
+        tmp_path / "input",
+    )
+
+    class Model:
+        def __call__(self, values: np.ndarray, _precision: str) -> np.ndarray:
+            return np.ones((len(values), 2560), dtype=np.float32)
+
+    output = tmp_path / "embed"
+    FrozenMantisEmbedder(
+        FrozenExpectedRConfig(requested_precision="fp32"),
+        model_factory=lambda _config: Model(),
+    ).embed(manifest, output)
+    with pytest.raises(FrozenExpectedRError, match="stale embedding manifest"):
+        FrozenMantisEmbedder(
+            FrozenExpectedRConfig(requested_precision="fp32", batch_size=1),
+            model_factory=lambda _config: pytest.fail("completed output must not load weights"),
+        ).embed(manifest, output)
+    with (output / "features-00000.npy").open("ab") as stream:
+        stream.write(b"changed")
+    with pytest.raises(FrozenExpectedRError, match="embedding features changed"):
+        FrozenMantisEmbedder(
+            FrozenExpectedRConfig(requested_precision="fp32"),
+            model_factory=lambda _config: pytest.fail("completed output must not load weights"),
+        ).embed(manifest, output)
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("producer_source_sha256", "producer source mismatch"),
+        ("expected_r_config_sha256", "expected-R config mismatch"),
+    ],
+)
+def test_embedding_rejects_stale_input_producer_before_loading_model(
+    tmp_path: Path, field: str, message: str
+) -> None:
+    manifest_path = write_frozen_input(
+        _candidates(3),
+        np.ones((3, 5, 512), dtype=np.float32),
+        np.zeros((3, 3), dtype=np.float32),
+        tmp_path / "input",
+    )
+    payload = json.loads(manifest_path.read_text())
+    payload[field] = "0" * 64
+    payload["manifest_sha256"] = frozen_expected_r._json_digest(
+        {key: value for key, value in payload.items() if key != "manifest_sha256"}
+    )
+    manifest_path.write_text(json.dumps(payload))
+
+    with pytest.raises(FrozenExpectedRError, match=message):
+        FrozenMantisEmbedder(
+            FrozenExpectedRConfig(),
+            model_factory=lambda _config: pytest.fail("paid model must not be loaded"),
+        ).embed(manifest_path, tmp_path / "embed")
+
+
 def test_input_manifest_remains_valid_after_directory_move(tmp_path: Path) -> None:
     candidates = _candidates(6)
     manifest = write_frozen_input(
@@ -97,9 +191,9 @@ def test_input_manifest_remains_valid_after_directory_move(tmp_path: Path) -> No
     )
     shutil.move(tmp_path / "source", tmp_path / "remote")
 
-    _, moved_candidates, _, _ = FrozenMantisEmbedder(
-        FrozenExpectedRConfig()
-    ).validate_input(tmp_path / "remote" / manifest.name)
+    _, moved_candidates, _, _ = FrozenMantisEmbedder(FrozenExpectedRConfig()).validate_input(
+        tmp_path / "remote" / manifest.name
+    )
 
     assert moved_candidates["row_id"].tolist() == candidates["row_id"].tolist()
 
@@ -120,6 +214,19 @@ def test_parallel_comparison_is_numerically_identical_to_serial(
     dates = pd.date_range("2024-01-01T15:00:00Z", periods=len(candidates), freq="D")
     candidates["decision_ts"] = dates
     candidates["outcome_ts"] = dates + pd.Timedelta(minutes=30)
+    monkeypatch.setattr(
+        frozen_expected_r,
+        "_INITIAL_SCREEN",
+        (
+            "initial_screen",
+            "2024-01-01",
+            "2024-03-01",
+            "2024-03-01",
+            "2024-04-01",
+            "2024-04-01",
+            "2024-05-01",
+        ),
+    )
     monkeypatch.setattr(
         frozen_expected_r,
         "_ANCHORED_FOLDS",
@@ -183,6 +290,31 @@ def test_cuda_comparison_fails_closed_when_cuda_is_unavailable(
         )
 
 
+def test_production_compare_cli_defaults_to_cuda_and_cpu_requires_exception(tmp_path: Path) -> None:
+    args = _parser().parse_args(
+        [
+            "frozen-screen-compare",
+            "--config",
+            "config.json",
+            "--input",
+            "input.json",
+            "--embeddings",
+            "embeddings.json",
+            "--output",
+            "output.json",
+        ]
+    )
+    assert args.comparison_device == "cuda"
+    with pytest.raises(FrozenExpectedRError, match="CPU comparison requires"):
+        frozen_expected_r.compare_frozen_artifacts(
+            tmp_path / "input.json",
+            tmp_path / "embeddings.json",
+            tmp_path / "output.json",
+            FrozenExpectedRConfig(),
+            comparison_device="cpu",
+        )
+
+
 def test_cuda_comparison_bypasses_executor_on_calling_thread(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -191,7 +323,7 @@ def test_cuda_comparison_bypasses_executor_on_calling_thread(
 
     def fit_fold(*_args: object, **_kwargs: object) -> tuple[object, ...]:
         observed.append(threading.get_ident())
-        return ({"name": "fold"}, False, False, [], [])
+        return ({"name": "fold"}, True, False, [("day", 1.0)], [])
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(frozen_expected_r, "_fit_fold", fit_fold)
@@ -211,7 +343,7 @@ def test_cuda_comparison_bypasses_executor_on_calling_thread(
         comparison_device="cuda",
     )
 
-    assert observed == [caller, caller, caller]
+    assert observed == [caller, caller, caller, caller]
     assert result["comparison_backend"] == {"device": "cuda"}
 
 
@@ -241,6 +373,57 @@ def test_comparison_progress_is_atomic_and_monotonic(
     assert second["throughput_per_second"] == 50.0
     assert second["eta_seconds"] == 0.0
     assert not path.with_suffix(".json.tmp").exists()
+
+
+def test_parallel_progress_writers_share_one_atomic_file(tmp_path: Path) -> None:
+    path = tmp_path / "progress.json"
+    progress = frozen_expected_r._ComparisonProgress(path)
+    with frozen_expected_r.ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(lambda index: progress.write("parallel", fold=str(index)), range(100)))
+
+    assert json.loads(path.read_text())["sequence"] == 100
+    assert not path.with_suffix(".json.tmp").exists()
+
+
+def test_initial_gate_is_distinct_and_not_counted_as_development_win(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fit_fold(fold: tuple[str, ...], *_args: object, **_kwargs: object) -> tuple[object, ...]:
+        calls.append(fold[0])
+        return ({"name": fold[0]}, True, False, [(fold[0], 1.0)], [])
+
+    monkeypatch.setattr(frozen_expected_r, "_fit_fold", fit_fold)
+    monkeypatch.setattr(frozen_expected_r, "_stationary_expectancy_interval", lambda *_: [1.0, 1.0])
+    candidates = _candidates()
+    features = np.ones((len(candidates), 3), dtype=np.float32)
+
+    result = compare_frozen_to_raw(candidates, features, features, FrozenExpectedRConfig())
+
+    assert calls == ["initial_screen", "fold_1", "fold_2", "fold_3"]
+    assert result["initial_screen"]["name"] == "initial_screen"
+    assert result["promotion"]["raw_wins"] == 3
+
+
+def test_failed_initial_gate_stops_before_development_folds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fit_fold(fold: tuple[str, ...], *_args: object, **_kwargs: object) -> tuple[object, ...]:
+        calls.append(fold[0])
+        return ({"name": fold[0]}, False, False, [], [])
+
+    monkeypatch.setattr(frozen_expected_r, "_fit_fold", fit_fold)
+    candidates = _candidates()
+    features = np.ones((len(candidates), 3), dtype=np.float32)
+
+    result = compare_frozen_to_raw(candidates, features, features, FrozenExpectedRConfig())
+
+    assert calls == ["initial_screen"]
+    assert result["selected"] == "stop"
+    assert result["folds"] == []
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA parity requires a GPU")
@@ -306,20 +489,13 @@ def test_cuda_comparison_matches_cpu_predictions_metrics_and_selection(
         for arm in ("raw", "mantis"):
             cpu_arm = cpu_fold[arm]
             cuda_arm = cuda_fold[arm]
-            cpu_predictions = np.asarray(
-                [row["prediction"] for row in cpu_arm["rows"]["values"]]
-            )
-            cuda_predictions = np.asarray(
-                [row["prediction"] for row in cuda_arm["rows"]["values"]]
-            )
+            cpu_predictions = np.asarray([row["prediction"] for row in cpu_arm["rows"]["values"]])
+            cuda_predictions = np.asarray([row["prediction"] for row in cuda_arm["rows"]["values"]])
             np.testing.assert_allclose(cuda_predictions, cpu_predictions, rtol=1e-3, atol=1e-3)
             assert cuda_arm["test"]["mse"] == pytest.approx(
                 cpu_arm["test"]["mse"], rel=1e-4, abs=1e-6
             )
-            assert (
-                cuda_arm["test"]["selected_trades"]
-                == cpu_arm["test"]["selected_trades"]
-            )
+            assert cuda_arm["test"]["selected_trades"] == cpu_arm["test"]["selected_trades"]
             assert cuda_arm["test"]["selected_expectancy"] == pytest.approx(
                 cpu_arm["test"]["selected_expectancy"], abs=1e-12
             )
@@ -336,9 +512,7 @@ def test_cuda_comparison_matches_cpu_predictions_metrics_and_selection(
                     assert cuda_interval is None
                 else:
                     tolerance = 1e-3 if key == "mse_improvement_over_constant" else 1e-12
-                    np.testing.assert_allclose(
-                        cuda_interval, cpu_interval, atol=tolerance
-                    )
+                    np.testing.assert_allclose(cuda_interval, cpu_interval, atol=tolerance)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA threshold requires a GPU")
@@ -376,8 +550,7 @@ def test_cuda_threshold_is_exact_and_bounded() -> None:
     performance_frame = pd.DataFrame(
         {
             "entry_index": performance_entries,
-            "outcome_index": performance_entries
-            + rng.integers(1, 25, size=performance_rows),
+            "outcome_index": performance_entries + rng.integers(1, 25, size=performance_rows),
         }
     )
     performance_scores = rng.normal(size=performance_rows)
@@ -429,6 +602,25 @@ def test_paid_preflight_enforces_budget_deadline_health_and_four_checks(tmp_path
     )
     assert receipt["ready"] is True
     assert receipt["health_interval_seconds"] == 30
+
+    bundle = tmp_path / "bundle.json"
+    bundle.write_text(json.dumps({"files": [{"sha256": receipt["input_manifest"]["sha256"]}]}))
+    command = receipt["exact_command"]
+    workload = {
+        "start_command": ["bash", "-lc", f"{command} || {command}"],
+        "artifacts": {"pod": receipt["embedding_output"]},
+        "monitor": {"poll_seconds": 30},
+        "resume": {"enabled": True, "same_run_only": True, "provenance_required": True},
+        "maximum_duration_seconds": 6 * 3600,
+        "quoted_rates": {"compute_usd_per_hour": "0.99"},
+        "budget_guard": {"next_cell_maximum_usd": "9.99"},
+        "input_bundle": {"manifest": {"controller_path": str(bundle)}},
+    }
+    assert validate_paid_runner_contract(tmp_path / "preflight.json", workload) == receipt
+
+    workload["start_command"] = ["bash", "-lc", command]
+    with pytest.raises(FrozenExpectedRError, match="exactly one safe resume"):
+        validate_paid_runner_contract(tmp_path / "preflight.json", workload)
 
     with pytest.raises(FrozenExpectedRError, match="rate-derived"):
         write_paid_preflight(

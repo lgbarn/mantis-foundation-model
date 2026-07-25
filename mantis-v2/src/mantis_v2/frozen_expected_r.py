@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -34,6 +35,7 @@ class _ComparisonProgress:
         self.started = time.monotonic()
         self.stage_started: dict[tuple[str, str | None, str | None], float] = {}
         self.sequence = 0
+        self._lock = threading.Lock()
 
     def write(
         self,
@@ -47,42 +49,52 @@ class _ComparisonProgress:
         bootstrap_total: int = 0,
         terminal_state: Literal["running", "complete", "failed"] = "running",
     ) -> None:
-        now = time.monotonic()
-        key = (stage, fold, arm)
-        stage_started = self.stage_started.setdefault(key, now)
-        stage_elapsed = max(now - stage_started, 0.0)
-        done, total = (
-            (thresholds_done, thresholds_total)
-            if thresholds_total
-            else (bootstrap_done, bootstrap_total)
-        )
-        throughput = done / stage_elapsed if done and stage_elapsed > 0 else None
-        eta = (total - done) / throughput if throughput and total >= done else None
-        self.sequence += 1
-        _atomic_json(
-            self.path,
-            {
-                "schema_version": 1,
-                "sequence": self.sequence,
-                "stage": stage,
-                "fold": fold,
-                "arm": arm,
-                "thresholds_done": thresholds_done,
-                "thresholds_total": thresholds_total,
-                "bootstrap_done": bootstrap_done,
-                "bootstrap_total": bootstrap_total,
-                "elapsed_seconds": now - self.started,
-                "throughput_per_second": throughput,
-                "eta_seconds": eta,
-                "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                "terminal_state": terminal_state,
-            },
-        )
+        with self._lock:
+            now = time.monotonic()
+            key = (stage, fold, arm)
+            stage_started = self.stage_started.setdefault(key, now)
+            stage_elapsed = max(now - stage_started, 0.0)
+            done, total = (
+                (thresholds_done, thresholds_total)
+                if thresholds_total
+                else (bootstrap_done, bootstrap_total)
+            )
+            throughput = done / stage_elapsed if done and stage_elapsed > 0 else None
+            eta = (total - done) / throughput if throughput and total >= done else None
+            self.sequence += 1
+            _atomic_json(
+                self.path,
+                {
+                    "schema_version": 1,
+                    "sequence": self.sequence,
+                    "stage": stage,
+                    "fold": fold,
+                    "arm": arm,
+                    "thresholds_done": thresholds_done,
+                    "thresholds_total": thresholds_total,
+                    "bootstrap_done": bootstrap_done,
+                    "bootstrap_total": bootstrap_total,
+                    "elapsed_seconds": now - self.started,
+                    "throughput_per_second": throughput,
+                    "eta_seconds": eta,
+                    "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                    "terminal_state": terminal_state,
+                },
+            )
 
 
 _SOURCE_REVISION = "0c94f8ceb9f1d1421dd292ed917090df8c31605b"
 _HUB_REVISION = "99fe0f548960e272fbfa4b82fd9b5b5956779dfd"
 _WEIGHTS_SHA256 = "49d46d9a49cccdc87c46f4e0088fa52c0a6ef7eb4c13de5cc9815426b7b17ab1"
+_INITIAL_SCREEN = (
+    "initial_screen",
+    "2023-07-01",
+    "2025-07-01",
+    "2025-07-01",
+    "2025-10-01",
+    "2025-10-01",
+    "2026-01-01",
+)
 _ANCHORED_FOLDS = (
     (
         "fold_1",
@@ -105,11 +117,11 @@ _ANCHORED_FOLDS = (
     (
         "fold_3",
         "2023-07-01",
+        "2025-04-01",
+        "2025-04-01",
         "2025-07-01",
         "2025-07-01",
         "2025-10-01",
-        "2025-10-01",
-        "2026-01-01",
     ),
 )
 
@@ -220,6 +232,8 @@ def write_frozen_input(
     required = {
         "row_id",
         "decision_ts",
+        "feature_start_ts",
+        "feature_start_index",
         "outcome_ts",
         "entry_index",
         "outcome_index",
@@ -236,6 +250,18 @@ def write_frozen_input(
         raise FrozenExpectedRError("context must be finite [rows, 3] FP32 values")
     if candidates["row_id"].duplicated().any():
         raise FrozenExpectedRError("candidate row identities must be unique")
+    feature_starts = pd.to_datetime(candidates["feature_start_ts"], utc=True)
+    decisions = pd.to_datetime(candidates["decision_ts"], utc=True)
+    outcomes = pd.to_datetime(candidates["outcome_ts"], utc=True)
+    if (
+        (feature_starts > decisions).any()
+        or (outcomes < decisions).any()
+        or not np.array_equal(
+            candidates["feature_start_index"].to_numpy(dtype=np.int64),
+            candidates["entry_index"].to_numpy(dtype=np.int64) - 512,
+        )
+    ):
+        raise FrozenExpectedRError("candidate feature lookback or outcome span is invalid")
     if output.exists():
         raise FrozenExpectedRError(f"frozen input already exists: {output}")
     output.mkdir(parents=True)
@@ -287,21 +313,11 @@ def load_frozen_embeddings(
     input_manifest_path: Path, embedding_manifest_path: Path, config: FrozenExpectedRConfig
 ) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
     """Load only complete, digest-verified shards in exact candidate order."""
-    input_manifest, candidates, windows, context = FrozenMantisEmbedder(config).validate_input(
-        input_manifest_path
+    embedder = FrozenMantisEmbedder(config)
+    input_manifest, candidates, windows, context = embedder.validate_input(input_manifest_path)
+    embedding_manifest = embedder._validate_final(
+        embedding_manifest_path, input_manifest, len(candidates), embedding_manifest_path.parent
     )
-    try:
-        embedding_manifest = json.loads(embedding_manifest_path.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        raise FrozenExpectedRError("embedding manifest is unreadable") from exc
-    if (
-        embedding_manifest.get("status") != "complete"
-        or embedding_manifest.get("input_manifest_sha256") != input_manifest["manifest_sha256"]
-        or embedding_manifest.get("config_sha256") != config.digest
-        or embedding_manifest.get("weights_sha256") != config.weights_sha256
-        or embedding_manifest.get("rows") != len(candidates)
-    ):
-        raise FrozenExpectedRError("stale or incomplete embedding manifest")
     features: list[np.ndarray] = []
     row_ids: list[str] = []
     for number, shard in enumerate(embedding_manifest.get("shards", [])):
@@ -329,9 +345,16 @@ def compare_frozen_artifacts(
     output: Path,
     config: FrozenExpectedRConfig,
     *,
-    comparison_device: Literal["cpu", "cuda"] = "cpu",
+    comparison_device: Literal["cpu", "cuda"] = "cuda",
+    cpu_exception: str | None = None,
     progress_path: Path | None = None,
 ) -> dict[str, Any]:
+    if comparison_device == "cpu" and not (cpu_exception and cpu_exception.strip()):
+        raise FrozenExpectedRError(
+            "CPU comparison requires a recorded user-approved or qualification-failure exception"
+        )
+    if comparison_device == "cuda" and cpu_exception:
+        raise FrozenExpectedRError("CPU exception is only valid for a CPU comparison")
     if output.exists() or output.with_suffix(output.suffix + ".tmp").exists():
         raise FrozenExpectedRError(f"comparison output already exists: {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -353,6 +376,9 @@ def compare_frozen_artifacts(
             comparison_device=comparison_device,
             progress=progress,
         )
+        result["comparison_backend"]["cpu_exception"] = cpu_exception or None
+        result.pop("artifact_sha256", None)
+        result["artifact_sha256"] = _json_digest(result)
     except Exception:
         progress.write("failed", terminal_state="failed")
         raise
@@ -429,6 +455,77 @@ def write_paid_preflight(
     return receipt
 
 
+def validate_paid_runner_contract(
+    receipt_path: Path, workload_manifest: dict[str, Any]
+) -> dict[str, Any]:
+    """Bind the frozen-screen preflight to the existing paid workload supervisor."""
+    try:
+        receipt = json.loads(receipt_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FrozenExpectedRError("paid preflight receipt is unreadable") from exc
+    if not isinstance(receipt, dict):
+        raise FrozenExpectedRError("paid preflight receipt must be an object")
+    unsigned = dict(receipt)
+    receipt_digest = unsigned.pop("receipt_sha256", None)
+    if receipt_digest != _json_digest(unsigned) or receipt.get("ready") is not True:
+        raise FrozenExpectedRError("paid preflight receipt digest mismatch")
+    input_record = receipt.get("input_manifest", {})
+    input_path = Path(str(input_record.get("path", "")))
+    if (
+        not input_path.is_file()
+        or input_path.stat().st_size != input_record.get("size")
+        or sha256_file(input_path) != input_record.get("sha256")
+    ):
+        raise FrozenExpectedRError("paid preflight input identity changed")
+    exact_command = receipt.get("exact_command")
+    if workload_manifest.get("start_command") != [
+        "bash",
+        "-lc",
+        f"{exact_command} || {exact_command}",
+    ]:
+        raise FrozenExpectedRError("paid workload does not enforce exactly one safe resume")
+    artifacts = workload_manifest.get("artifacts", {})
+    if str(artifacts.get("pod", "")) != str(receipt.get("embedding_output", "")):
+        raise FrozenExpectedRError("paid workload output identity differs from preflight")
+    monitor = workload_manifest.get("monitor", {})
+    resume = workload_manifest.get("resume", {})
+    duration = workload_manifest.get("maximum_duration_seconds")
+    rates = workload_manifest.get("quoted_rates", {})
+    budget = workload_manifest.get("budget_guard", {})
+    if (
+        monitor.get("poll_seconds") != receipt.get("health_interval_seconds")
+        or receipt.get("health_interval_seconds") != 30
+        or resume != {"enabled": True, "same_run_only": True, "provenance_required": True}
+        or receipt.get("maximum_provenance_resume") != 1
+        or receipt.get("termination_policy") != "terminate_after_success_or_second_failure"
+        or not isinstance(duration, int)
+        or duration > float(receipt.get("deadline_hours", 0)) * 3600
+        or float(rates.get("compute_usd_per_hour", -1)) != float(receipt.get("hourly_rate_usd", -2))
+        or float(budget.get("next_cell_maximum_usd", float("inf")))
+        > float(receipt.get("budget_usd", -1))
+    ):
+        raise FrozenExpectedRError("paid workload differs from preflight safety envelope")
+
+    def contains(value: Any, expected: Any) -> bool:
+        if value == expected:
+            return True
+        if isinstance(value, dict):
+            return any(contains(item, expected) for item in value.values())
+        if isinstance(value, list):
+            return any(contains(item, expected) for item in value)
+        return False
+
+    bundle = workload_manifest.get("input_bundle", {}).get("manifest", {})
+    bundle_path = Path(str(bundle.get("controller_path", "")))
+    try:
+        bundle_payload = json.loads(bundle_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FrozenExpectedRError("paid workload input bundle is unreadable") from exc
+    if not contains(bundle_payload, input_record.get("sha256")):
+        raise FrozenExpectedRError("paid workload does not stage the preflight input")
+    return receipt
+
+
 class _OfficialFrozenModel:
     def __init__(self, config: FrozenExpectedRConfig) -> None:
         if not torch.cuda.is_available():
@@ -495,6 +592,12 @@ class FrozenMantisEmbedder:
             raise FrozenExpectedRError("input manifest digest mismatch")
         if manifest.get("preprocessing") != "native_mantis_v2":
             raise FrozenExpectedRError("custom preprocessing is prohibited")
+        active_source = source_digest(Path(__file__).resolve().parents[3])
+        active_expected_r_config = _json_digest(asdict(ExpectedRScreenConfig()))
+        if manifest.get("producer_source_sha256") != active_source:
+            raise FrozenExpectedRError("frozen input producer source mismatch")
+        if manifest.get("expected_r_config_sha256") != active_expected_r_config:
+            raise FrozenExpectedRError("frozen input expected-R config mismatch")
         candidate_record = manifest.get("candidates", {})
         window_record = manifest.get("windows", {})
         candidates_path = _record_path(candidate_record, manifest_path.parent)
@@ -534,16 +637,11 @@ class FrozenMantisEmbedder:
         output.mkdir(parents=True, exist_ok=True)
         final_path = output / "manifest.json"
         if final_path.exists():
-            final = json.loads(final_path.read_text())
-            if not isinstance(final, dict):
-                raise FrozenExpectedRError("embedding manifest must be an object")
-            if final.get("input_manifest_sha256") != input_manifest["manifest_sha256"]:
-                raise FrozenExpectedRError("stale embedding manifest")
-            return cast(dict[str, Any], final)
-        completed = self._completed(output, input_manifest["manifest_sha256"])
-        start = completed[-1]["row_stop"] if completed else 0
+            return self._validate_final(final_path, input_manifest, len(candidates), output)
         model = self._model_factory(self.config)
         precision, parity = self._precision(model, np.asarray(windows[: min(len(windows), 2)]))
+        completed = self._completed(output, input_manifest["manifest_sha256"], precision, parity)
+        start = completed[-1]["row_stop"] if completed else 0
         for written, row_start in enumerate(range(start, len(candidates), self.config.shard_rows)):
             if maximum_shards is not None and written >= maximum_shards:
                 break
@@ -570,9 +668,14 @@ class FrozenMantisEmbedder:
                 "row_stop": row_stop,
                 "input_manifest_sha256": input_manifest["manifest_sha256"],
                 "config_sha256": self.config.digest,
+                "weights_sha256": self.config.weights_sha256,
+                "precision": precision,
+                "parity_sha256": _json_digest(parity),
                 "features": _file_record(feature_path),
                 "metadata": _file_record(metadata_path),
+                "status": "complete",
             }
+            receipt["artifact_sha256"] = _json_digest(receipt)
             _atomic_json(output / f"shard-{number:05d}.json", receipt)
             completed.append(receipt)
         result = {
@@ -597,7 +700,9 @@ class FrozenMantisEmbedder:
             _atomic_json(final_path, result)
         return result
 
-    def _completed(self, output: Path, input_digest: str) -> list[dict[str, Any]]:
+    def _completed(
+        self, output: Path, input_digest: str, precision: str, parity: dict[str, Any]
+    ) -> list[dict[str, Any]]:
         completed: list[dict[str, Any]] = []
         row_start = 0
         for number, path in enumerate(sorted(output.glob("shard-*.json"))):
@@ -609,8 +714,16 @@ class FrozenMantisEmbedder:
                 or receipt.get("row_start") != row_start
                 or receipt.get("input_manifest_sha256") != input_digest
                 or receipt.get("config_sha256") != self.config.digest
+                or receipt.get("weights_sha256") != self.config.weights_sha256
+                or receipt.get("precision") != precision
+                or receipt.get("parity_sha256") != _json_digest(parity)
+                or receipt.get("status") != "complete"
             ):
                 raise FrozenExpectedRError("stale embedding shard receipt")
+            unsigned = dict(receipt)
+            artifact_digest = unsigned.pop("artifact_sha256", None)
+            if artifact_digest != _json_digest(unsigned):
+                raise FrozenExpectedRError("embedding shard artifact digest mismatch")
             for label in ("features", "metadata"):
                 record = receipt.get(label, {})
                 target = Path(str(record.get("path", "")))
@@ -619,6 +732,46 @@ class FrozenMantisEmbedder:
             row_start = int(receipt["row_stop"])
             completed.append(receipt)
         return completed
+
+    def _validate_final(
+        self,
+        final_path: Path,
+        input_manifest: dict[str, Any],
+        expected_rows: int,
+        output: Path,
+    ) -> dict[str, Any]:
+        try:
+            final = json.loads(final_path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise FrozenExpectedRError("embedding manifest is unreadable") from exc
+        if not isinstance(final, dict):
+            raise FrozenExpectedRError("embedding manifest must be an object")
+        unsigned = dict(final)
+        artifact_digest = unsigned.pop("artifact_sha256", None)
+        if artifact_digest != _json_digest(unsigned):
+            raise FrozenExpectedRError("embedding manifest artifact digest mismatch")
+        precision = final.get("precision")
+        parity = final.get("bf16_parity")
+        if (
+            final.get("status") != "complete"
+            or final.get("rows") != expected_rows
+            or final.get("input_manifest_sha256") != input_manifest["manifest_sha256"]
+            or final.get("config_sha256") != self.config.digest
+            or final.get("weights_sha256") != self.config.weights_sha256
+            or precision not in {"bf16", "fp32"}
+            or not isinstance(parity, dict)
+            or (self.config.requested_precision == "fp32" and precision != "fp32")
+            or (precision == "bf16" and parity.get("passed") is not True)
+        ):
+            raise FrozenExpectedRError("stale embedding manifest")
+        completed = self._completed(output, input_manifest["manifest_sha256"], precision, parity)
+        if (
+            final.get("shards") != completed
+            or not completed
+            or completed[-1]["row_stop"] != expected_rows
+        ):
+            raise FrozenExpectedRError("embedding manifest references stale shards")
+        return cast(dict[str, Any], final)
 
     def _precision(self, model: _EmbeddingModel, fixture: np.ndarray) -> tuple[str, dict[str, Any]]:
         if self.config.requested_precision == "fp32":
@@ -672,11 +825,34 @@ def compare_frozen_to_raw(
         raise FrozenExpectedRError("CUDA comparison requested but CUDA is unavailable")
     context = raw[:, -config.context_width :]
     combined = np.concatenate((mantis, context), axis=1)
+    initial = _fit_fold(
+        _INITIAL_SCREEN, candidates, raw, combined, config, comparison_device, progress
+    )
+    initial_result, initial_raw_passed, initial_mantis_passed, _, _ = initial
+    if not initial_raw_passed and not initial_mantis_passed:
+        result = {
+            "schema_version": 1,
+            "config_sha256": config.digest,
+            "row_ids_sha256": _json_digest(candidates["row_id"].tolist()),
+            "comparison_backend": _comparison_backend(comparison_device),
+            "initial_screen": initial_result,
+            "folds": [],
+            "promotion": {
+                "required_wins": 2,
+                "raw_wins": 0,
+                "mantis_wins": 0,
+                "raw_pooled_selected_expectancy_interval_95": None,
+                "mantis_pooled_selected_expectancy_interval_95": None,
+                "selected_expectancy_interval_95": None,
+            },
+            "selected": "stop",
+            "status": "stopped",
+        }
+        result["artifact_sha256"] = _json_digest(result)
+        return result
     if comparison_device == "cuda":
         completed = [
-            _fit_fold(
-                fold, candidates, raw, combined, config, comparison_device, progress
-            )
+            _fit_fold(fold, candidates, raw, combined, config, comparison_device, progress)
             for fold in _ANCHORED_FOLDS
         ]
     else:
@@ -720,7 +896,7 @@ def compare_frozen_to_raw(
         "config_sha256": config.digest,
         "row_ids_sha256": _json_digest(candidates["row_id"].tolist()),
         "comparison_backend": _comparison_backend(comparison_device),
-        "initial_screen": fold_results[-1],
+        "initial_screen": initial_result,
         "folds": fold_results,
         "promotion": {
             "required_wins": 2,
@@ -770,9 +946,7 @@ def _fit_fold(
             test_end=test_end,
         )
     )
-    raw_result = _fit_arm(
-        screen, candidates, raw, comparison_device, f"{name}:raw", progress
-    )
+    raw_result = _fit_arm(screen, candidates, raw, comparison_device, f"{name}:raw", progress)
     mantis_result = _fit_arm(
         screen, candidates, combined, comparison_device, f"{name}:mantis", progress
     )
@@ -880,14 +1054,10 @@ def _fit_arm(
         threshold_selector=threshold_selector,
         interval_evaluator=interval_evaluator,
         stage_reporter=(
-            None
-            if progress is None
-            else lambda stage: progress.write(stage, fold=fold, arm=arm)
+            None if progress is None else lambda stage: progress.write(stage, fold=fold, arm=arm)
         ),
     )
-    decisions = pd.to_datetime(candidates["decision_ts"], utc=True)
-    outcomes = pd.to_datetime(candidates["outcome_ts"], utc=True)
-    test = screen._date_mask(decisions, outcomes, screen.config.test_start, screen.config.test_end)
+    test = screen._split_mask(candidates, screen.config.test_start, screen.config.test_end)
     scores = np.asarray([row["prediction"] for row in result["rows"]["values"]], dtype=np.float64)[
         test
     ]
@@ -948,16 +1118,12 @@ def _cuda_ridge_predict(
         right_hand_side = centered_x.T @ (centered_y * train_weight)
         print(f"frozen-screen-compare arm={progress_label} state=cuda_solve", flush=True)
         factor = torch.linalg.cholesky(gram)
-        coefficients = torch.cholesky_solve(
-            right_hand_side[:, None], factor
-        ).squeeze(1)
+        coefficients = torch.cholesky_solve(right_hand_side[:, None], factor).squeeze(1)
         predictions = np.empty(len(features), dtype=np.float64)
         print(f"frozen-screen-compare arm={progress_label} state=cuda_predict", flush=True)
         for start in range(0, len(features), 4096):
             stop = min(start + 4096, len(features))
-            chunk = torch.as_tensor(
-                features[start:stop], dtype=torch.float64, device=device
-            )
+            chunk = torch.as_tensor(features[start:stop], dtype=torch.float64, device=device)
             values = (chunk - x_mean) @ coefficients + y_mean
             predictions[start:stop] = values.cpu().numpy()
     return predictions
@@ -977,21 +1143,13 @@ def cuda_threshold(
     fold, _separator, arm = progress_label.partition(":")
     threshold_total = int(np.unique(scores).size)
     if progress is not None:
-        progress.write(
-            "cuda_threshold", fold=fold, arm=arm, thresholds_total=threshold_total
-        )
+        progress.write("cuda_threshold", fold=fold, arm=arm, thresholds_total=threshold_total)
     device = torch.device("cuda")
     with torch.inference_mode():
-        thresholds = torch.as_tensor(
-            np.unique(scores), dtype=torch.float64, device=device
-        )
+        thresholds = torch.as_tensor(np.unique(scores), dtype=torch.float64, device=device)
         score_values = torch.as_tensor(scores, dtype=torch.float64, device=device)
-        entries = torch.as_tensor(
-            rows["entry_index"].to_numpy(dtype=np.int64), device=device
-        )
-        outcomes = torch.as_tensor(
-            rows["outcome_index"].to_numpy(dtype=np.int64), device=device
-        )
+        entries = torch.as_tensor(rows["entry_index"].to_numpy(dtype=np.int64), device=device)
+        outcomes = torch.as_tensor(rows["outcome_index"].to_numpy(dtype=np.int64), device=device)
         busy_until = torch.full_like(thresholds, -1, dtype=torch.int64)
         selected_count = torch.zeros_like(thresholds, dtype=torch.int64)
         for entry, outcome, score in zip(entries, outcomes, score_values, strict=True):
@@ -1058,9 +1216,7 @@ def _cuda_paired_intervals(
     device = torch.device("cuda")
     with torch.inference_mode():
         day_weights = torch.as_tensor(multiplicities, dtype=torch.float64, device=device)
-        row_weights = day_weights[
-            :, torch.as_tensor(day_codes, dtype=torch.int64, device=device)
-        ]
+        row_weights = day_weights[:, torch.as_tensor(day_codes, dtype=torch.int64, device=device)]
         outcome_values = torch.as_tensor(outcomes, dtype=torch.float64, device=device)
         prediction_values = torch.as_tensor(predictions, dtype=torch.float64, device=device)
         selected_values = torch.as_tensor(selected, dtype=torch.float64, device=device)
@@ -1072,9 +1228,7 @@ def _cuda_paired_intervals(
         differences = selected_means - take_all_means
         constant_error = (training_mean - outcome_values).square()
         prediction_error = (prediction_values - outcome_values).square()
-        mse_improvements = (
-            row_weights @ (constant_error - prediction_error)
-        ) / row_count
+        mse_improvements = (row_weights @ (constant_error - prediction_error)) / row_count
 
     def interval(values: torch.Tensor) -> list[float] | None:
         array = values.cpu().numpy()
@@ -1132,11 +1286,7 @@ def _paired_model_intervals(
     raw_result: dict[str, Any],
     mantis_result: dict[str, Any],
 ) -> dict[str, list[float] | None]:
-    decisions = pd.to_datetime(candidates["decision_ts"], utc=True)
-    outcomes_at = pd.to_datetime(candidates["outcome_ts"], utc=True)
-    test = screen._date_mask(
-        decisions, outcomes_at, screen.config.test_start, screen.config.test_end
-    )
+    test = screen._split_mask(candidates, screen.config.test_start, screen.config.test_end)
     rows = candidates.loc[test]
     outcomes = rows["net_r"].to_numpy(dtype=np.float64)
     raw_scores = np.asarray(

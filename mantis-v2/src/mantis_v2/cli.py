@@ -81,6 +81,7 @@ from mantis_v2.frozen_expected_r import (
     FrozenMantisEmbedder,
     compare_frozen_artifacts,
     prepare_frozen_input,
+    validate_paid_runner_contract,
     write_paid_preflight,
 )
 from mantis_v2.model import ModelContractError
@@ -340,6 +341,7 @@ def _parser() -> argparse.ArgumentParser:
     workload_supervise.add_argument("--local", required=True, type=Path)
     workload_supervise.add_argument("--runpodctl-binary", required=True, type=Path)
     workload_supervise.add_argument("--aws-binary", default="aws", type=Path)
+    workload_supervise.add_argument("--preflight", type=Path)
     workload_seal = subparsers.add_parser("runpod-seal-workload")
     workload_seal.add_argument("--spec", required=True, type=Path)
     workload_seal.add_argument("--output-root", required=True, type=Path)
@@ -414,7 +416,8 @@ def _parser() -> argparse.ArgumentParser:
     frozen_compare.add_argument("--embeddings", required=True, type=Path)
     frozen_compare.add_argument("--output", required=True, type=Path)
     frozen_compare.add_argument("--progress", type=Path)
-    frozen_compare.add_argument("--comparison-device", choices=("cpu", "cuda"), default="cpu")
+    frozen_compare.add_argument("--comparison-device", choices=("cpu", "cuda"), default="cuda")
+    frozen_compare.add_argument("--cpu-exception")
     frozen_preflight = subparsers.add_parser("frozen-screen-preflight")
     frozen_preflight.add_argument("--input", required=True, type=Path)
     frozen_preflight.add_argument("--embedding-output", required=True, type=Path)
@@ -551,6 +554,8 @@ def main() -> None:
             }
         elif args.command == "runpod-supervise-workload":
             manifest = validate_workload_manifest(args.manifest)
+            if args.preflight is not None:
+                validate_paid_runner_contract(args.preflight, manifest)
             decision = _load_json_object(args.decision)
             local_digest = decision.get("local_digest")
             if not isinstance(local_digest, str):
@@ -669,6 +674,7 @@ def main() -> None:
                 args.output,
                 frozen_config,
                 comparison_device=args.comparison_device,
+                cpu_exception=args.cpu_exception,
                 progress_path=args.progress,
             )
         elif args.command == "frozen-screen-preflight":

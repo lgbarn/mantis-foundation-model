@@ -124,9 +124,7 @@ class ExpectedRScreenConfig:
 
 _MARKET_COLUMNS = ("open", "high", "low", "close", "volume")
 _CONTEXT_COLUMNS = ("trend_magic_direction", "trend_magic_distance_r", "session_minute")
-RidgePredictor = Callable[
-    [np.ndarray, np.ndarray, np.ndarray, np.ndarray, float], np.ndarray
-]
+RidgePredictor = Callable[[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float], np.ndarray]
 ThresholdSelector = Callable[[pd.DataFrame, np.ndarray, int], float]
 IntervalEvaluator = Callable[
     [pd.DataFrame, np.ndarray, np.ndarray, np.ndarray, float],
@@ -275,9 +273,13 @@ class ExpectedRScreen:
                         f"{timestamps.iloc[decision_index].isoformat()}:{decision_index}".encode()
                     ).hexdigest(),
                     "decision_index": decision_index,
+                    "feature_start_index": decision_index - self.config.window_bars + 1,
                     "entry_index": decision_index + 1,
                     "outcome_index": outcome["outcome_index"],
                     "decision_ts": close_timestamps.iloc[decision_index],
+                    "feature_start_ts": close_timestamps.iloc[
+                        decision_index - self.config.window_bars + 1
+                    ],
                     "entry_ts": open_timestamps.iloc[decision_index + 1],
                     "outcome_ts": close_timestamps.iloc[outcome["outcome_index"]],
                     "direction": side,
@@ -435,20 +437,14 @@ class ExpectedRScreen:
             candidates.attrs.update(original_attrs)
         candidates = working_candidates
         decision = pd.to_datetime(candidates["decision_ts"], utc=True)
-        outcome = pd.to_datetime(candidates["outcome_ts"], utc=True)
         masks = {
-            "train": self._date_mask(
-                decision, outcome, self.config.train_start, self.config.train_end
-            ),
-            "validation": self._date_mask(
-                decision,
-                outcome,
+            "train": self._split_mask(candidates, self.config.train_start, self.config.train_end),
+            "validation": self._split_mask(
+                candidates,
                 self.config.validation_start,
                 self.config.validation_end,
             ),
-            "test": self._date_mask(
-                decision, outcome, self.config.test_start, self.config.test_end
-            ),
+            "test": self._split_mask(candidates, self.config.test_start, self.config.test_end),
         }
         if any(not mask.any() for mask in masks.values()):
             empty = [name for name, mask in masks.items() if not mask.any()]
@@ -477,9 +473,7 @@ class ExpectedRScreen:
             model.fit(scaled[train], targets[train], sample_weight=train_weight)
             predictions = model.predict(scaled)
         else:
-            predictions = ridge_predictor(
-                scaled, train, targets, weights, self.config.ridge_alpha
-            )
+            predictions = ridge_predictor(scaled, train, targets, weights, self.config.ridge_alpha)
             if predictions.shape != targets.shape or not np.isfinite(predictions).all():
                 raise ExpectedRScreenError("ridge predictor returned invalid predictions")
         validation = masks["validation"]
@@ -495,9 +489,7 @@ class ExpectedRScreen:
                     key=lambda value: (
                         abs(
                             int(
-                                self._executed_mask(
-                                    validation_rows, validation_scores, value
-                                ).sum()
+                                self._executed_mask(validation_rows, validation_scores, value).sum()
                             )
                             - desired
                         ),
@@ -526,13 +518,9 @@ class ExpectedRScreen:
             stage_reporter("metrics_complete")
         interval_rows = candidates.loc[test]
         intervals = (
-            self._paired_intervals(
-                interval_rows, test_y, predictions[test], selected, train_mean
-            )
+            self._paired_intervals(interval_rows, test_y, predictions[test], selected, train_mean)
             if interval_evaluator is None
-            else interval_evaluator(
-                interval_rows, test_y, predictions[test], selected, train_mean
-            )
+            else interval_evaluator(interval_rows, test_y, predictions[test], selected, train_mean)
         )
         if stage_reporter is not None:
             stage_reporter("intervals_complete")
@@ -640,6 +628,18 @@ class ExpectedRScreen:
                 & (outcomes < end_timestamp)
             ).to_numpy(),
             dtype=bool,
+        )
+
+    def _split_mask(self, candidates: pd.DataFrame, start: str, end: str) -> np.ndarray:
+        decisions = pd.to_datetime(candidates["decision_ts"], utc=True)
+        outcomes = pd.to_datetime(candidates["outcome_ts"], utc=True)
+        if "feature_start_ts" in candidates:
+            feature_starts = pd.to_datetime(candidates["feature_start_ts"], utc=True)
+        else:
+            feature_starts = decisions
+        start_timestamp = pd.Timestamp(start, tz="UTC")
+        return self._date_mask(decisions, outcomes, start, end) & np.asarray(
+            (feature_starts >= start_timestamp).to_numpy(), dtype=bool
         )
 
     @staticmethod
