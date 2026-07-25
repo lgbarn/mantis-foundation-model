@@ -383,7 +383,7 @@ class ExpectedRScreen:
         model.fit(scaled[train], targets[train], sample_weight=train_weight)
         predictions = model.predict(scaled)
         validation = masks["validation"]
-        active_days = decision[validation].dt.date.nunique()
+        active_days = np.unique(self._session_keys(decision[validation])).size
         desired = max(1, round(active_days * self.config.entries_per_active_session))
         validation_rows = candidates.loc[validation]
         validation_scores = predictions[validation]
@@ -462,7 +462,7 @@ class ExpectedRScreen:
                 "selected_expectancy": selected_expectancy,
                 "take_all_expectancy": take_all,
                 "selected_trades": int(selected.sum()),
-                "active_sessions": decision[test].dt.date.nunique(),
+                "active_sessions": int(np.unique(self._session_keys(decision[test])).size),
                 "score_buckets": buckets,
                 "paired_stationary_day_block_intervals_95": intervals,
             },
@@ -525,7 +525,7 @@ class ExpectedRScreen:
         selected: np.ndarray,
         training_mean: float,
     ) -> dict[str, list[float] | None]:
-        days = pd.to_datetime(rows["decision_ts"], utc=True).dt.normalize().to_numpy()
+        days = self._session_keys(rows["decision_ts"])
         unique_days = np.unique(days)
         if len(unique_days) < 2 or not selected.any():
             return {
@@ -565,3 +565,20 @@ class ExpectedRScreen:
             "selected_expectancy": interval(selected_means),
             "selected_minus_take_all": interval(differences),
         }
+
+    def _session_keys(self, timestamps: pd.Series) -> np.ndarray:
+        """Map close timestamps to the Chicago trading session they belong to."""
+        local = pd.to_datetime(timestamps, utc=True).dt.tz_convert(
+            self.config.session_timezone
+        )
+        start_hour, start_minute = (
+            int(part) for part in self.config.session_start.split(":")
+        )
+        minute = local.dt.hour * 60 + local.dt.minute
+        starts_next_date = minute >= start_hour * 60 + start_minute
+        offsets = pd.to_timedelta(
+            starts_next_date.to_numpy(dtype=np.int8), unit="D"
+        )
+        keys = local.dt.normalize() + offsets
+        values: list[str] = keys.dt.strftime("%Y-%m-%d").tolist()
+        return np.asarray(values, dtype="datetime64[D]")

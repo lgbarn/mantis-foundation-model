@@ -118,6 +118,29 @@ def test_split_mask_purges_outcomes_crossing_the_boundary() -> None:
     np.testing.assert_array_equal(mask, [False, True])
 
 
+def test_trading_session_keys_keep_overnight_rows_in_one_chicago_session() -> None:
+    decisions = pd.Series(
+        pd.to_datetime(
+            [
+                "2025-01-02T23:00:00Z",
+                "2025-01-03T02:00:00Z",
+                "2025-01-03T14:00:00Z",
+                "2025-01-03T23:00:00Z",
+            ]
+        )
+    )
+
+    keys = ExpectedRScreen()._session_keys(decisions)
+
+    np.testing.assert_array_equal(
+        keys,
+        np.array(
+            ["2025-01-03", "2025-01-03", "2025-01-03", "2025-01-04"],
+            dtype="datetime64[D]",
+        ),
+    )
+
+
 def test_fit_retains_rows_freezes_threshold_and_reports_gate(tmp_path: Path) -> None:
     rng = np.random.default_rng(7)
     rows = 512 + 300
