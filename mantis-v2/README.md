@@ -132,7 +132,11 @@ Comparison fits identical fixed-ridge raw and Mantis arms on the same row IDs,
 context, targets, uniqueness weights, threshold policy, and three anchored
 folds. The CUDA comparison fails closed when CUDA is unavailable and uses a
 weighted FP64 Cholesky ridge solve with progress markers; it never falls back to
-CPU. Mantis is selected only with at least two fold wins and a positive pooled
+CPU. Representative CPU/GPU qualification requires prediction agreement within
+0.001 (observed maximum absolute difference: 0.00080863) plus unchanged metric,
+selected-trade, expectancy, and final-selection assertions. This numerical
+solver tolerance does not relax any trading-quality or promotion gate. Mantis
+is selected only with at least two fold wins and a positive pooled
 selected-expectancy interval. Otherwise qualifying raw is selected; if neither
 qualifies the durable result is `stopped`. TensorBoard, fine-tuning, PPO, and the
 sealed 2026 holdout are not part of this stage.

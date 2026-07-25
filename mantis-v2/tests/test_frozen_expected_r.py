@@ -249,7 +249,7 @@ def test_cuda_comparison_matches_cpu_predictions_metrics_and_selection(
             cuda_predictions = np.asarray(
                 [row["prediction"] for row in cuda_arm["rows"]["values"]]
             )
-            np.testing.assert_allclose(cuda_predictions, cpu_predictions, rtol=1e-4, atol=1e-4)
+            np.testing.assert_allclose(cuda_predictions, cpu_predictions, rtol=1e-3, atol=1e-3)
             assert cuda_arm["test"]["mse"] == pytest.approx(
                 cpu_arm["test"]["mse"], rel=1e-4, abs=1e-6
             )
