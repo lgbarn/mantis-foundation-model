@@ -75,6 +75,14 @@ from mantis_v2.foundation_matrix import (
     run_matrix_cell,
     write_matrix_decision,
 )
+from mantis_v2.frozen_expected_r import (
+    FrozenExpectedRConfig,
+    FrozenExpectedRError,
+    FrozenMantisEmbedder,
+    compare_frozen_artifacts,
+    prepare_frozen_input,
+    write_paid_preflight,
+)
 from mantis_v2.model import ModelContractError
 from mantis_v2.monitoring import MonitoringError, serve_tensorboard
 from mantis_v2.pipeline import (
@@ -391,6 +399,29 @@ def _parser() -> argparse.ArgumentParser:
     fixture_score.add_argument("--candidate", required=True, type=Path)
     fixture_score.add_argument("--reference", required=True, type=Path)
     fixture_score.add_argument("--output", required=True, type=Path)
+    frozen_prepare = subparsers.add_parser("frozen-screen-prepare")
+    frozen_prepare.add_argument("--config", required=True, type=Path)
+    frozen_prepare.add_argument("--market", required=True, type=Path)
+    frozen_prepare.add_argument("--output", required=True, type=Path)
+    frozen_embed = subparsers.add_parser("frozen-screen-embed")
+    frozen_embed.add_argument("--config", required=True, type=Path)
+    frozen_embed.add_argument("--input", required=True, type=Path)
+    frozen_embed.add_argument("--output", required=True, type=Path)
+    frozen_embed.add_argument("--maximum-shards", type=int)
+    frozen_compare = subparsers.add_parser("frozen-screen-compare")
+    frozen_compare.add_argument("--config", required=True, type=Path)
+    frozen_compare.add_argument("--input", required=True, type=Path)
+    frozen_compare.add_argument("--embeddings", required=True, type=Path)
+    frozen_compare.add_argument("--output", required=True, type=Path)
+    frozen_preflight = subparsers.add_parser("frozen-screen-preflight")
+    frozen_preflight.add_argument("--input", required=True, type=Path)
+    frozen_preflight.add_argument("--embedding-output", required=True, type=Path)
+    frozen_preflight.add_argument("--checks", required=True, type=Path)
+    frozen_preflight.add_argument("--exact-command", required=True)
+    frozen_preflight.add_argument("--hourly-rate", required=True, type=float)
+    frozen_preflight.add_argument("--budget", default=10.0, type=float)
+    frozen_preflight.add_argument("--deadline-hours", required=True, type=float)
+    frozen_preflight.add_argument("--output", required=True, type=Path)
     matrix_initial = subparsers.add_parser("foundation-matrix-plan-initial")
     matrix_initial.add_argument("--config", required=True, type=Path)
     matrix_initial.add_argument("--output-root", required=True, type=Path)
@@ -620,6 +651,36 @@ def main() -> None:
                     )
                 )
             }
+        elif args.command == "frozen-screen-prepare":
+            FrozenExpectedRConfig.from_json(args.config)
+            result = {"manifest": str(prepare_frozen_input(args.market, args.output))}
+        elif args.command == "frozen-screen-embed":
+            frozen_config = FrozenExpectedRConfig.from_json(args.config)
+            result = FrozenMantisEmbedder(frozen_config).embed(
+                args.input, args.output, maximum_shards=args.maximum_shards
+            )
+        elif args.command == "frozen-screen-compare":
+            frozen_config = FrozenExpectedRConfig.from_json(args.config)
+            result = compare_frozen_artifacts(
+                args.input, args.embeddings, args.output, frozen_config
+            )
+        elif args.command == "frozen-screen-preflight":
+            checks_receipt = _load_matrix_json(args.checks)
+            checks = checks_receipt.get("checks")
+            duration = checks_receipt.get("duration_seconds")
+            if not isinstance(checks, dict) or not isinstance(duration, int | float):
+                raise FrozenExpectedRError("focused checks receipt is invalid")
+            result = write_paid_preflight(
+                args.input,
+                args.embedding_output,
+                args.output,
+                exact_command=args.exact_command,
+                hourly_rate_usd=args.hourly_rate,
+                budget_usd=args.budget,
+                deadline_hours=args.deadline_hours,
+                check_duration_seconds=float(duration),
+                checks={str(key): value is True for key, value in checks.items()},
+            )
         elif args.command == "foundation-diagnostic-score":
             result = {
                 "result": str(
@@ -994,6 +1055,7 @@ def main() -> None:
         WorkloadError,
         RunpodS3Error,
         RunpodctlError,
+        FrozenExpectedRError,
     ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc

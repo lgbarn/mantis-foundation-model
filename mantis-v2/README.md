@@ -94,6 +94,46 @@ just runpod-official-bootstrap \
 just qualify-cuda-bf16 fp32.json bf16.json qualification.json
 ```
 
+### Official frozen expected-R screen
+
+The MNQ screen uses accepted `NQ_3min.parquet` only. Preparation runs locally
+before a Pod exists; it does not repeat the corpus audit. It writes one immutable
+candidate/window/context bundle whose manifest binds every row and byte. Run in
+this order with unique external artifact paths:
+
+```bash
+just frozen-screen-prepare /path/to/NQ_3min.parquet /external/frozen-screen-v1/input
+just frozen-screen-preflight \
+  /external/frozen-screen-v1/input/manifest.json \
+  /network-volume/frozen-screen-v1/embed \
+  /external/frozen-screen-v1/focused-checks.json \
+  "uv run mantis-v2 frozen-screen-embed --config /workspace/mantis/mantis-v2/configs/frozen-expected-r-v1.json --input /workspace/input/manifest.json --output /workspace/output/embed" \
+  HOURLY_RATE DEADLINE_HOURS /external/frozen-screen-v1/preflight.json
+just frozen-screen-embed \
+  /external/frozen-screen-v1/input/manifest.json \
+  /external/frozen-screen-v1/embed
+just frozen-screen-compare \
+  /external/frozen-screen-v1/input/manifest.json \
+  /external/frozen-screen-v1/embed/manifest.json \
+  /external/frozen-screen-v1/selection.json
+```
+
+The preflight receipt requires the four focused checks to pass in under 60
+seconds, one L40S, a maximum $10 budget, a deadline no longer than six hours or
+the rate-derived spend limit, a 30-second health interval, one provenance-safe
+resume, and termination after success or a second failure. The embedder verifies
+the pinned official revision and weights, uses native MantisV2 preprocessing,
+transformer layer 2 and combined CLS/mean pooling, then performs fixed-fixture
+BF16/FP32 parity. Failed parity uses FP32. Each feature/metadata shard is atomic;
+a rerun verifies complete shards and resumes at the first uncommitted row.
+
+Comparison fits identical fixed-ridge raw and Mantis arms on the same row IDs,
+context, targets, uniqueness weights, threshold policy, and three anchored
+folds. Mantis is selected only with at least two fold wins and a positive pooled
+selected-expectancy interval. Otherwise qualifying raw is selected; if neither
+qualifies the durable result is `stopped`. TensorBoard, fine-tuning, PPO, and the
+sealed 2026 holdout are not part of this stage.
+
 The default remote runtime is RunPod's supported PyTorch 2.8 template
 `runpod-torch-v280`, pinned to the image digest recorded in
 `infra/runpod/examples/intent-h100-qualification.json`. The source archive and
