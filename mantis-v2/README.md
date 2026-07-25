@@ -416,6 +416,14 @@ holdout access. A formally promoted export is required before either stage.
 The superseded `v1` run remains as preserved preparation evidence after an
 interrupted duplicate process; do not resume it.
 
+`configs/trend-magic-lp-ft-3tf-cuda-v1.toml` is the separate diagnostic
+producer for the validated paper-first LP-FT export. Its foundation manifest
+and weights hash are pinned to the completed LP-FT run. Run `downstream-verify`,
+`downstream-prepare`, and `downstream-embed` as separate commands. Do not reuse
+direct-LoRA embeddings or run identities. Create and pin a distinct supervised
+consumer only after the LP-FT embed manifest exists; simulation and holdout
+remain locked while the export role is `diagnostic_candidate`.
+
 The completed `head-c0001-v2` walk-forward converged on all eight folds but
 failed both primary proper-score gates (weighted log loss 0.695306 and weighted
 Brier 0.251044). Do not run `downstream-simulate` or unlock the holdout for this
