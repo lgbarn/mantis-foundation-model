@@ -23,6 +23,7 @@ from typing import Any, Literal
 from mantis_v2.foundation_matrix import FoundationMatrixError, validate_planned_cell
 from mantis_v2.monitoring import tensorboard_command
 from mantis_v2.runpod_config import (
+    LaunchAuthorization,
     RunpodConfigError,
     load_launch_authorization,
     load_spend_ledger,
@@ -137,6 +138,15 @@ def _file_record(value: object, field: str, *, path_role: str) -> dict[str, Any]
     if _sha256_file(path) != expected:
         raise WorkloadError(f"{field} hash mismatch")
     return record
+
+
+def _load_authorization_for_role(
+    authorization: Mapping[str, Any], path_role: Literal["controller", "pod"]
+) -> LaunchAuthorization:
+    try:
+        return load_launch_authorization(authorization[f"{path_role}_path"])
+    except RunpodConfigError as exc:
+        raise WorkloadError("launch authorization file is invalid") from exc
 
 
 def _decimal(value: object, field: str, *, positive: bool = True) -> Decimal:
@@ -546,10 +556,7 @@ def _validate_core(
         authorization["campaign_ceiling_usd"], "authorization.campaign_ceiling_usd"
     ) != Decimal("150.00"):
         raise WorkloadError("campaign ceiling must be $150")
-    try:
-        approved = load_launch_authorization(authorization["controller_path"])
-    except RunpodConfigError as exc:
-        raise WorkloadError("launch authorization file is invalid") from exc
+    approved = _load_authorization_for_role(authorization, path_role)
     if (
         approved.autopay_disabled is not authorization["autopay_disabled"]
         or approved.ordinary_launch_cutoff_usd

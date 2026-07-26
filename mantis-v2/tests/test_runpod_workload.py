@@ -18,6 +18,7 @@ from mantis_v2.runpod_s3_workload import RunpodS3WorkloadIO
 from mantis_v2.runpod_workload import (
     WorkloadError,
     _bounded_call,
+    _load_authorization_for_role,
     _load_manifest_document,
     bind_workload_decision,
     execute_workload_manifest,
@@ -426,6 +427,16 @@ def test_bound_pod_manifest_copy_does_not_require_controller_digest_directory(
     assert _load_manifest_document(pod_path, path_role="pod")["manifest_digest"] == (
         controller_path.parent.name
     )
+
+
+def test_pod_validation_loads_pod_authorization_path(tmp_path: Path) -> None:
+    spec = _spec(tmp_path)
+    authorization = spec["authorization"]
+    assert isinstance(authorization, dict)
+    authorization["pod_path"] = authorization["controller_path"]
+    authorization["controller_path"] = str(tmp_path / "controller-path-does-not-exist.json")
+
+    assert _load_authorization_for_role(authorization, "pod").approver == "lgbarn"
 
 
 def test_pod_executor_rejects_manifest_overwritten_by_another_bound_run(
