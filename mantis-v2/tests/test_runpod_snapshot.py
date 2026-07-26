@@ -153,7 +153,7 @@ def test_snapshot_emits_fresh_planner_inputs_and_receipt_provenance(
         intent_path=paths["intent"],
         runpodctl_binary=paths["binary"],
         output_root=output,
-        runner=_runner(),
+        runner=_runner(spend=0.018),
         now=lambda: datetime(2026, 7, 25, 12, 0, tzinfo=UTC),
     )
 
@@ -178,8 +178,9 @@ def test_snapshot_emits_fresh_planner_inputs_and_receipt_provenance(
     assert ledger["active_reservations"] == []
     assert ledger["consumed_authorization_digests"] == ["c" * 64]
     assert provenance["provider_checks"] == {
-        "current_spend_per_hour_usd": "0.0",
+        "current_spend_per_hour_usd": "0.018",
         "live_pod_count": 0,
+        "storage_spend_ceiling_per_hour_usd": "0.020550",
     }
     assert provenance["bindings"] == {
         "free_bytes": "platform.storage.minimum_free_bytes",
@@ -191,8 +192,8 @@ def test_snapshot_emits_fresh_planner_inputs_and_receipt_provenance(
 @pytest.mark.parametrize(
     ("pods", "spend", "error"),
     [
-        ([{"id": "pod-live"}], 0.39, "zero live Pods"),
-        ([], 0.39, "current spend must be zero"),
+        ([{"id": "pod-live"}], 0.018, "zero live Pods"),
+        ([], 0.39, "storage-only bound"),
     ],
 )
 def test_snapshot_rejects_billed_state_without_partial_outputs(

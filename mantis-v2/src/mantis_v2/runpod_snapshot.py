@@ -222,8 +222,14 @@ def write_provider_snapshot(
     if len(live_pods) != len(pods) or live_pods:
         raise RunpodSnapshotError("zero live Pods required before launch planning")
     current_spend = _decimal(user.get("currentSpendPerHr"), "user.currentSpendPerHr")
-    if current_spend != 0:
-        raise RunpodSnapshotError("provider current spend must be zero before launch planning")
+    provider = control["provider"]
+    storage_spend_ceiling = Decimal(int(provider["volume_size_gb"])) * _decimal(
+        provider["storage_usd_per_gb_hour"], "storage hourly rate"
+    )
+    if current_spend > storage_spend_ceiling:
+        raise RunpodSnapshotError(
+            "provider current spend exceeds the configured storage-only bound"
+        )
     balance = _decimal(user.get("clientBalance"), "user.clientBalance")
 
     matching_gpu = next(
@@ -270,7 +276,6 @@ def write_provider_snapshot(
     volume_dc = _text(matching_volume.get("dataCenterId"), "volume.dataCenterId")
     if volume_size != intent.volume_size_gb or volume_dc != intent.datacenter_id:
         raise RunpodSnapshotError("network volume identity differs from launch intent")
-    provider = control["provider"]
     if (
         provider["volume_id"] != intent.volume_id
         or provider["volume_size_gb"] != intent.volume_size_gb
@@ -332,6 +337,7 @@ def write_provider_snapshot(
             "provider_checks": {
                 "live_pod_count": 0,
                 "current_spend_per_hour_usd": str(current_spend),
+                "storage_spend_ceiling_per_hour_usd": str(storage_spend_ceiling),
             },
             "bindings": {
                 "offer_price": "paid_control.provider.hourly_rate_usd",

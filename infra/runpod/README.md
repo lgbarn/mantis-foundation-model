@@ -74,8 +74,8 @@ just runpod-provider-snapshot \
   /path/to/runpodctl /path/to/provider-snapshot
 ```
 
-This read-only command pins and verifies `runpodctl`, requires zero live Pods
-and zero current provider spend, and reconciles every local Pod receipt through
+This read-only command pins and verifies `runpodctl`, requires zero live Pods,
+allows only the configured persistent-volume storage spend rate, and reconciles every local Pod receipt through
 its termination and spend receipts. Its `inventory.json` and
 `spend-ledger.json` feed `runpod-plan`; `provenance.json` records the command
 output hashes and the reviewed price/storage policy bindings. Existing output,

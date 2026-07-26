@@ -157,7 +157,8 @@ decision; no workload JSON is hand-authored.
 `runpod-provider-snapshot` is the required live read-only boundary before both
 planning calls. It uses the pinned official `runpodctl` for account balance,
 current spend, live Pods, GPU/datacenter availability, and network-volume
-identity. It requires zero live Pods and a zero provider spend rate, rebuilds
+identity. It requires zero live Pods and permits current spend only through the
+configured persistent-volume storage ceiling, rebuilds
 the campaign ledger only from completed local lifecycle spend receipts, and
 writes planner-compatible inventory and ledger JSON plus `provenance.json`.
 Because this pinned CLI does not report offer price or free volume bytes, the
