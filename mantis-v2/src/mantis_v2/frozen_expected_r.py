@@ -670,6 +670,22 @@ def write_paid_planning_inputs(config_path: Path, output: Path) -> dict[str, Any
     run_id = str(control["run_id"])
     gpu_type = str(provider.get("gpu_type", "NVIDIA L40S"))
     pod_root = f"/workspace/mantis/runs/{run_id}"
+    input_parent = Path(str(paths["input_manifest"])).parent
+    compressed_windows = input_parent / "windows.npy.gz"
+    runtime_input = Path("/opt/mantis/runtime-input") / run_id
+    temporary_input = runtime_input.with_name(f".{run_id}.tmp")
+    transport_command = (
+        f"rm -rf {shlex.quote(str(temporary_input))} && "
+        f"mkdir -p {shlex.quote(str(temporary_input))} && "
+        f"cp {shlex.quote(str(input_parent / 'manifest.json'))} "
+        f"{shlex.quote(str(input_parent / 'candidates.parquet'))} "
+        f"{shlex.quote(str(input_parent / 'context.npy'))} "
+        f"{shlex.quote(str(temporary_input))}/ && "
+        f"gzip -dc {shlex.quote(str(compressed_windows))} > "
+        f"{shlex.quote(str(temporary_input / 'windows.npy'))} && "
+        f"rm -rf {shlex.quote(str(runtime_input))} && "
+        f"mv {shlex.quote(str(temporary_input))} {shlex.quote(str(runtime_input))}"
+    )
     workload_command = shlex.join(
         [
             "uv",
@@ -679,7 +695,7 @@ def write_paid_planning_inputs(config_path: Path, output: Path) -> dict[str, Any
             "--config",
             str(paths["frozen_config"]),
             "--input",
-            str(paths["input_manifest"]),
+            str(runtime_input / "manifest.json"),
             "--embedding-output",
             f"{pod_root}/embed",
             "--comparison-output",
@@ -687,16 +703,6 @@ def write_paid_planning_inputs(config_path: Path, output: Path) -> dict[str, Any
             "--progress-output",
             f"{pod_root}/selection.progress.json",
         ]
-    )
-    input_parent = Path(str(paths["input_manifest"])).parent
-    compressed_windows = input_parent / "windows.npy.gz"
-    windows = input_parent / "windows.npy"
-    temporary_windows = input_parent / ".windows.npy.tmp"
-    transport_command = (
-        f"if [ -f {shlex.quote(str(compressed_windows))} ]; then "
-        f"gzip -dc {shlex.quote(str(compressed_windows))} > "
-        f"{shlex.quote(str(temporary_windows))} && "
-        f"mv {shlex.quote(str(temporary_windows))} {shlex.quote(str(windows))}; fi"
     )
     exact_command = f"{transport_command} && {workload_command}"
     duration = min(
