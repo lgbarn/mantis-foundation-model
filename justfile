@@ -99,6 +99,9 @@ runpod-tensorboard receipt runtime port="6006":
 runpod-plan platform local experiment intent inventory ledger evaluated_at output:
     uv run mantis-v2 runpod-plan --platform {{quote(platform)}} --local {{quote(local)}} --experiment {{quote(experiment)}} --intent {{quote(intent)}} --inventory {{quote(inventory)}} --ledger {{quote(ledger)}} --evaluated-at {{quote(evaluated_at)}} --output {{quote(output)}}
 
+runpod-provider-snapshot platform local control_config intent runpodctl_binary output:
+    uv run mantis-v2 runpod-provider-snapshot --platform {{quote(platform)}} --local {{quote(local)}} --control-config {{quote(control_config)}} --intent {{quote(intent)}} --runpodctl-binary {{quote(runpodctl_binary)}} --output {{quote(output)}}
+
 runpod-plan-authorized platform local experiment intent inventory ledger authorization evaluated_at output:
     uv run mantis-v2 runpod-plan --platform {{quote(platform)}} --local {{quote(local)}} --experiment {{quote(experiment)}} --intent {{quote(intent)}} --inventory {{quote(inventory)}} --ledger {{quote(ledger)}} --authorization {{quote(authorization)}} --evaluated-at {{quote(evaluated_at)}} --output {{quote(output)}}
 

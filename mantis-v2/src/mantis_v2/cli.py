@@ -143,6 +143,7 @@ from mantis_v2.runpod_plan import LaunchPlanError, write_launch_decision
 from mantis_v2.runpod_rest_adapter import RunpodAdapterError, RunpodRestV1Adapter
 from mantis_v2.runpod_s3 import AwsCliS3TransferAdapter, RunpodS3Error
 from mantis_v2.runpod_s3_workload import RunpodS3WorkloadIO
+from mantis_v2.runpod_snapshot import RunpodSnapshotError, write_provider_snapshot
 from mantis_v2.runpod_workload import (
     WorkloadError,
     bind_workload_decision,
@@ -313,6 +314,13 @@ def _parser() -> argparse.ArgumentParser:
     runpod_plan.add_argument("--authorization", type=Path)
     runpod_plan.add_argument("--evaluated-at", required=True)
     runpod_plan.add_argument("--output", required=True, type=Path)
+    runpod_snapshot = subparsers.add_parser("runpod-provider-snapshot")
+    runpod_snapshot.add_argument("--platform", required=True, type=Path)
+    runpod_snapshot.add_argument("--local", required=True, type=Path)
+    runpod_snapshot.add_argument("--control-config", required=True, type=Path)
+    runpod_snapshot.add_argument("--intent", required=True, type=Path)
+    runpod_snapshot.add_argument("--runpodctl-binary", required=True, type=Path)
+    runpod_snapshot.add_argument("--output", required=True, type=Path)
     for command in ("runpod-launch", "runpod-reconcile-launch"):
         lifecycle = subparsers.add_parser(command)
         lifecycle.add_argument("--decision", required=True, type=Path)
@@ -915,6 +923,15 @@ def main() -> None:
                 evaluated_at=args.evaluated_at,
                 output_path=args.output,
             )
+        elif args.command == "runpod-provider-snapshot":
+            result = write_provider_snapshot(
+                platform_path=args.platform,
+                local_path=args.local,
+                control_path=args.control_config,
+                intent_path=args.intent,
+                runpodctl_binary=args.runpodctl_binary,
+                output_root=args.output,
+            )
         elif args.command in {"runpod-launch", "runpod-reconcile-launch"}:
             decision = _load_json_object(args.decision)
             if args.command == "runpod-launch":
@@ -1108,6 +1125,7 @@ def main() -> None:
         WorkloadError,
         RunpodS3Error,
         RunpodctlError,
+        RunpodSnapshotError,
         FrozenExpectedRError,
     ) as exc:
         print(f"error: {exc}", file=sys.stderr)
