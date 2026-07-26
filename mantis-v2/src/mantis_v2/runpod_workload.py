@@ -679,6 +679,7 @@ def _bound_workload(
     )
     environment = {
         "MANTIS_RUN_ID": str(manifest["run_id"]),
+        "MANTIS_WORKLOAD_DIGEST": str(manifest["manifest_digest"]),
         "MANTIS_WORKLOAD_MANIFEST": str(pod_path),
         "HF_HOME": str(input_root / "cache" / "huggingface"),
         "HF_HUB_OFFLINE": "1",
@@ -840,10 +841,14 @@ def execute_workload_manifest(
     sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
     """Revalidate one staged manifest inside the Pod and run training immediately."""
+    environment = dict(os.environ if environ is None else environ)
     envelope = _load_manifest_document(manifest_path, path_role="pod")
+    if envelope.get("manifest_digest") != _text(
+        environment.get("MANTIS_WORKLOAD_DIGEST"), "MANTIS_WORKLOAD_DIGEST"
+    ) or envelope.get("run_id") != _text(environment.get("MANTIS_RUN_ID"), "MANTIS_RUN_ID"):
+        raise WorkloadError("Pod manifest decision-bound identity mismatch")
     _promote_pod_input_bundle(envelope)
     manifest = validate_workload_manifest(manifest_path, path_role="pod")
-    environment = dict(os.environ if environ is None else environ)
     pod_id = _text(environment.get("RUNPOD_POD_ID"), "RUNPOD_POD_ID")
     token_record = manifest["monitor"]["token"]
     token_path = Path(str(token_record["pod_path"]))

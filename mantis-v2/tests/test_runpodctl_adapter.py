@@ -64,6 +64,7 @@ def _decision() -> dict[str, Any]:
                 "HF_HOME": "/workspace/mantis/inputs/bundle/cache/huggingface",
                 "HF_HUB_OFFLINE": "1",
                 "MANTIS_RUN_ID": "run-identity",
+                "MANTIS_WORKLOAD_DIGEST": "d" * 64,
                 "MANTIS_WORKLOAD_MANIFEST": "/workspace/launch.json",
             },
         },
@@ -115,7 +116,7 @@ def test_pinned_create_uses_exact_deadline_workload_and_returned_pod_id(tmp_path
             "--network-volume-id=volume-1",
             "--registry-auth-id=registry-1",
             "--docker-args=uv run mantis-v2 workload-execute --manifest /workspace/launch.json",
-            '--env={"HF_HOME":"/workspace/mantis/inputs/bundle/cache/huggingface","HF_HUB_OFFLINE":"1","MANTIS_RUN_ID":"run-identity","MANTIS_WORKLOAD_MANIFEST":"/workspace/launch.json"}',
+            '--env={"HF_HOME":"/workspace/mantis/inputs/bundle/cache/huggingface","HF_HUB_OFFLINE":"1","MANTIS_RUN_ID":"run-identity","MANTIS_WORKLOAD_DIGEST":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","MANTIS_WORKLOAD_MANIFEST":"/workspace/launch.json"}',
             "--terminate-after=2026-07-22T14:12:00Z",
         ]
     ]

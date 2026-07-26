@@ -120,6 +120,7 @@ class RunpodctlCreateAdapter:
             raise RunpodctlError("launch decision workload environment is invalid")
         allowed_environment = {
             "MANTIS_RUN_ID",
+            "MANTIS_WORKLOAD_DIGEST",
             "MANTIS_WORKLOAD_MANIFEST",
             "MANTIS_BASE_IMAGE",
             "MANTIS_SOURCE_REVISION",

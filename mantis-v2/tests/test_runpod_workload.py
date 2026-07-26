@@ -428,6 +428,33 @@ def test_bound_pod_manifest_copy_does_not_require_controller_digest_directory(
     )
 
 
+def test_pod_executor_rejects_manifest_overwritten_by_another_bound_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first_path = seal_workload_manifest(_spec(tmp_path), tmp_path / "first-sealed")
+    first = json.loads(first_path.read_text())
+    second_root = tmp_path / "second"
+    second_root.mkdir()
+    second_path = seal_workload_manifest(_spec(second_root), second_root / "sealed")
+    pod_path = tmp_path / "workspace" / "mantis" / "control" / "frozen" / "launch-manifest.json"
+    pod_path.parent.mkdir(parents=True)
+    pod_path.write_bytes(second_path.read_bytes())
+    promoted: list[dict] = []
+    monkeypatch.setattr("mantis_v2.runpod_workload._promote_pod_input_bundle", promoted.append)
+
+    with pytest.raises(WorkloadError, match="decision-bound identity mismatch"):
+        execute_workload_manifest(
+            pod_path,
+            environ={
+                "MANTIS_RUN_ID": str(first["run_id"]),
+                "MANTIS_WORKLOAD_DIGEST": str(first["manifest_digest"]),
+                "RUNPOD_POD_ID": "pod-first",
+            },
+        )
+
+    assert promoted == []
+
+
 def test_official_frozen_manifest_runs_embed_and_compare_with_one_retry(tmp_path: Path) -> None:
     spec = _official_frozen_spec(tmp_path)
     manifest_path = seal_workload_manifest(spec, tmp_path / "sealed-frozen")
@@ -558,6 +585,7 @@ def test_launch_decision_is_immutably_bound_to_exact_immediate_workload(tmp_path
     )
     assert bound["workload"]["environment"] == {
         "MANTIS_RUN_ID": manifest["run_id"],
+        "MANTIS_WORKLOAD_DIGEST": manifest["manifest_digest"],
         "MANTIS_WORKLOAD_MANIFEST": "/workspace/mantis/control/run/launch-manifest.json",
         "HF_HOME": (
             "/workspace/mantis/inputs/"
@@ -764,6 +792,7 @@ def _decision(manifest: dict[str, object]) -> dict[str, object]:
             "docker_args": "uv run mantis-v2 workload-execute --manifest /workspace/launch.json",
             "environment": {
                 "MANTIS_RUN_ID": manifest["run_id"],
+                "MANTIS_WORKLOAD_DIGEST": manifest["manifest_digest"],
                 "MANTIS_WORKLOAD_MANIFEST": "/workspace/launch.json",
                 "HF_HOME": (
                     "/workspace/mantis/inputs/"
@@ -1109,7 +1138,12 @@ def test_pod_executor_revalidates_then_immediately_runs_and_signs_heartbeats(
 
     result = execute_workload_manifest(
         manifest_path,
-        environ={"RUNPOD_POD_ID": "pod-123", "NVIDIA_VISIBLE_DEVICES": "GPU-0"},
+        environ={
+            "MANTIS_RUN_ID": str(manifest["run_id"]),
+            "MANTIS_WORKLOAD_DIGEST": str(manifest["manifest_digest"]),
+            "RUNPOD_POD_ID": "pod-123",
+            "NVIDIA_VISIBLE_DEVICES": "GPU-0",
+        },
         process_factory=process_factory,
         service_factory=lambda _command, **_kwargs: Service(),
         runtime_self_check=lambda: {
