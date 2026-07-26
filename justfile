@@ -45,6 +45,21 @@ reject-cuda-bf16 reference failure output qualification="mantis-v2/configs/cuda-
 qualify-cuda-embedding identity foundation_manifest cpu_features cuda_features cpu_metadata cuda_metadata shard_directory performance output qualification="mantis-v2/configs/cuda-embedding-qualification.toml":
     uv run mantis-v2 cuda-embedding-qualify --qualification-config {{quote(qualification)}} --identity {{quote(identity)}} --foundation-manifest {{quote(foundation_manifest)}} --cpu-features {{quote(cpu_features)}} --cuda-features {{quote(cuda_features)}} --cpu-metadata {{quote(cpu_metadata)}} --cuda-metadata {{quote(cuda_metadata)}} --shard-directory {{quote(shard_directory)}} --performance {{quote(performance)}} --output {{quote(output)}}
 
+frozen-screen-prepare market output config="mantis-v2/configs/frozen-expected-r-v1.json":
+    uv run mantis-v2 frozen-screen-prepare --config {{quote(config)}} --market {{quote(market)}} --output {{quote(output)}}
+
+frozen-screen-embed input output config="mantis-v2/configs/frozen-expected-r-v1.json":
+    uv run mantis-v2 frozen-screen-embed --config {{quote(config)}} --input {{quote(input)}} --output {{quote(output)}}
+
+frozen-screen-compare input embeddings output config="mantis-v2/configs/frozen-expected-r-v1.json" comparison_device="cuda" cpu_exception="":
+    uv run mantis-v2 frozen-screen-compare --config {{quote(config)}} --input {{quote(input)}} --embeddings {{quote(embeddings)}} --output {{quote(output)}} --comparison-device {{quote(comparison_device)}} --cpu-exception {{quote(cpu_exception)}}
+
+frozen-screen-preflight input embedding_output checks exact_command hourly_rate deadline_hours output:
+    uv run mantis-v2 frozen-screen-preflight --input {{quote(input)}} --embedding-output {{quote(embedding_output)}} --checks {{quote(checks)}} --exact-command {{quote(exact_command)}} --hourly-rate {{quote(hourly_rate)}} --deadline-hours {{quote(deadline_hours)}} --output {{quote(output)}}
+
+frozen-screen-run preflight manifest decision local runpodctl_binary aws_binary="aws":
+    uv run mantis-v2 runpod-supervise-workload --preflight {{quote(preflight)}} --manifest {{quote(manifest)}} --decision {{quote(decision)}} --local {{quote(local)}} --runpodctl-binary {{quote(runpodctl_binary)}} --aws-binary {{quote(aws_binary)}}
+
 verify-upstream:
     uv run mantis-v2 verify-upstream --config mantis-v2/configs/nextleg.toml
 

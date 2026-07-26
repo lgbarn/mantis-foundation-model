@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import time
 from pathlib import Path
@@ -123,6 +124,12 @@ class ExpectedRScreenConfig:
 
 _MARKET_COLUMNS = ("open", "high", "low", "close", "volume")
 _CONTEXT_COLUMNS = ("trend_magic_direction", "trend_magic_distance_r", "session_minute")
+RidgePredictor = Callable[[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float], np.ndarray]
+ThresholdSelector = Callable[[pd.DataFrame, np.ndarray, int], float]
+IntervalEvaluator = Callable[
+    [pd.DataFrame, np.ndarray, np.ndarray, np.ndarray, float],
+    dict[str, list[float] | None],
+]
 
 
 def _clock(value: str) -> time:
@@ -266,9 +273,13 @@ class ExpectedRScreen:
                         f"{timestamps.iloc[decision_index].isoformat()}:{decision_index}".encode()
                     ).hexdigest(),
                     "decision_index": decision_index,
+                    "feature_start_index": decision_index - self.config.window_bars + 1,
                     "entry_index": decision_index + 1,
                     "outcome_index": outcome["outcome_index"],
                     "decision_ts": close_timestamps.iloc[decision_index],
+                    "feature_start_ts": close_timestamps.iloc[
+                        decision_index - self.config.window_bars + 1
+                    ],
                     "entry_ts": open_timestamps.iloc[decision_index + 1],
                     "outcome_ts": close_timestamps.iloc[outcome["outcome_index"]],
                     "direction": side,
@@ -404,26 +415,36 @@ class ExpectedRScreen:
         temporary.replace(artifact_path)
         return artifact
 
-    def fit(self, candidates: pd.DataFrame) -> dict[str, Any]:
+    def fit(
+        self,
+        candidates: pd.DataFrame,
+        *,
+        ridge_predictor: RidgePredictor | None = None,
+        threshold_selector: ThresholdSelector | None = None,
+        interval_evaluator: IntervalEvaluator | None = None,
+        stage_reporter: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
         """Fit train-only scaling/ridge, freeze validation threshold, and evaluate test."""
         features = candidates.attrs.get("raw_features")
         if not isinstance(features, np.ndarray) or len(features) != len(candidates):
             raise ExpectedRScreenError("candidates are missing bound raw-window features")
+        original_attrs = candidates.attrs.copy()
+        try:
+            del candidates.attrs["raw_features"]
+            working_candidates = candidates.copy(deep=False)
+        finally:
+            candidates.attrs.clear()
+            candidates.attrs.update(original_attrs)
+        candidates = working_candidates
         decision = pd.to_datetime(candidates["decision_ts"], utc=True)
-        outcome = pd.to_datetime(candidates["outcome_ts"], utc=True)
         masks = {
-            "train": self._date_mask(
-                decision, outcome, self.config.train_start, self.config.train_end
-            ),
-            "validation": self._date_mask(
-                decision,
-                outcome,
+            "train": self._split_mask(candidates, self.config.train_start, self.config.train_end),
+            "validation": self._split_mask(
+                candidates,
                 self.config.validation_start,
                 self.config.validation_end,
             ),
-            "test": self._date_mask(
-                decision, outcome, self.config.test_start, self.config.test_end
-            ),
+            "test": self._split_mask(candidates, self.config.test_start, self.config.test_end),
         }
         if any(not mask.any() for mask in masks.values()):
             empty = [name for name, mask in masks.items() if not mask.any()]
@@ -446,30 +467,46 @@ class ExpectedRScreen:
             chunk = scaled[start : start + 4096]
             chunk -= mean32
             chunk /= scale32
-        model = Ridge(alpha=self.config.ridge_alpha, fit_intercept=True, solver="lsqr")
         targets = candidates["net_r"].to_numpy(dtype=np.float64)
-        model.fit(scaled[train], targets[train], sample_weight=train_weight)
-        predictions = model.predict(scaled)
+        if ridge_predictor is None:
+            model = Ridge(alpha=self.config.ridge_alpha, fit_intercept=True, solver="lsqr")
+            model.fit(scaled[train], targets[train], sample_weight=train_weight)
+            predictions = model.predict(scaled)
+        else:
+            predictions = ridge_predictor(scaled, train, targets, weights, self.config.ridge_alpha)
+            if predictions.shape != targets.shape or not np.isfinite(predictions).all():
+                raise ExpectedRScreenError("ridge predictor returned invalid predictions")
         validation = masks["validation"]
         active_days = np.unique(self._session_keys(decision[validation])).size
         desired = max(1, round(active_days * self.config.entries_per_active_session))
         validation_rows = candidates.loc[validation]
         validation_scores = predictions[validation]
-        thresholds = np.unique(validation_scores)
-        threshold = float(
-            min(
-                thresholds,
-                key=lambda value: (
-                    abs(
-                        int(self._executed_mask(validation_rows, validation_scores, value).sum())
-                        - desired
+        if threshold_selector is None:
+            thresholds = np.unique(validation_scores)
+            threshold = float(
+                min(
+                    thresholds,
+                    key=lambda value: (
+                        abs(
+                            int(
+                                self._executed_mask(validation_rows, validation_scores, value).sum()
+                            )
+                            - desired
+                        ),
+                        -value,
                     ),
-                    -value,
-                ),
+                )
             )
-        )
+        else:
+            threshold = threshold_selector(validation_rows, validation_scores, desired)
+        if stage_reporter is not None:
+            stage_reporter("threshold_complete")
         test = masks["test"]
+        if stage_reporter is not None:
+            stage_reporter("test_selection_started")
         selected = self._executed_mask(candidates.loc[test], predictions[test], threshold)
+        if stage_reporter is not None:
+            stage_reporter("test_selection_complete")
         test_y = targets[test]
         selected_y = test_y[selected]
         train_mean = float(np.average(targets[train], weights=train_weight))
@@ -477,10 +514,19 @@ class ExpectedRScreen:
         constant_mse = float(np.mean((train_mean - test_y) ** 2))
         selected_expectancy = float(selected_y.mean()) if len(selected_y) else None
         take_all = float(test_y.mean())
-        intervals = self._paired_intervals(
-            candidates.loc[test], test_y, predictions[test], selected, train_mean
+        if stage_reporter is not None:
+            stage_reporter("metrics_complete")
+        interval_rows = candidates.loc[test]
+        intervals = (
+            self._paired_intervals(interval_rows, test_y, predictions[test], selected, train_mean)
+            if interval_evaluator is None
+            else interval_evaluator(interval_rows, test_y, predictions[test], selected, train_mean)
         )
+        if stage_reporter is not None:
+            stage_reporter("intervals_complete")
         buckets = self._score_buckets(predictions[test], test_y)
+        if stage_reporter is not None:
+            stage_reporter("buckets_complete")
         gate_parts = {
             "mse_beats_constant": mse < constant_mse,
             "expectancy_positive": bool(
@@ -501,6 +547,8 @@ class ExpectedRScreen:
                 candidates["row_id"], predictions, targets, weights, strict=True
             )
         ]
+        if stage_reporter is not None:
+            stage_reporter("rows_complete")
         source_sha = source_digest(Path(__file__).resolve().parents[3])
         artifact: dict[str, Any] = {
             "schema_version": 1,
@@ -580,6 +628,18 @@ class ExpectedRScreen:
                 & (outcomes < end_timestamp)
             ).to_numpy(),
             dtype=bool,
+        )
+
+    def _split_mask(self, candidates: pd.DataFrame, start: str, end: str) -> np.ndarray:
+        decisions = pd.to_datetime(candidates["decision_ts"], utc=True)
+        outcomes = pd.to_datetime(candidates["outcome_ts"], utc=True)
+        if "feature_start_ts" in candidates:
+            feature_starts = pd.to_datetime(candidates["feature_start_ts"], utc=True)
+        else:
+            feature_starts = decisions
+        start_timestamp = pd.Timestamp(start, tz="UTC")
+        return self._date_mask(decisions, outcomes, start, end) & np.asarray(
+            (feature_starts >= start_timestamp).to_numpy(), dtype=bool
         )
 
     @staticmethod

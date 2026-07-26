@@ -94,6 +94,67 @@ just runpod-official-bootstrap \
 just qualify-cuda-bf16 fp32.json bf16.json qualification.json
 ```
 
+### Official frozen expected-R screen
+
+The MNQ screen uses accepted `NQ_3min.parquet` only. Preparation runs locally
+before a Pod exists; it does not repeat the corpus audit. It writes one immutable
+candidate/window/context bundle whose manifest binds every row and byte. Run in
+this order with unique external artifact paths:
+
+```bash
+just frozen-screen-prepare /path/to/NQ_3min.parquet /external/frozen-screen-v1/input
+just frozen-screen-preflight \
+  /external/frozen-screen-v1/input/manifest.json \
+  /network-volume/frozen-screen-v1/embed \
+  /external/frozen-screen-v1/focused-checks.json \
+  "uv run mantis-v2 frozen-screen-embed --config /workspace/mantis/mantis-v2/configs/frozen-expected-r-v1.json --input /workspace/input/manifest.json --output /workspace/output/embed" \
+  HOURLY_RATE DEADLINE_HOURS /external/frozen-screen-v1/preflight.json
+just frozen-screen-run \
+  /external/frozen-screen-v1/preflight.json \
+  /external/frozen-screen-v1/launch-manifest.json \
+  /external/frozen-screen-v1/bound-decision.json \
+  /path/to/runpod-local.toml /path/to/runpodctl
+just frozen-screen-compare \
+  /external/frozen-screen-v1/input/manifest.json \
+  /external/frozen-screen-v1/embed/manifest.json \
+  /external/frozen-screen-v1/selection.json \
+  mantis-v2/configs/frozen-expected-r-v1.json cuda
+```
+
+The preflight receipt requires the four focused checks to pass in under 60
+seconds, one L40S, a maximum $10 budget, a deadline no longer than six hours or
+the rate-derived spend limit, a 30-second health interval, one provenance-safe
+resume, and termination after success or a second failure. `frozen-screen-run`
+is the only supported paid route: it verifies that the staged bundle contains
+the receipted input, the workload command retries the exact embed command only
+once, and the existing RunPod supervisor enforces milestones, deadline, budget,
+termination, artifact replication, and billing reconciliation. The embedder verifies
+the pinned official revision and weights, uses native MantisV2 preprocessing,
+transformer layer 2 and combined CLS/mean pooling, then performs fixed-fixture
+BF16/FP32 parity. Failed parity uses FP32. Each feature/metadata shard is atomic;
+a rerun verifies complete shards and resumes at the first uncommitted row.
+
+Comparison first runs the fixed July 2023-June 2025 training, July-September
+2025 validation, and October-December 2025 test gate. Only a passing initial
+gate permits the three additional anchored development folds; the initial gate
+never counts toward the two required development wins. Every boundary purges
+the full 512-bar feature lookback and outcome horizon. The CUDA comparison is
+the supported default and fails closed when CUDA is unavailable. CPU requires
+an explicit user-approved or CUDA-qualification-failure reason recorded in the
+artifact with `--cpu-exception`. CUDA uses a
+weighted FP64 Cholesky ridge solve, parallel threshold recurrence, and FP64
+bootstrap reductions with progress markers; it never falls back to the CPU
+implementations for those stages. Representative CPU/GPU qualification requires
+prediction and prediction-derived interval agreement within 0.001 (observed
+maximum absolute differences: 0.00080863 and 0.000077325), MSE agreement within
+1e-4 relative or 1e-6 absolute, and exact selected-trade, outcome-only interval,
+expectancy, gate, status, and final-selection assertions. These numerical solver
+tolerances do not relax any trading-quality or promotion gate. Mantis is selected
+only with at least two fold wins and a positive pooled
+selected-expectancy interval. Otherwise qualifying raw is selected; if neither
+qualifies the durable result is `stopped`. TensorBoard, fine-tuning, PPO, and the
+sealed 2026 holdout are not part of this stage.
+
 The default remote runtime is RunPod's supported PyTorch 2.8 template
 `runpod-torch-v280`, pinned to the image digest recorded in
 `infra/runpod/examples/intent-h100-qualification.json`. The source archive and

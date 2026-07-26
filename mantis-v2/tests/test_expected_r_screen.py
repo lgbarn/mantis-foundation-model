@@ -253,6 +253,26 @@ def test_split_mask_purges_outcomes_crossing_the_boundary() -> None:
     np.testing.assert_array_equal(mask, [False, True])
 
 
+def test_split_mask_purges_full_feature_lookback_and_outcome_span() -> None:
+    candidates = pd.DataFrame(
+        {
+            "feature_start_ts": pd.to_datetime(
+                ["2025-06-30T23:57:00Z", "2025-07-01T00:00:00Z", "2025-07-01T00:00:00Z"]
+            ),
+            "decision_ts": pd.to_datetime(
+                ["2025-07-02T01:33:00Z", "2025-07-02T01:33:00Z", "2025-09-30T23:57:00Z"]
+            ),
+            "outcome_ts": pd.to_datetime(
+                ["2025-07-02T02:00:00Z", "2025-07-02T02:00:00Z", "2025-10-01T00:00:00Z"]
+            ),
+        }
+    )
+
+    mask = ExpectedRScreen()._split_mask(candidates, "2025-07-01", "2025-10-01")
+
+    np.testing.assert_array_equal(mask, [False, True, False])
+
+
 def test_trading_session_keys_keep_overnight_rows_in_one_chicago_session() -> None:
     decisions = pd.Series(
         pd.to_datetime(
@@ -303,8 +323,8 @@ def test_fit_retains_rows_freezes_threshold_and_reports_gate(tmp_path: Path) -> 
     rng = np.random.default_rng(7)
     blocks = (
         pd.date_range("2023-07-03T14:30:00Z", periods=600, freq="3min"),
-        pd.date_range("2025-07-02T14:30:00Z", periods=250, freq="3min"),
-        pd.date_range("2025-10-02T14:30:00Z", periods=250, freq="3min"),
+        pd.date_range("2025-07-02T14:30:00Z", periods=800, freq="3min"),
+        pd.date_range("2025-10-02T14:30:00Z", periods=800, freq="3min"),
     )
     timestamps = blocks[0].append(blocks[1:])
     rows = len(timestamps)
@@ -353,6 +373,10 @@ def test_fit_retains_rows_freezes_threshold_and_reports_gate(tmp_path: Path) -> 
 
 
 def test_empty_test_selection_emits_strict_json_null() -> None:
+    class FeatureArray(np.ndarray):
+        def __deepcopy__(self, _memo: object) -> FeatureArray:
+            raise AssertionError("feature matrix must not be copied with DataFrame attrs")
+
     timestamps = pd.to_datetime(
         [
             "2024-01-02T15:00:00Z",
@@ -374,15 +398,17 @@ def test_empty_test_selection_emits_strict_json_null() -> None:
             "net_r": np.array([0.0, 1.0, 10.0, 11.0, -10.0, -11.0]),
         }
     )
-    candidates.attrs["raw_features"] = np.array(
-        [[0.0], [1.0], [10.0], [11.0], [-10.0], [-11.0]], dtype=np.float32
+    features = np.array([[0.0], [1.0], [10.0], [11.0], [-10.0], [-11.0]], dtype=np.float32).view(
+        FeatureArray
     )
+    candidates.attrs["raw_features"] = features
     candidates.attrs["data_sha256"] = "fixture"
 
     artifact = ExpectedRScreen().fit(candidates)
 
     assert artifact["test"]["selected_trades"] == 0
     assert artifact["test"]["selected_expectancy"] is None
+    assert candidates.attrs["raw_features"] is features
     json.dumps(artifact, allow_nan=False)
 
 
