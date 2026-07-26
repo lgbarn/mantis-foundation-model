@@ -884,10 +884,20 @@ def test_paid_planning_inputs_are_config_driven_and_gpu_bounded(
     ]
     assert intent["gpu_count"] == 1
     assert intent["maximum_duration_seconds"] == 5 * 3600
+    assert "gzip -dc /workspace/mantis/inputs/digest/input/windows.npy.gz" in result[
+        "exact_command"
+    ]
+    assert f"/opt/mantis/runtime-input/.{control['run_id']}.tmp/windows.npy" in result[
+        "exact_command"
+    ]
     assert (
-        "gzip -dc /workspace/mantis/inputs/digest/input/windows.npy.gz" in result["exact_command"]
-    )
-    assert "mv /workspace/mantis/inputs/digest/input/.windows.npy.tmp" in result["exact_command"]
+        f"mv /opt/mantis/runtime-input/.{control['run_id']}.tmp "
+        f"/opt/mantis/runtime-input/{control['run_id']}"
+    ) in result["exact_command"]
+    assert f"--input /opt/mantis/runtime-input/{control['run_id']}/manifest.json" in result[
+        "exact_command"
+    ]
+    assert "> /workspace/mantis/inputs/digest/input/windows.npy" not in result["exact_command"]
     assert "frozen-screen-paid-workload" in result["exact_command"]
     assert (
         _parser()
