@@ -123,6 +123,9 @@ runpod-reconcile-termination pod_id run_name local:
 runpod-reconcile-spend pod_id run_name local:
     uv run mantis-v2 runpod-reconcile-spend --pod-id {{quote(pod_id)}} --run-name {{quote(run_name)}} --local {{quote(local)}}
 
+runpod-reconcile-spend-upper-bound pod_id run_name local:
+    uv run mantis-v2 runpod-reconcile-spend-upper-bound --pod-id {{quote(pod_id)}} --run-name {{quote(run_name)}} --local {{quote(local)}}
+
 runpod-enforce-deadline pod_id local:
     uv run mantis-v2 runpod-enforce-deadline --pod-id {{quote(pod_id)}} --local {{quote(local)}}
 

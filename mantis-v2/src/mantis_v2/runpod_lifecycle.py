@@ -856,6 +856,70 @@ def reconcile_spend(
         lock_path.unlink(missing_ok=True)
 
 
+def reconcile_spend_upper_bound(
+    *,
+    pod_id: str,
+    run_name: str,
+    state_root: Path,
+    adapter: LifecycleAdapter,
+    now: Clock,
+) -> dict[str, object]:
+    """Book the full reservation when provider billing remains unavailable."""
+    exact_pod_id = _pod_identity(pod_id)
+    pod_receipt = _read_pod_control_receipt(state_root, exact_pod_id)
+    if pod_receipt.get("run_name") != run_name:
+        raise LifecycleError("run_identity_mismatch")
+    termination_path = state_root / "receipts" / "terminations" / f"{exact_pod_id}.json"
+    if not termination_path.exists():
+        raise LifecycleError("termination_receipt_required")
+    termination_receipt = _read_receipt(termination_path, exact_pod_id)
+    spend_path = state_root / "receipts" / "spend" / f"{exact_pod_id}.json"
+    if spend_path.exists():
+        return _read_receipt(spend_path, exact_pod_id)
+    if any(pod.get("id") == exact_pod_id for pod in adapter.inventory()):
+        raise LifecycleError("live_pod_conflict")
+    try:
+        billing = adapter.billing(exact_pod_id)
+    except Exception as exc:
+        raise LifecycleError("provider_billing_failed") from exc
+    if billing is not None:
+        raise LifecycleError("provider_billing_available_use_exact_reconciliation")
+
+    try:
+        descriptor, lock_path = _acquire_lock(state_root, f"spend-{exact_pod_id}.lock")
+    except LifecycleError as exc:
+        if spend_path.exists():
+            return _read_receipt(spend_path, exact_pod_id)
+        raise LifecycleError("spend_reconciliation_in_progress") from exc
+    try:
+        if spend_path.exists():
+            return _read_receipt(spend_path, exact_pod_id)
+        reserved_spend = _required_decimal(
+            pod_receipt.get("reserved_spend_usd"), "receipt.reserved_spend_usd"
+        )
+        receipt: dict[str, object] = {
+            "schema_version": 1,
+            "pod_id": exact_pod_id,
+            "run_name": run_name,
+            "decision_digest": pod_receipt["decision_digest"],
+            "authorization_digest": pod_receipt["authorization_digest"],
+            "stage": pod_receipt["stage"],
+            "reserved_spend_usd": str(reserved_spend),
+            "actual_spend_usd": str(reserved_spend),
+            "actual_spend_is_upper_bound": True,
+            "reconciliation_evidence": "reserved_spend_upper_bound_after_provider_absence",
+            "spend_state": "reconciled",
+            "pod_receipt_digest": _payload_digest(pod_receipt),
+            "termination_receipt_digest": _payload_digest(termination_receipt),
+            "reconciled_at": now().astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        }
+        _publish_json(spend_path, receipt)
+        return receipt
+    finally:
+        os.close(descriptor)
+        lock_path.unlink(missing_ok=True)
+
+
 def enforce_deadline(
     *,
     pod_id: str,
