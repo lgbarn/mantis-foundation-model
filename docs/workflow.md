@@ -77,6 +77,40 @@ them can make a checkpoint intentionally non-resumable.
 | `just transfer-stage-dry-run <config> <inventory>` | Exercises injected S3 HEAD/PUT policy | JSON plan on stdout | Zero network and zero object writes |
 | `just transfer-promote <config>` | Verifies mounted bytes and atomically renames incoming | Immutable final input directory | Fails closed before promotion |
 | `just transfer-backup-verify <config> <artifact-digest>` | Verifies distinct internal and external copies | JSON receipt on stdout | Full read of both copies; performs no copy |
+
+### Official frozen expected-R paid screen
+
+Use `mantis-v2/configs/frozen-paid-control.example.json` as the schema for one
+ignored machine-local control config. The supported order is:
+
+1. `just frozen-screen-prepare` creates the immutable candidate/window input
+   from accepted Parquet before a Pod exists. It does not audit raw data.
+2. `just transfer-bundle` records the prepared input, frozen config, and pinned
+   offline Hugging Face cache. Replace the bundle digest in the control config.
+3. `just frozen-screen-plan-paid <control> <output>` runs the four focused tests
+   in under 60 seconds and emits `preflight.json`, `experiment.toml`,
+   `intent.json`, and `workload-experiment.json`. It creates no provider state.
+4. Run `just runpod-plan` against a current inventory/ledger, create the exact
+   short-lived authorization for its subject digest, then run
+   `just runpod-plan-authorized` with the unchanged inputs.
+5. `just transfer-stage-runpod` uploads the immutable bundle without a GPU.
+6. `just frozen-screen-seal-paid` creates the content-addressed official-template
+   workload manifest and binds the approved decision. No workload JSON is
+   hand-authored.
+7. `just frozen-screen-run` is the sole paid create. It validates the preflight,
+   staged input, manifest, decision, source, config, checkpoint, price, budget,
+   and deadline before provisioning one L40S.
+
+The paid command runs frozen embedding and corrected CUDA initial-screen plus
+three development folds on the same Pod. Its one shell retry uses the same
+provenance: complete embedding shards resume, and a complete comparison returns
+only after its digest and input/config/weights/precision/parity identities match.
+A partial or mismatched comparison fails again and the supervisor terminates.
+The supervisor polls every 30 seconds, caps the run at the lesser of six hours
+and `$10 / hourly_rate`, replicates the full run root (embedding shards and
+manifest plus comparison result/progress) to both configured destinations,
+deletes the Pod, verifies provider absence, and reconciles billing. No holdout,
+simulation, PPO, fine-tuning, raw-data audit, or TensorBoard runs in this stage.
 | `just transfer-retention-check ...` | Re-verifies backups and evaluates exact authorization | JSON decision on stdout | Decision only; never deletes data |
 
 For remote runs, start the fixed localhost-only server on the remote host, then

@@ -19,8 +19,10 @@ from mantis_v2.frozen_expected_r import (
     compare_frozen_to_raw,
     cuda_threshold,
     load_frozen_embeddings,
+    run_paid_frozen_screen,
     validate_paid_runner_contract,
     write_frozen_input,
+    write_paid_planning_inputs,
     write_paid_preflight,
 )
 
@@ -662,3 +664,207 @@ def test_paid_preflight_enforces_budget_deadline_health_and_four_checks(tmp_path
             check_duration_seconds=4.0,
             checks=checks,
         )
+
+
+def test_paid_workload_resumes_embedding_and_reuses_complete_comparison(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({}))
+    input_path = tmp_path / "input.json"
+    input_path.write_text("{}")
+    embed = tmp_path / "run" / "embed"
+    comparison = tmp_path / "run" / "selection.json"
+    progress = tmp_path / "run" / "selection.progress.json"
+    calls: list[str] = []
+
+    class Embedder:
+        def __init__(self, _config: FrozenExpectedRConfig) -> None:
+            pass
+
+        def embed(self, _input: Path, output: Path) -> dict[str, object]:
+            calls.append("embed")
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "manifest.json").write_text("{}")
+            return {"status": "complete"}
+
+    def compare(*_args: object, **_kwargs: object) -> dict[str, object]:
+        if comparison.exists():
+            return {"status": "stopped"}
+        calls.append("compare")
+        comparison.write_text('{"status":"stopped"}')
+        return {"status": "stopped"}
+
+    monkeypatch.setattr(frozen_expected_r, "FrozenMantisEmbedder", Embedder)
+    monkeypatch.setattr(frozen_expected_r, "compare_frozen_artifacts", compare)
+    monkeypatch.setattr(
+        frozen_expected_r.FrozenExpectedRConfig,
+        "from_json",
+        classmethod(lambda _cls, _path: FrozenExpectedRConfig()),
+    )
+
+    first = run_paid_frozen_screen(config_path, input_path, embed, comparison, progress)
+    second = run_paid_frozen_screen(config_path, input_path, embed, comparison, progress)
+
+    assert first == {"embedding_status": "complete", "selection_status": "stopped"}
+    assert second == first
+    assert calls == ["embed", "compare", "embed"]
+
+
+def test_paid_workload_rejects_partial_or_modified_comparison(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({}))
+    input_path = tmp_path / "input.json"
+    input_path.write_text("{}")
+    embed = tmp_path / "run" / "embed"
+    embed.mkdir(parents=True)
+    (embed / "manifest.json").write_text("{}")
+    comparison = tmp_path / "run" / "selection.json"
+    progress = tmp_path / "run" / "selection.progress.json"
+    comparison.with_suffix(".json.tmp").write_text("partial")
+
+    monkeypatch.setattr(
+        frozen_expected_r.FrozenExpectedRConfig,
+        "from_json",
+        classmethod(lambda _cls, _path: FrozenExpectedRConfig()),
+    )
+    monkeypatch.setattr(
+        frozen_expected_r.FrozenMantisEmbedder,
+        "embed",
+        lambda *_args, **_kwargs: {"status": "complete"},
+    )
+
+    with pytest.raises(FrozenExpectedRError, match="partial comparison"):
+        run_paid_frozen_screen(config_path, input_path, embed, comparison, progress)
+
+
+def test_completed_comparison_resume_is_bound_to_all_frozen_identities(tmp_path: Path) -> None:
+    config = FrozenExpectedRConfig()
+    input_path = tmp_path / "input.json"
+    input_path.write_text(json.dumps({"manifest_sha256": "a" * 64}))
+    embed_path = tmp_path / "embed.json"
+    embed_path.write_text(
+        json.dumps(
+            {
+                "artifact_sha256": "b" * 64,
+                "precision": "bf16",
+                "bf16_parity": {"maximum_absolute_error": 0.0, "minimum_cosine": 1.0},
+            }
+        )
+    )
+    output = tmp_path / "selection.json"
+    result = {
+        "schema_version": 1,
+        "config_sha256": config.digest,
+        "comparison_backend": {"device": "cuda"},
+        "selected": "stop",
+        "status": "stopped",
+        "provenance": frozen_expected_r._comparison_provenance(input_path, embed_path, config),
+    }
+    result["artifact_sha256"] = frozen_expected_r._json_digest(result)
+    output.write_text(json.dumps(result))
+
+    assert (
+        frozen_expected_r._validated_completed_comparison(
+            input_path, embed_path, output, config, "cuda"
+        )
+        == result
+    )
+
+    result["provenance"]["weights_sha256"] = "0" * 64
+    result["artifact_sha256"] = frozen_expected_r._json_digest(
+        {key: value for key, value in result.items() if key != "artifact_sha256"}
+    )
+    output.write_text(json.dumps(result))
+    with pytest.raises(FrozenExpectedRError, match="provenance mismatch"):
+        frozen_expected_r._validated_completed_comparison(
+            input_path, embed_path, output, config, "cuda"
+        )
+
+
+def test_paid_planning_inputs_are_config_driven_and_l40s_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    input_path = tmp_path / "input.json"
+    input_core = {"schema_version": 1, "rows": 1}
+    input_path.write_text(
+        json.dumps({**input_core, "manifest_sha256": frozen_expected_r._json_digest(input_core)})
+    )
+    control = {
+        "schema_version": 1,
+        "run_id": "frozen-paid-test",
+        "source_revision": "a" * 40,
+        "frozen_config": str(
+            Path(__file__).resolve().parents[1] / "configs/frozen-expected-r-v1.json"
+        ),
+        "input_manifest": str(input_path),
+        "input_bundle_manifest": str(tmp_path / "bundle.json"),
+        "dependency_lock": str(tmp_path / "uv.lock"),
+        "source_archive": str(tmp_path / "source.tar.gz"),
+        "official_bootstrap_receipt": str(tmp_path / "bootstrap.json"),
+        "spend_ledger": str(tmp_path / "ledger.json"),
+        "authorization": str(tmp_path / "authorization.json"),
+        "heartbeat_token": str(tmp_path / "heartbeat.token"),
+        "pod_paths": {
+            "authorization": "/workspace/mantis/control/authorization.json",
+            "dependency_lock": "/workspace/mantis/control/uv.lock",
+            "frozen_config": "/workspace/mantis/inputs/digest/config.json",
+            "heartbeat_token": "/workspace/mantis/control/heartbeat.token",
+            "input_bundle_manifest": "/workspace/mantis/control/bundle.json",
+            "input_manifest": "/workspace/mantis/inputs/digest/input/manifest.json",
+            "official_bootstrap_receipt": "/workspace/mantis/control/bootstrap.json",
+            "preflight": "/workspace/mantis/control/preflight.json",
+            "source_archive": "/workspace/mantis/control/source.tar.gz",
+            "spend_ledger": "/workspace/mantis/control/ledger.json",
+            "workload_experiment": "/workspace/mantis/control/experiment.json",
+        },
+        "artifacts": {
+            "controller": str(tmp_path / "controller"),
+            "backup": str(tmp_path / "backup"),
+        },
+        "provider": {
+            "hourly_rate_usd": 2.0,
+            "budget_usd": 10.0,
+            "deadline_hours": 6.0,
+            "datacenter_id": "US-MO-1",
+            "volume_id": "volume",
+            "volume_size_gb": 150,
+            "vcpu": 8,
+            "ram_gb": 32,
+            "storage_usd_per_gb_hour": "0.000137",
+        },
+        "runpodctl": {
+            "version": "2.7.2",
+            "source_commit": "309512b4926eb7d218bbc8a8f11d380ce54f59c4",
+            "binary_sha256": "b" * 64,
+        },
+    }
+    control_path = tmp_path / "control.json"
+    control_path.write_text(json.dumps(control))
+
+    def focused(path: Path) -> dict[str, object]:
+        payload = {
+            "checks": {name: True for name in frozen_expected_r._FOCUSED_CHECKS},
+            "duration_seconds": 1.0,
+        }
+        path.write_text(json.dumps(payload))
+        return payload
+
+    monkeypatch.setattr(frozen_expected_r, "write_focused_check_receipt", focused)
+    result = write_paid_planning_inputs(control_path, tmp_path / "plan")
+    intent = json.loads((tmp_path / "plan" / "intent.json").read_text())
+
+    assert intent["gpu_type"] == "NVIDIA L40S"
+    assert intent["gpu_count"] == 1
+    assert intent["maximum_duration_seconds"] == 5 * 3600
+    assert "frozen-screen-paid-workload" in result["exact_command"]
+    assert (
+        _parser()
+        .parse_args(
+            ["frozen-screen-plan-paid", "--control-config", "control.json", "--output", "run"]
+        )
+        .command
+        == "frozen-screen-plan-paid"
+    )

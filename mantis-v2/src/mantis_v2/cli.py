@@ -81,7 +81,10 @@ from mantis_v2.frozen_expected_r import (
     FrozenMantisEmbedder,
     compare_frozen_artifacts,
     prepare_frozen_input,
+    run_paid_frozen_screen,
+    seal_paid_frozen_workload,
     validate_paid_runner_contract,
+    write_paid_planning_inputs,
     write_paid_preflight,
 )
 from mantis_v2.model import ModelContractError
@@ -418,6 +421,23 @@ def _parser() -> argparse.ArgumentParser:
     frozen_compare.add_argument("--progress", type=Path)
     frozen_compare.add_argument("--comparison-device", choices=("cpu", "cuda"), default="cuda")
     frozen_compare.add_argument("--cpu-exception")
+    frozen_paid = subparsers.add_parser("frozen-screen-paid-workload")
+    frozen_paid.add_argument("--config", required=True, type=Path)
+    frozen_paid.add_argument("--input", required=True, type=Path)
+    frozen_paid.add_argument("--embedding-output", required=True, type=Path)
+    frozen_paid.add_argument("--comparison-output", required=True, type=Path)
+    frozen_paid.add_argument("--progress-output", required=True, type=Path)
+    frozen_plan = subparsers.add_parser("frozen-screen-plan-paid")
+    frozen_plan.add_argument("--control-config", required=True, type=Path)
+    frozen_plan.add_argument("--output", required=True, type=Path)
+    frozen_seal = subparsers.add_parser("frozen-screen-seal-paid")
+    frozen_seal.add_argument("--control-config", required=True, type=Path)
+    frozen_seal.add_argument("--planning-root", required=True, type=Path)
+    frozen_seal.add_argument("--decision", required=True, type=Path)
+    frozen_seal.add_argument("--manifest-root", required=True, type=Path)
+    frozen_seal.add_argument("--pod-manifest-path", required=True, type=Path)
+    frozen_seal.add_argument("--bound-decision", required=True, type=Path)
+    frozen_seal.add_argument("--evaluated-at", required=True)
     frozen_preflight = subparsers.add_parser("frozen-screen-preflight")
     frozen_preflight.add_argument("--input", required=True, type=Path)
     frozen_preflight.add_argument("--embedding-output", required=True, type=Path)
@@ -676,6 +696,26 @@ def main() -> None:
                 comparison_device=args.comparison_device,
                 cpu_exception=args.cpu_exception,
                 progress_path=args.progress,
+            )
+        elif args.command == "frozen-screen-paid-workload":
+            result = run_paid_frozen_screen(
+                args.config,
+                args.input,
+                args.embedding_output,
+                args.comparison_output,
+                args.progress_output,
+            )
+        elif args.command == "frozen-screen-plan-paid":
+            result = write_paid_planning_inputs(args.control_config, args.output)
+        elif args.command == "frozen-screen-seal-paid":
+            result = seal_paid_frozen_workload(
+                args.control_config,
+                args.planning_root,
+                args.decision,
+                args.manifest_root,
+                args.pod_manifest_path,
+                args.bound_decision,
+                evaluated_at=datetime.fromisoformat(args.evaluated_at.replace("Z", "+00:00")),
             )
         elif args.command == "frozen-screen-preflight":
             checks_receipt = _load_matrix_json(args.checks)

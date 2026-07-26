@@ -95,13 +95,13 @@ class RunpodS3WorkloadIO:
             self.manifest["image"]["self_check"],
             self.manifest["experiment_config"],
             self.manifest["matrix_plan"],
-            self.manifest["matrix_base_config"],
             self.manifest["input_bundle"]["manifest"],
-            self.manifest["dataset_manifest"],
             self.manifest["spend_ledger"],
             self.manifest["authorization"],
             self.manifest["monitor"]["token"],
         ]
+        if self.manifest.get("workload_kind") != "frozen_expected_r":
+            records.append(self.manifest["matrix_base_config"])
         if "bootstrap" in self.manifest:
             records.append(self.manifest["bootstrap"]["source_archive"])
         uploaded: list[str] = []

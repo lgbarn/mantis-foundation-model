@@ -57,6 +57,12 @@ frozen-screen-compare input embeddings output config="mantis-v2/configs/frozen-e
 frozen-screen-preflight input embedding_output checks exact_command hourly_rate deadline_hours output:
     uv run mantis-v2 frozen-screen-preflight --input {{quote(input)}} --embedding-output {{quote(embedding_output)}} --checks {{quote(checks)}} --exact-command {{quote(exact_command)}} --hourly-rate {{quote(hourly_rate)}} --deadline-hours {{quote(deadline_hours)}} --output {{quote(output)}}
 
+frozen-screen-plan-paid control_config output:
+    uv run mantis-v2 frozen-screen-plan-paid --control-config {{quote(control_config)}} --output {{quote(output)}}
+
+frozen-screen-seal-paid control_config planning_root decision manifest_root pod_manifest_path bound_decision evaluated_at:
+    uv run mantis-v2 frozen-screen-seal-paid --control-config {{quote(control_config)}} --planning-root {{quote(planning_root)}} --decision {{quote(decision)}} --manifest-root {{quote(manifest_root)}} --pod-manifest-path {{quote(pod_manifest_path)}} --bound-decision {{quote(bound_decision)}} --evaluated-at {{quote(evaluated_at)}}
+
 frozen-screen-run preflight manifest decision local runpodctl_binary aws_binary="aws":
     uv run mantis-v2 runpod-supervise-workload --preflight {{quote(preflight)}} --manifest {{quote(manifest)}} --decision {{quote(decision)}} --local {{quote(local)}} --runpodctl-binary {{quote(runpodctl_binary)}} --aws-binary {{quote(aws_binary)}}
 

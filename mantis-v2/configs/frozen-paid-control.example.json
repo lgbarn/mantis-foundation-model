@@ -1,0 +1,47 @@
+{
+  "artifacts": {
+    "backup": "/Volumes/Storage/trading-research/artifacts/mantis-foundation-model/frozen-screen-v2",
+    "controller": "/Users/replace-me/Library/Application Support/mantis-runpod/artifacts/frozen-screen-v2"
+  },
+  "authorization": "/Users/replace-me/Library/Application Support/mantis-runpod/authorization.json",
+  "dependency_lock": "/Users/replace-me/Personal/Trading/mantis-foundation-model/uv.lock",
+  "frozen_config": "/Users/replace-me/Personal/Trading/mantis-foundation-model/mantis-v2/configs/frozen-expected-r-v1.json",
+  "heartbeat_token": "/Users/replace-me/Library/Application Support/mantis-runpod/heartbeat.token",
+  "input_bundle_manifest": "/Volumes/Storage/trading-research/artifacts/mantis-foundation-model/frozen-screen-v2/input-bundle.json",
+  "input_manifest": "/Volumes/Storage/trading-research/artifacts/mantis-foundation-model/frozen-screen-v2/input/manifest.json",
+  "official_bootstrap_receipt": "/Volumes/Storage/trading-research/artifacts/mantis-foundation-model/frozen-screen-v2/official-bootstrap.json",
+  "pod_paths": {
+    "authorization": "/workspace/mantis/control/frozen/authorization.json",
+    "dependency_lock": "/workspace/mantis/control/source/uv.lock",
+    "frozen_config": "/workspace/mantis/inputs/REPLACE_BUNDLE_DIGEST/config/frozen-expected-r-v1.json",
+    "heartbeat_token": "/workspace/mantis/control/frozen/heartbeat.token",
+    "input_bundle_manifest": "/workspace/mantis/control/frozen/input-bundle.json",
+    "input_manifest": "/workspace/mantis/inputs/REPLACE_BUNDLE_DIGEST/input/manifest.json",
+    "official_bootstrap_receipt": "/workspace/mantis/control/source/official-bootstrap.json",
+    "preflight": "/workspace/mantis/control/frozen/preflight.json",
+    "source_archive": "/workspace/mantis/control/source/source.tar.gz",
+    "spend_ledger": "/workspace/mantis/control/frozen/spend-ledger.json",
+    "workload_experiment": "/workspace/mantis/control/frozen/workload-experiment.json"
+  },
+  "provider": {
+    "budget_usd": 10.0,
+    "datacenter_id": "US-MO-1",
+    "deadline_hours": 2.0,
+    "hourly_rate_usd": 0.39,
+    "ram_gb": 32,
+    "storage_usd_per_gb_hour": "0.000137",
+    "vcpu": 8,
+    "volume_id": "REPLACE_VOLUME_ID",
+    "volume_size_gb": 150
+  },
+  "run_id": "mantisv2-frozen-expected-r-v2",
+  "runpodctl": {
+    "binary_sha256": "a016e442fdf12e4642ad3425ea6d624a40882d77accdfa043b5e40a4fd08d037",
+    "source_commit": "309512b4926eb7d218bbc8a8f11d380ce54f59c4",
+    "version": "2.7.2"
+  },
+  "schema_version": 1,
+  "source_archive": "/Volumes/Storage/trading-research/artifacts/mantis-foundation-model/frozen-screen-v2/source.tar.gz",
+  "source_revision": "REPLACE_COMMITTED_SOURCE_SHA",
+  "spend_ledger": "/Users/replace-me/Library/Application Support/mantis-runpod/spend-ledger.json"
+}

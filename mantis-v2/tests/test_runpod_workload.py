@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from mantis_v2.cli import _parser
 from mantis_v2.foundation_matrix import render_initial_plan
+from mantis_v2.frozen_expected_r import _json_digest, write_paid_preflight
 from mantis_v2.runpod_config import load_launch_authorization, load_spend_ledger
 from mantis_v2.runpod_rest_adapter import OPENAPI_IDENTITY, OPENAPI_SHA256, OPENAPI_VERSION
 from mantis_v2.runpod_s3 import RemoteObject
@@ -275,6 +276,126 @@ def _official_spec(tmp_path: Path) -> dict[str, object]:
     return spec
 
 
+def _official_frozen_spec(tmp_path: Path) -> dict[str, object]:
+    spec = _official_spec(tmp_path)
+    run_id = str(spec["run_id"])
+    pod_root = f"/workspace/mantis/runs/{run_id}"
+    input_payload = {"schema_version": 1, "rows": 1}
+    input_payload["manifest_sha256"] = _json_digest(input_payload)
+    input_path = tmp_path / "frozen-input.json"
+    input_path.write_text(json.dumps(input_payload))
+    bundle_source = tmp_path / "frozen-bundle"
+    (bundle_source / "input").mkdir(parents=True)
+    (bundle_source / "input" / "manifest.json").write_bytes(input_path.read_bytes())
+    config_path = Path(__file__).resolve().parents[1] / "configs/frozen-expected-r-v1.json"
+    (bundle_source / "config").mkdir()
+    (bundle_source / "config" / "frozen-expected-r-v1.json").write_bytes(config_path.read_bytes())
+    bundle_path = tmp_path / "frozen-bundle.json"
+    bundle = write_bundle_manifest(
+        bundle_source,
+        ("config/frozen-expected-r-v1.json", "input/manifest.json"),
+        bundle_path,
+    )
+    input_record = _existing_file(input_path)
+    input_record["pod_path"] = (
+        f"/workspace/mantis/inputs/{bundle.bundle_digest}/input/manifest.json"
+    )
+    bundle_record = _existing_file(bundle_path)
+    bundle_record["pod_path"] = "/workspace/mantis/control/frozen/input-bundle.json"
+    frozen_config = _existing_file(config_path)
+    frozen_config["pod_path"] = (
+        f"/workspace/mantis/inputs/{bundle.bundle_digest}/config/frozen-expected-r-v1.json"
+    )
+    exact_command = (
+        "uv run mantis-v2 frozen-screen-paid-workload "
+        f"--config {frozen_config['pod_path']} --input {input_record['pod_path']} "
+        f"--embedding-output {pod_root}/embed --comparison-output {pod_root}/selection.json "
+        f"--progress-output {pod_root}/selection.progress.json"
+    )
+    preflight_path = tmp_path / "frozen-preflight.json"
+    write_paid_preflight(
+        input_path,
+        Path(pod_root),
+        preflight_path,
+        exact_command=exact_command,
+        hourly_rate_usd=0.39,
+        budget_usd=10.0,
+        deadline_hours=2.0,
+        check_duration_seconds=1.0,
+        checks={
+            "causality_next_fill": True,
+            "label_replay_parity": True,
+            "topstep_accounting": True,
+            "artifact_resume": True,
+        },
+    )
+    preflight = _existing_file(preflight_path)
+    preflight["pod_path"] = "/workspace/mantis/control/frozen/preflight.json"
+    experiment_path = tmp_path / "frozen-experiment.json"
+    experiment_path.write_text(
+        json.dumps(
+            {
+                "evaluation": {"allow_holdout": False},
+                "data": {
+                    "holdout_start": "2026-01-01T00:00:00+00:00",
+                    "corpus_manifest_sha256": input_record["sha256"],
+                    "root": str(Path(str(input_record["pod_path"])).parent),
+                    "corpus_manifest_path": input_record["pod_path"],
+                },
+                "model": {
+                    "hub_model": "paris-noah/MantisV2",
+                    "hub_revision": "99fe0f548960e272fbfa4b82fd9b5b5956779dfd",
+                    "weights_sha256": (
+                        "49d46d9a49cccdc87c46f4e0088fa52c0a6ef7eb4c13de5cc9815426b7b17ab1"
+                    ),
+                },
+                "run": {"artifact_root": "/workspace/mantis/runs"},
+            }
+        )
+    )
+    experiment = _existing_file(experiment_path)
+    experiment["pod_path"] = "/workspace/mantis/control/frozen/experiment.json"
+    spec.update(
+        {
+            "workload_kind": "frozen_expected_r",
+            "experiment_config": experiment,
+            "matrix_plan": preflight,
+            "matrix_base_config": frozen_config,
+            "input_bundle": {
+                "manifest": bundle_record,
+                "bundle_digest": bundle.bundle_digest,
+                "incoming_root": (
+                    f"/workspace/mantis/transfer/incoming/{bundle.bundle_digest}/files"
+                ),
+                "final_parent": "/workspace/mantis/inputs",
+            },
+            "dataset_manifest": input_record,
+            "start_command": ["bash", "-lc", f"{exact_command} || {exact_command}"],
+            "artifacts": {
+                "pod": pod_root,
+                "controller": str(tmp_path / "frozen-controller"),
+                "backup": str(tmp_path / "frozen-backup"),
+            },
+            "monitor": {
+                **spec["monitor"],
+                "tensorboard": None,
+                "heartbeat": f"{pod_root}/heartbeat.json",
+            },
+            "maximum_duration_seconds": 7200,
+            "quoted_rates": {
+                "compute_usd_per_hour": "0.39",
+                "storage_usd_per_gb_hour": "0.000137",
+                "storage_gb": 150,
+            },
+            "budget_guard": {
+                **spec["budget_guard"],
+                "next_cell_maximum_usd": "0.903210",
+            },
+        }
+    )
+    return spec
+
+
 def test_launch_manifest_is_complete_content_addressed_and_idempotent(tmp_path: Path) -> None:
     output = tmp_path / "sealed"
     spec = _spec(tmp_path)
@@ -288,6 +409,64 @@ def test_launch_manifest_is_complete_content_addressed_and_idempotent(tmp_path: 
     assert manifest["monitor"]["poll_seconds"] == 30
     assert manifest["monitor"]["first_heartbeat_seconds"] == 600
     assert manifest["monitor"]["miss_limit"] == 4
+
+
+def test_official_frozen_manifest_runs_embed_and_compare_with_one_retry(tmp_path: Path) -> None:
+    spec = _official_frozen_spec(tmp_path)
+    manifest_path = seal_workload_manifest(spec, tmp_path / "sealed-frozen")
+    manifest = validate_workload_manifest(manifest_path)
+
+    assert manifest["workload_kind"] == "frozen_expected_r"
+    assert manifest["start_command"][2].count("frozen-screen-paid-workload") == 2
+    assert manifest["monitor"]["poll_seconds"] == 30
+    assert manifest["monitor"]["tensorboard"] is None
+
+
+def test_control_staging_leaves_promoted_bundle_members_in_incoming_tree(tmp_path: Path) -> None:
+    def record(name: str, pod_path: str) -> dict[str, object]:
+        return _file(tmp_path / name, name.encode()) | {"pod_path": pod_path}
+
+    manifest = {
+        "dependency_lock": record("lock", "/workspace/mantis/control/lock"),
+        "image": {"self_check": record("image", "/workspace/mantis/control/image")},
+        "experiment_config": record("experiment", "/workspace/mantis/control/experiment"),
+        "matrix_plan": record("plan", "/workspace/mantis/control/plan"),
+        "matrix_base_config": record(
+            "config", "/workspace/mantis/inputs/digest/config/config.json"
+        ),
+        "input_bundle": {"manifest": record("bundle", "/workspace/mantis/control/bundle")},
+        "dataset_manifest": record(
+            "dataset", "/workspace/mantis/inputs/digest/input/manifest.json"
+        ),
+        "spend_ledger": record("ledger", "/workspace/mantis/control/ledger"),
+        "authorization": record("authorization", "/workspace/mantis/control/authorization"),
+        "monitor": {"token": record("token", "/workspace/mantis/control/token")},
+        "workload_kind": "frozen_expected_r",
+        "manifest_digest": "d" * 64,
+    }
+
+    class MemoryAdapter:
+        def __init__(self) -> None:
+            self.objects: dict[str, bytes] = {}
+
+        def put_file(self, key: str, source: Path) -> None:
+            self.objects[key] = source.read_bytes()
+
+        def get_file(self, key: str, destination: Path) -> Path | None:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(self.objects[key])
+            return destination
+
+    io = object.__new__(RunpodS3WorkloadIO)
+    io.adapter = MemoryAdapter()
+    io.manifest = manifest
+    io.manifest_path = tmp_path / "launch-manifest.json"
+    io.manifest_path.write_text("manifest")
+    io.pod_manifest_path = Path("/workspace/mantis/control/run/launch-manifest.json")
+
+    staged = io.stage_control_files()
+
+    assert not any(key.startswith("mantis/inputs/") for key in staged["uploaded"])
 
 
 def test_completed_artifacts_replicate_idempotently_to_both_backups(tmp_path: Path) -> None:
@@ -891,10 +1070,15 @@ def test_pod_executor_revalidates_then_immediately_runs_and_signs_heartbeats(
         launched.append((command, kwargs))
         return Process()
 
-    monkeypatch.setattr("mantis_v2.runpod_workload.verify_and_promote", lambda *args: None)
+    validation_order: list[str] = []
+    monkeypatch.setattr("mantis_v2.runpod_workload._load_manifest_document", lambda _path: manifest)
+    monkeypatch.setattr(
+        "mantis_v2.runpod_workload._promote_pod_input_bundle",
+        lambda _manifest: validation_order.append("promote"),
+    )
     monkeypatch.setattr(
         "mantis_v2.runpod_workload.validate_workload_manifest",
-        lambda path, path_role="controller": manifest,
+        lambda path, path_role="controller": validation_order.append("validate") or manifest,
     )
 
     result = execute_workload_manifest(
@@ -926,5 +1110,6 @@ def test_pod_executor_revalidates_then_immediately_runs_and_signs_heartbeats(
     assert "NVIDIA A40" in diagnostics["nvidia_smi_stdout"]
     assert diagnostics["tensorboard_process_id"] == "76"
     assert "token" not in json.dumps(launched, default=str)
+    assert validation_order == ["promote", "validate"]
     parsed = _parser().parse_args(["workload-execute", "--manifest", str(manifest_path)])
     assert parsed.manifest == manifest_path
