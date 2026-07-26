@@ -1057,6 +1057,8 @@ def test_spend_upper_bound_requires_absence_and_books_full_reservation(
     class PendingBillingAdapter:
         def __init__(self) -> None:
             self.live = True
+            self.exact_cost: str | None = None
+            self.billing_calls = 0
 
         def inventory(self) -> list[dict[str, object]]:
             return [{"id": "pod-upper-bound"}] if self.live else []
@@ -1078,8 +1080,11 @@ def test_spend_upper_bound_requires_absence_and_books_full_reservation(
             self.live = False
             return {"deleted": True, "id": pod_id}
 
-        def billing(self, pod_id: str) -> None:
-            return None
+        def billing(self, pod_id: str) -> dict[str, object] | None:
+            self.billing_calls += 1
+            if self.exact_cost is None:
+                return None
+            return {"pod_id": pod_id, "actual_cost_usd": self.exact_cost}
 
     adapter = PendingBillingAdapter()
     state_root = tmp_path / "state"
@@ -1128,6 +1133,34 @@ def test_spend_upper_bound_requires_absence_and_books_full_reservation(
     assert first["reconciliation_evidence"] == (
         "reserved_spend_upper_bound_after_provider_absence"
     )
+
+    adapter.exact_cost = "0.11"
+    correction = reconcile_spend(
+        pod_id="pod-upper-bound",
+        run_name=str(decision["run_name"]),
+        state_root=state_root,
+        adapter=adapter,
+        now=lambda: datetime(2026, 7, 21, 12, 5, tzinfo=UTC),
+    )
+    repeated = reconcile_spend(
+        pod_id="pod-upper-bound",
+        run_name=str(decision["run_name"]),
+        state_root=state_root,
+        adapter=adapter,
+        now=lambda: datetime(2026, 7, 21, 12, 6, tzinfo=UTC),
+    )
+
+    assert repeated == correction
+    assert correction["actual_spend_usd"] == "0.11"
+    assert correction["previous_actual_spend_usd"] == "0.88"
+    assert correction["reconciliation_evidence"] == "provider_exact_billing_after_upper_bound"
+    assert adapter.billing_calls == 2
+    assert json.loads(
+        (state_root / "receipts" / "spend" / "pod-upper-bound.json").read_text()
+    ) == first
+    assert (
+        state_root / "receipts" / "spend-corrections" / "pod-upper-bound.json"
+    ).is_file()
 
 
 def test_create_price_drift_fails_closed_without_second_create(tmp_path: Path) -> None:

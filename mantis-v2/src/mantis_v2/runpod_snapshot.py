@@ -134,6 +134,11 @@ def _reconciled_ledger(state_root: Path) -> tuple[dict[str, Any], dict[str, int]
             if kind == "pods" or previous is None:
                 pod_records[pod_id] = (kind, pod)
     spend_paths = {path.stem: path for path in (receipts / "spend").glob("*.json")}
+    correction_paths = {
+        path.stem: path for path in (receipts / "spend-corrections").glob("*.json")
+    }
+    if not set(correction_paths).issubset(spend_paths):
+        raise RunpodSnapshotError("orphan lifecycle spend correction")
     actual = {key: Decimal("0") for key in ("storage", "qualification", "production", "recovery")}
     consumed: set[str] = set()
     for pod_id, (_, pod) in sorted(pod_records.items()):
@@ -142,7 +147,19 @@ def _reconciled_ledger(state_root: Path) -> tuple[dict[str, Any], dict[str, int]
         if not termination_path.is_file() or spend_path is None:
             raise RunpodSnapshotError(f"lifecycle spend is not reconciled for Pod {pod_id}")
         termination = _read_receipt(termination_path)
-        spend = _read_receipt(spend_path)
+        base_spend = _read_receipt(spend_path)
+        spend = base_spend
+        correction_path = correction_paths.get(pod_id)
+        if correction_path is not None:
+            correction = _read_receipt(correction_path)
+            if base_spend.get("actual_spend_is_upper_bound") is not True:
+                raise RunpodSnapshotError("exact lifecycle spend cannot have a correction")
+            base_digest = _sha256_bytes(
+                json.dumps(base_spend, sort_keys=True, separators=(",", ":")).encode()
+            )
+            if correction.get("supersedes_spend_receipt_digest") != base_digest:
+                raise RunpodSnapshotError("lifecycle spend correction provenance is invalid")
+            spend = correction
         if termination.get("pod_id") != pod_id or spend.get("pod_id") != pod_id:
             raise RunpodSnapshotError("lifecycle receipt identity is invalid")
         stage = _text(spend.get("stage"), "spend.stage")
