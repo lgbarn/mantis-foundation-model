@@ -114,19 +114,29 @@ def _read_receipt(path: Path) -> dict[str, Any]:
 
 def _reconciled_ledger(state_root: Path) -> tuple[dict[str, Any], dict[str, int]]:
     receipts = state_root / "receipts"
-    pod_paths = sorted((receipts / "pods").glob("*.json")) + sorted(
-        (receipts / "quarantine").glob("*.json")
-    )
+    pod_records: dict[str, tuple[str, dict[str, Any]]] = {}
+    for kind in ("quarantine", "pods"):
+        for path in sorted((receipts / kind).glob("*.json")):
+            pod = _read_receipt(path)
+            pod_id = _text(pod.get("pod_id"), "receipt.pod_id")
+            if pod_id != path.stem:
+                raise RunpodSnapshotError("lifecycle Pod receipt identity is invalid")
+            previous = pod_records.get(pod_id)
+            if previous is not None:
+                previous_kind, previous_pod = previous
+                identity_fields = ("authorization_digest", "decision_digest", "run_name")
+                if previous_kind == kind or any(
+                    _text(previous_pod.get(field), f"receipt.{field}")
+                    != _text(pod.get(field), f"receipt.{field}")
+                    for field in identity_fields
+                ):
+                    raise RunpodSnapshotError("lifecycle Pod receipt identity is invalid")
+            if kind == "pods" or previous is None:
+                pod_records[pod_id] = (kind, pod)
     spend_paths = {path.stem: path for path in (receipts / "spend").glob("*.json")}
     actual = {key: Decimal("0") for key in ("storage", "qualification", "production", "recovery")}
     consumed: set[str] = set()
-    seen_pods: set[str] = set()
-    for pod_path in pod_paths:
-        pod = _read_receipt(pod_path)
-        pod_id = _text(pod.get("pod_id"), "receipt.pod_id")
-        if pod_id != pod_path.stem or pod_id in seen_pods:
-            raise RunpodSnapshotError("lifecycle Pod receipt identity is invalid")
-        seen_pods.add(pod_id)
+    for pod_id, (_, pod) in sorted(pod_records.items()):
         termination_path = receipts / "terminations" / f"{pod_id}.json"
         spend_path = spend_paths.get(pod_id)
         if not termination_path.is_file() or spend_path is None:
@@ -142,7 +152,7 @@ def _reconciled_ledger(state_root: Path) -> tuple[dict[str, Any], dict[str, int]
             raise RunpodSnapshotError(f"lifecycle spend is not reconciled for Pod {pod_id}")
         actual[stage] += _decimal(spend.get("actual_spend_usd"), "spend.actual_spend_usd")
         consumed.add(_text(pod.get("authorization_digest"), "receipt.authorization_digest"))
-    if set(spend_paths) != seen_pods:
+    if set(spend_paths) != set(pod_records):
         raise RunpodSnapshotError("orphan lifecycle spend receipt")
     total = sum(actual.values(), start=Decimal("0"))
     zeros = {key: "0" for key in actual}
@@ -155,7 +165,7 @@ def _reconciled_ledger(state_root: Path) -> tuple[dict[str, Any], dict[str, int]
         "active_reservations": [],
         "consumed_authorization_digests": sorted(consumed),
     }
-    return ledger, {"pod_receipts": len(pod_paths), "spend_receipts": len(spend_paths)}
+    return ledger, {"pod_receipts": len(pod_records), "spend_receipts": len(spend_paths)}
 
 
 def _publish(path: Path, value: Mapping[str, object]) -> str:

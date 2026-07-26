@@ -119,6 +119,8 @@ def _write_reconciled_receipts(state: Path) -> None:
     pod = {
         "pod_id": "pod-old",
         "authorization_digest": "c" * 64,
+        "decision_digest": "d" * 64,
+        "run_name": "frozen-screen-old",
         "stage": "qualification",
     }
     termination = {"pod_id": "pod-old"}
@@ -187,6 +189,55 @@ def test_snapshot_emits_fresh_planner_inputs_and_receipt_provenance(
         "offer_price": "paid_control.provider.hourly_rate_usd",
     }
     assert "fixture-secret" not in (output / "provenance.json").read_text()
+
+
+def test_snapshot_accepts_compatible_quarantine_and_canonical_pod_receipts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _inputs(tmp_path)
+    _write_reconciled_receipts(paths["state"])
+    canonical = json.loads((paths["state"] / "receipts" / "pods" / "pod-old.json").read_text())
+    quarantine = paths["state"] / "receipts" / "quarantine"
+    quarantine.mkdir()
+    (quarantine / "pod-old.json").write_text(json.dumps(canonical))
+    monkeypatch.setenv("RUNPOD_API_KEY", "fixture-secret")
+
+    write_provider_snapshot(
+        platform_path=paths["platform"],
+        local_path=paths["local"],
+        control_path=paths["control"],
+        intent_path=paths["intent"],
+        runpodctl_binary=paths["binary"],
+        output_root=tmp_path / "snapshot",
+        runner=_runner(spend=0.018),
+    )
+
+    provenance = json.loads((tmp_path / "snapshot" / "provenance.json").read_text())
+    assert provenance["receipts"]["pod_receipts"] == 1
+
+
+def test_snapshot_rejects_conflicting_quarantine_and_canonical_pod_receipts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _inputs(tmp_path)
+    _write_reconciled_receipts(paths["state"])
+    canonical = json.loads((paths["state"] / "receipts" / "pods" / "pod-old.json").read_text())
+    canonical["decision_digest"] = "e" * 64
+    quarantine = paths["state"] / "receipts" / "quarantine"
+    quarantine.mkdir()
+    (quarantine / "pod-old.json").write_text(json.dumps(canonical))
+    monkeypatch.setenv("RUNPOD_API_KEY", "fixture-secret")
+
+    with pytest.raises(RunpodSnapshotError, match="receipt identity"):
+        write_provider_snapshot(
+            platform_path=paths["platform"],
+            local_path=paths["local"],
+            control_path=paths["control"],
+            intent_path=paths["intent"],
+            runpodctl_binary=paths["binary"],
+            output_root=tmp_path / "snapshot",
+            runner=_runner(spend=0.018),
+        )
 
 
 @pytest.mark.parametrize(
