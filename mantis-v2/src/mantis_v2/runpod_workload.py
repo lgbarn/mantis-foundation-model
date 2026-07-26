@@ -499,8 +499,8 @@ def _validate_core(
     if reserve < minimum_shutdown_reserve or reserve > Decimal("25.00"):
         raise WorkloadError("shutdown reserve is outside the protected recovery pool")
     stage_limit = {
-        "qualification": Decimal("10.00"),
-        "production": Decimal("100.00"),
+        "qualification": Decimal("15.00"),
+        "production": Decimal("95.00"),
         "recovery": Decimal("25.00"),
     }[budget["stage"]]
     if stage_spend + next_cell > stage_limit:

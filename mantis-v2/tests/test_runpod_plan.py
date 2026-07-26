@@ -268,6 +268,17 @@ def _authorization_for(paths: dict[str, Path], tmp_path: Path, monkeypatch, caps
 def test_committed_h100_qualification_inputs_are_coherent(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
+    platform = load_platform_config(ROOT / "infra/runpod/configs/platform-v1.toml")
+    assert platform.budget.qualification_usd == 15
+    assert platform.budget.production_usd == 95
+    assert (
+        platform.budget.storage_usd
+        + platform.budget.qualification_usd
+        + platform.budget.production_usd
+        + platform.budget.protected_recovery_usd
+        == platform.budget.account_ceiling_usd
+        == 150
+    )
     output = tmp_path / "h100-launch-decision.json"
     monkeypatch.setattr(
         sys,
