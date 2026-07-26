@@ -18,6 +18,7 @@ from mantis_v2.frozen_expected_r import (
     FrozenMantisEmbedder,
     compare_frozen_to_raw,
     cuda_threshold,
+    load_frozen_embeddings,
     validate_paid_runner_contract,
     write_frozen_input,
     write_paid_preflight,
@@ -196,6 +197,33 @@ def test_input_manifest_remains_valid_after_directory_move(tmp_path: Path) -> No
     )
 
     assert moved_candidates["row_id"].tolist() == candidates["row_id"].tolist()
+
+
+def test_embedding_artifact_remains_valid_after_replication_move(tmp_path: Path) -> None:
+    candidates = _candidates(3)
+    manifest = write_frozen_input(
+        candidates,
+        np.ones((3, 5, 512), dtype=np.float32),
+        np.zeros((3, 3), dtype=np.float32),
+        tmp_path / "input",
+    )
+
+    class Model:
+        def __call__(self, values: np.ndarray, _precision: str) -> np.ndarray:
+            return np.ones((len(values), 2560), dtype=np.float32)
+
+    config = FrozenExpectedRConfig(requested_precision="fp32")
+    FrozenMantisEmbedder(config, model_factory=lambda _config: Model()).embed(
+        manifest, tmp_path / "pod-embed"
+    )
+    shutil.move(tmp_path / "pod-embed", tmp_path / "replicated-embed")
+
+    loaded_candidates, _raw, features = load_frozen_embeddings(
+        manifest, tmp_path / "replicated-embed" / "manifest.json", config
+    )
+
+    assert loaded_candidates["row_id"].tolist() == candidates["row_id"].tolist()
+    assert features.shape == (3, 2560)
 
 
 def test_comparison_rejects_mismatched_rows() -> None:

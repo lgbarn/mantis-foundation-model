@@ -325,11 +325,20 @@ def load_frozen_embeddings(
             raise FrozenExpectedRError("embedding manifest shard sequence changed")
         for label in ("features", "metadata"):
             record = shard.get(label, {})
-            path = Path(str(record.get("path", "")))
+            path = _record_path(record, embedding_manifest_path.parent)
             if not path.is_file() or sha256_file(path) != record.get("sha256"):
                 raise FrozenExpectedRError(f"embedding {label} changed")
-        features.append(np.load(shard["features"]["path"], allow_pickle=False))
-        row_ids.extend(pd.read_parquet(shard["metadata"]["path"])["row_id"].tolist())
+        features.append(
+            np.load(
+                _record_path(shard["features"], embedding_manifest_path.parent),
+                allow_pickle=False,
+            )
+        )
+        row_ids.extend(
+            pd.read_parquet(_record_path(shard["metadata"], embedding_manifest_path.parent))[
+                "row_id"
+            ].tolist()
+        )
     if row_ids != candidates["row_id"].tolist():
         raise FrozenExpectedRError("raw and Mantis candidate rows differ")
     raw = np.concatenate(
@@ -671,8 +680,8 @@ class FrozenMantisEmbedder:
                 "weights_sha256": self.config.weights_sha256,
                 "precision": precision,
                 "parity_sha256": _json_digest(parity),
-                "features": _file_record(feature_path),
-                "metadata": _file_record(metadata_path),
+                "features": _file_record(feature_path, portable=True),
+                "metadata": _file_record(metadata_path, portable=True),
                 "status": "complete",
             }
             receipt["artifact_sha256"] = _json_digest(receipt)
@@ -726,7 +735,7 @@ class FrozenMantisEmbedder:
                 raise FrozenExpectedRError("embedding shard artifact digest mismatch")
             for label in ("features", "metadata"):
                 record = receipt.get(label, {})
-                target = Path(str(record.get("path", "")))
+                target = _record_path(record, output)
                 if not target.is_file() or sha256_file(target) != record.get("sha256"):
                     raise FrozenExpectedRError(f"embedding {label} changed")
             row_start = int(receipt["row_stop"])
