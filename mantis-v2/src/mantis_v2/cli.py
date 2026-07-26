@@ -136,6 +136,7 @@ from mantis_v2.runpod_lifecycle import (
     pod_status,
     reconcile_launch,
     reconcile_spend,
+    reconcile_spend_upper_bound,
     reconcile_termination,
     terminate_pod,
 )
@@ -330,6 +331,7 @@ def _parser() -> argparse.ArgumentParser:
         "runpod-terminate",
         "runpod-reconcile-termination",
         "runpod-reconcile-spend",
+        "runpod-reconcile-spend-upper-bound",
     ):
         lifecycle = subparsers.add_parser(command)
         lifecycle.add_argument("--pod-id", required=True)
@@ -952,6 +954,7 @@ def main() -> None:
             "runpod-terminate",
             "runpod-reconcile-termination",
             "runpod-reconcile-spend",
+            "runpod-reconcile-spend-upper-bound",
         }:
             state_root, adapter = _live_adapter(args.local)
             operations = {
@@ -959,6 +962,7 @@ def main() -> None:
                 "runpod-terminate": terminate_pod,
                 "runpod-reconcile-termination": reconcile_termination,
                 "runpod-reconcile-spend": reconcile_spend,
+                "runpod-reconcile-spend-upper-bound": reconcile_spend_upper_bound,
             }
             result = operations[args.command](
                 pod_id=args.pod_id,

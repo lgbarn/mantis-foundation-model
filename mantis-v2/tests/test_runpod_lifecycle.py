@@ -17,6 +17,7 @@ from mantis_v2.runpod_lifecycle import (
     pod_status,
     reconcile_launch,
     reconcile_spend,
+    reconcile_spend_upper_bound,
     reconcile_termination,
     terminate_pod,
 )
@@ -1046,6 +1047,87 @@ def test_spend_stays_reserved_until_receipts_and_billing_reconcile(tmp_path: Pat
     assert first["stage"] == "qualification"
     assert "must-not-escape" not in json.dumps(first)
     assert pod_receipt["decision_digest"] == decision["decision_digest"]
+
+
+def test_spend_upper_bound_requires_absence_and_books_full_reservation(
+    tmp_path: Path,
+) -> None:
+    decision = _approved_decision()
+
+    class PendingBillingAdapter:
+        def __init__(self) -> None:
+            self.live = True
+
+        def inventory(self) -> list[dict[str, object]]:
+            return [{"id": "pod-upper-bound"}] if self.live else []
+
+        def create(self, submitted: dict[str, object], deadline: datetime) -> dict[str, object]:
+            return {
+                "id": "pod-upper-bound",
+                "name": decision["run_name"],
+                "desiredStatus": "RUNNING",
+                "imageName": decision["image_ref"],
+                "templateId": decision["template_id"],
+                "networkVolumeId": decision["volume_id"],
+                "costPerHr": 0.44,
+                "vcpuCount": 8,
+                "memoryInGb": 32,
+            }
+
+        def terminate(self, pod_id: str) -> dict[str, object]:
+            self.live = False
+            return {"deleted": True, "id": pod_id}
+
+        def billing(self, pod_id: str) -> None:
+            return None
+
+    adapter = PendingBillingAdapter()
+    state_root = tmp_path / "state"
+    launch_pod(
+        decision=decision,
+        state_root=state_root,
+        adapter=adapter,
+        now=lambda: datetime(2026, 7, 21, 12, 0, tzinfo=UTC),
+    )
+    with pytest.raises(LifecycleError, match="^termination_receipt_required$"):
+        reconcile_spend_upper_bound(
+            pod_id="pod-upper-bound",
+            run_name=str(decision["run_name"]),
+            state_root=state_root,
+            adapter=adapter,
+            now=lambda: datetime(2026, 7, 21, 12, 1, tzinfo=UTC),
+        )
+    terminate_pod(
+        pod_id="pod-upper-bound",
+        run_name=str(decision["run_name"]),
+        state_root=state_root,
+        adapter=adapter,
+        now=lambda: datetime(2026, 7, 21, 12, 2, tzinfo=UTC),
+    )
+
+    first = reconcile_spend_upper_bound(
+        pod_id="pod-upper-bound",
+        run_name=str(decision["run_name"]),
+        state_root=state_root,
+        adapter=adapter,
+        now=lambda: datetime(2026, 7, 21, 12, 3, tzinfo=UTC),
+    )
+    second = reconcile_spend_upper_bound(
+        pod_id="pod-upper-bound",
+        run_name=str(decision["run_name"]),
+        state_root=state_root,
+        adapter=adapter,
+        now=lambda: datetime(2026, 7, 21, 12, 4, tzinfo=UTC),
+    )
+
+    assert first == second
+    assert first["spend_state"] == "reconciled"
+    assert first["reserved_spend_usd"] == "0.88"
+    assert first["actual_spend_usd"] == "0.88"
+    assert first["actual_spend_is_upper_bound"] is True
+    assert first["reconciliation_evidence"] == (
+        "reserved_spend_upper_bound_after_provider_absence"
+    )
 
 
 def test_create_price_drift_fails_closed_without_second_create(tmp_path: Path) -> None:
