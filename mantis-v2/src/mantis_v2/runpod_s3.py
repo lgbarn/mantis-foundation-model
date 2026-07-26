@@ -18,11 +18,13 @@ class RunpodS3Error(RuntimeError):
     """Raised when RunPod S3 staging cannot be proven complete."""
 
 
-Runner = Callable[[list[str], dict[str, str]], subprocess.CompletedProcess[str]]
+Runner = Callable[[list[str], dict[str, str], int], subprocess.CompletedProcess[str]]
+_MULTIPART_THRESHOLD_BYTES = 500 * 1024 * 1024
+_MIN_UPLOAD_RATE_BYTES_PER_SECOND = 2 * 1024 * 1024
 
 
 def _default_runner(
-    args: list[str], environment: dict[str, str]
+    args: list[str], environment: dict[str, str], timeout_seconds: int
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         args,
@@ -30,7 +32,7 @@ def _default_runner(
         capture_output=True,
         text=True,
         env=environment,
-        timeout=300,
+        timeout=timeout_seconds,
     )
 
 
@@ -72,6 +74,8 @@ class AwsCliS3TransferAdapter:
                 "AWS_SECRET_ACCESS_KEY": secret_access_key,
                 "AWS_DEFAULT_REGION": datacenter_id,
                 "AWS_EC2_METADATA_DISABLED": "true",
+                "AWS_MAX_ATTEMPTS": "10",
+                "AWS_RETRY_MODE": "standard",
             }
         )
         self._runner = runner
@@ -92,9 +96,11 @@ class AwsCliS3TransferAdapter:
             "--no-cli-pager",
         ]
 
-    def _run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+    def _run(
+        self, args: list[str], *, timeout_seconds: int = 300
+    ) -> subprocess.CompletedProcess[str]:
         try:
-            return self._runner(args, dict(self._environment))
+            return self._runner(args, dict(self._environment), timeout_seconds)
         except (OSError, subprocess.SubprocessError) as exc:
             raise RunpodS3Error("AWS CLI execution failed") from exc
 
@@ -121,9 +127,39 @@ class AwsCliS3TransferAdapter:
             expected_size = source.stat().st_size
         except OSError as exc:
             raise RunpodS3Error("upload source is unavailable") from exc
-        completed = self._run([*self._args("put-object", key), "--body", str(source)])
+        if expected_size >= _MULTIPART_THRESHOLD_BYTES:
+            upload_timeout = min(
+                1800,
+                max(
+                    300,
+                    120
+                    + (expected_size + _MIN_UPLOAD_RATE_BYTES_PER_SECOND - 1)
+                    // _MIN_UPLOAD_RATE_BYTES_PER_SECOND,
+                ),
+            )
+            completed = self._run(
+                [
+                    self._binary,
+                    "s3",
+                    "cp",
+                    str(source),
+                    f"s3://{self._volume_id}/{_safe_key(key)}",
+                    "--endpoint-url",
+                    self._endpoint,
+                    "--region",
+                    self._datacenter_id,
+                    "--no-cli-pager",
+                    "--cli-read-timeout",
+                    str(upload_timeout),
+                    "--no-progress",
+                    "--only-show-errors",
+                ],
+                timeout_seconds=upload_timeout,
+            )
+        else:
+            completed = self._run([*self._args("put-object", key), "--body", str(source)])
         if completed.returncode != 0:
-            raise RunpodS3Error("put-object failed")
+            raise RunpodS3Error("upload failed")
         remote = self.head_object(key)
         if remote is None or remote.size != expected_size:
             raise RunpodS3Error("uploaded object size verification failed")

@@ -379,6 +379,10 @@ drive is excluded from Time Machine and is not a sufficient sole backup.
 Deletion remains an explicit operator action and is permitted only after both
 copies match the transfer manifest.
 
+Prepared frozen-screen windows above RunPod's documented 500 MB `PutObject`
+limit should be staged as `windows.npy.gz`; the sealed paid command expands the
+file atomically and the original input manifest verifies its uncompressed hash.
+
 ### Transfer Bundle commands
 
 Copy `configs/transfer.example.toml` to an ignored machine-local path and
