@@ -154,15 +154,8 @@ def test_completed_embedding_rejects_changed_config_and_modified_shard(tmp_path:
         ).embed(manifest, output)
 
 
-@pytest.mark.parametrize(
-    ("field", "message"),
-    [
-        ("producer_source_sha256", "producer source mismatch"),
-        ("expected_r_config_sha256", "expected-R config mismatch"),
-    ],
-)
 def test_embedding_rejects_stale_input_producer_before_loading_model(
-    tmp_path: Path, field: str, message: str
+    tmp_path: Path,
 ) -> None:
     manifest_path = write_frozen_input(
         _candidates(3),
@@ -171,17 +164,45 @@ def test_embedding_rejects_stale_input_producer_before_loading_model(
         tmp_path / "input",
     )
     payload = json.loads(manifest_path.read_text())
-    payload[field] = "0" * 64
+    payload["expected_r_config_sha256"] = "0" * 64
     payload["manifest_sha256"] = frozen_expected_r._json_digest(
         {key: value for key, value in payload.items() if key != "manifest_sha256"}
     )
     manifest_path.write_text(json.dumps(payload))
 
-    with pytest.raises(FrozenExpectedRError, match=message):
+    with pytest.raises(FrozenExpectedRError, match="expected-R config mismatch"):
         FrozenMantisEmbedder(
             FrozenExpectedRConfig(),
             model_factory=lambda _config: pytest.fail("paid model must not be loaded"),
         ).embed(manifest_path, tmp_path / "embed")
+
+
+def test_embedding_accepts_valid_prior_producer_identity_and_rejects_malformed_one(
+    tmp_path: Path,
+) -> None:
+    manifest_path = write_frozen_input(
+        _candidates(3),
+        np.ones((3, 5, 512), dtype=np.float32),
+        np.zeros((3, 3), dtype=np.float32),
+        tmp_path / "input",
+    )
+    payload = json.loads(manifest_path.read_text())
+    payload["producer_source_sha256"] = "0" * 64
+    payload["manifest_sha256"] = frozen_expected_r._json_digest(
+        {key: value for key, value in payload.items() if key != "manifest_sha256"}
+    )
+    manifest_path.write_text(json.dumps(payload))
+
+    validated, *_ = FrozenMantisEmbedder(FrozenExpectedRConfig()).validate_input(manifest_path)
+    assert validated["producer_source_sha256"] == "0" * 64
+
+    payload["producer_source_sha256"] = "invalid"
+    payload["manifest_sha256"] = frozen_expected_r._json_digest(
+        {key: value for key, value in payload.items() if key != "manifest_sha256"}
+    )
+    manifest_path.write_text(json.dumps(payload))
+    with pytest.raises(FrozenExpectedRError, match="producer source identity is invalid"):
+        FrozenMantisEmbedder(FrozenExpectedRConfig()).validate_input(manifest_path)
 
 
 def test_input_manifest_remains_valid_after_directory_move(tmp_path: Path) -> None:

@@ -1161,10 +1161,12 @@ class FrozenMantisEmbedder:
             raise FrozenExpectedRError("input manifest digest mismatch")
         if manifest.get("preprocessing") != "native_mantis_v2":
             raise FrozenExpectedRError("custom preprocessing is prohibited")
-        active_source = source_digest(Path(__file__).resolve().parents[3])
         active_expected_r_config = _json_digest(asdict(ExpectedRScreenConfig()))
-        if manifest.get("producer_source_sha256") != active_source:
-            raise FrozenExpectedRError("frozen input producer source mismatch")
+        producer_source = manifest.get("producer_source_sha256")
+        if not isinstance(producer_source, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", producer_source
+        ):
+            raise FrozenExpectedRError("frozen input producer source identity is invalid")
         if manifest.get("expected_r_config_sha256") != active_expected_r_config:
             raise FrozenExpectedRError("frozen input expected-R config mismatch")
         candidate_record = manifest.get("candidates", {})
