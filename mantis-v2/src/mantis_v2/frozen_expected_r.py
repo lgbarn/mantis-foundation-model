@@ -617,7 +617,11 @@ def _paid_control_config(path: Path) -> dict[str, Any]:
         "runpodctl": {"version", "source_commit", "binary_sha256"},
     }
     for section, keys in nested.items():
-        if not isinstance(value[section], dict) or set(value[section]) != keys:
+        actual_keys = set(value[section]) if isinstance(value[section], dict) else set()
+        accepted_keys = {frozenset(keys)}
+        if section == "provider":
+            accepted_keys.add(frozenset(keys | {"gpu_type"}))
+        if not isinstance(value[section], dict) or frozenset(actual_keys) not in accepted_keys:
             raise FrozenExpectedRError(f"paid control config {section} keys mismatch")
     run_id = value["run_id"]
     source_revision = value["source_revision"]
@@ -625,6 +629,11 @@ def _paid_control_config(path: Path) -> dict[str, Any]:
         raise FrozenExpectedRError("paid control run_id is invalid")
     if not isinstance(source_revision, str) or not re.fullmatch(r"[0-9a-f]{40}", source_revision):
         raise FrozenExpectedRError("paid control source_revision is invalid")
+    if value["provider"].get("gpu_type", "NVIDIA L40S") not in {
+        "NVIDIA H100 80GB HBM3",
+        "NVIDIA L40S",
+    }:
+        raise FrozenExpectedRError("paid control provider gpu_type is unsupported")
     for pod_path in value["pod_paths"].values():
         parsed = Path(str(pod_path))
         if not parsed.is_absolute() or ".." in parsed.parts:
@@ -659,6 +668,7 @@ def write_paid_planning_inputs(config_path: Path, output: Path) -> dict[str, Any
     ):
         raise FrozenExpectedRError("paid control config sections must be objects")
     run_id = str(control["run_id"])
+    gpu_type = str(provider.get("gpu_type", "NVIDIA L40S"))
     pod_root = f"/workspace/mantis/runs/{run_id}"
     workload_command = shlex.join(
         [
@@ -705,6 +715,7 @@ def write_paid_planning_inputs(config_path: Path, output: Path) -> dict[str, Any
         deadline_hours=duration / 3600,
         check_duration_seconds=float(checks["duration_seconds"]),
         checks={name: True for name in _FOCUSED_CHECKS},
+        gpu_type=gpu_type,
     )
     frozen = FrozenExpectedRConfig.from_json(Path(str(control["frozen_config"])))
     experiment_toml = output / "experiment.toml"
@@ -729,7 +740,7 @@ def write_paid_planning_inputs(config_path: Path, output: Path) -> dict[str, Any
         "intent_id": run_id,
         "stage": "qualification",
         "run_name": run_id,
-        "gpu_type": "NVIDIA L40S",
+        "gpu_type": gpu_type,
         "datacenter_id": provider["datacenter_id"],
         "gpu_count": 1,
         "vcpu": provider["vcpu"],
@@ -943,8 +954,9 @@ def write_paid_preflight(
     deadline_hours: float,
     check_duration_seconds: float,
     checks: dict[str, bool],
+    gpu_type: str = "NVIDIA L40S",
 ) -> dict[str, Any]:
-    """Seal the cheap checks and safety envelope required before one L40S Pod."""
+    """Seal the cheap checks and safety envelope required before one GPU Pod."""
     required_checks = {
         "causality_next_fill",
         "label_replay_parity",
@@ -963,6 +975,8 @@ def write_paid_preflight(
         raise FrozenExpectedRError("paid rate and deadline must be positive and at most 6 hours")
     if deadline_hours * hourly_rate_usd > budget_usd:
         raise FrozenExpectedRError("deadline exceeds the rate-derived spend limit")
+    if gpu_type not in {"NVIDIA H100 80GB HBM3", "NVIDIA L40S"}:
+        raise FrozenExpectedRError("paid preflight GPU type is unsupported")
     if embedding_output.exists():
         raise FrozenExpectedRError("embedding output identity already exists")
     if receipt_path.exists() or receipt_path.with_suffix(receipt_path.suffix + ".tmp").exists():
@@ -979,7 +993,7 @@ def write_paid_preflight(
     receipt = {
         "schema_version": 1,
         "ready": True,
-        "gpu": "NVIDIA L40S",
+        "gpu": gpu_type,
         "gpu_count": 1,
         "input_manifest": _file_record(input_manifest_path),
         "input_manifest_sha256": manifest_digest,

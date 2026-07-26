@@ -784,7 +784,7 @@ def test_completed_comparison_resume_is_bound_to_all_frozen_identities(tmp_path:
         )
 
 
-def test_paid_planning_inputs_are_config_driven_and_l40s_bounded(
+def test_paid_planning_inputs_are_config_driven_and_gpu_bounded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     input_path = tmp_path / "input.json"
@@ -825,6 +825,7 @@ def test_paid_planning_inputs_are_config_driven_and_l40s_bounded(
             "backup": str(tmp_path / "backup"),
         },
         "provider": {
+            "gpu_type": "NVIDIA H100 80GB HBM3",
             "hourly_rate_usd": 2.0,
             "budget_usd": 10.0,
             "deadline_hours": 6.0,
@@ -856,7 +857,10 @@ def test_paid_planning_inputs_are_config_driven_and_l40s_bounded(
     result = write_paid_planning_inputs(control_path, tmp_path / "plan")
     intent = json.loads((tmp_path / "plan" / "intent.json").read_text())
 
-    assert intent["gpu_type"] == "NVIDIA L40S"
+    assert intent["gpu_type"] == "NVIDIA H100 80GB HBM3"
+    assert json.loads((tmp_path / "plan" / "preflight.json").read_text())["gpu"] == intent[
+        "gpu_type"
+    ]
     assert intent["gpu_count"] == 1
     assert intent["maximum_duration_seconds"] == 5 * 3600
     assert (
@@ -872,3 +876,14 @@ def test_paid_planning_inputs_are_config_driven_and_l40s_bounded(
         .command
         == "frozen-screen-plan-paid"
     )
+
+    del control["provider"]["gpu_type"]
+    control_path.write_text(json.dumps(control))
+    write_paid_planning_inputs(control_path, tmp_path / "l40s-plan")
+    l40s_intent = json.loads((tmp_path / "l40s-plan" / "intent.json").read_text())
+    assert l40s_intent["gpu_type"] == "NVIDIA L40S"
+
+    control["provider"]["gpu_type"] = "NVIDIA H100"
+    control_path.write_text(json.dumps(control))
+    with pytest.raises(FrozenExpectedRError, match="gpu_type is unsupported"):
+        write_paid_planning_inputs(control_path, tmp_path / "invalid-plan")
