@@ -31,7 +31,7 @@ billing_month_hours = 730
 [budget]
 account_ceiling_usd = "150.00"
 storage_usd = "15.00"
-qualification_usd = "20.00"
-production_usd = "90.00"
+qualification_usd = "25.00"
+production_usd = "85.00"
 protected_recovery_usd = "25.00"
 ordinary_launch_cutoff_usd = "125.00"
