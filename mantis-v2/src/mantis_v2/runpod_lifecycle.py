@@ -811,8 +811,15 @@ def reconcile_spend(
         raise LifecycleError("termination_receipt_required")
     termination_receipt = _read_receipt(termination_path, exact_pod_id)
     spend_path = state_root / "receipts" / "spend" / f"{exact_pod_id}.json"
+    correction_path = state_root / "receipts" / "spend-corrections" / f"{exact_pod_id}.json"
+    if correction_path.exists():
+        return _read_receipt(correction_path, exact_pod_id)
+    upper_bound_receipt: dict[str, object] | None = None
     if spend_path.exists():
-        return _read_receipt(spend_path, exact_pod_id)
+        existing = _read_receipt(spend_path, exact_pod_id)
+        if existing.get("actual_spend_is_upper_bound") is not True:
+            return existing
+        upper_bound_receipt = existing
 
     try:
         descriptor, lock_path = _acquire_lock(state_root, f"spend-{exact_pod_id}.lock")
@@ -821,8 +828,13 @@ def reconcile_spend(
             return _read_receipt(spend_path, exact_pod_id)
         raise LifecycleError("spend_reconciliation_in_progress") from exc
     try:
+        if correction_path.exists():
+            return _read_receipt(correction_path, exact_pod_id)
         if spend_path.exists():
-            return _read_receipt(spend_path, exact_pod_id)
+            existing = _read_receipt(spend_path, exact_pod_id)
+            if existing.get("actual_spend_is_upper_bound") is not True:
+                return existing
+            upper_bound_receipt = existing
         try:
             billing = adapter.billing(exact_pod_id)
         except Exception as exc:
@@ -849,7 +861,23 @@ def reconcile_spend(
             "termination_receipt_digest": _payload_digest(termination_receipt),
             "reconciled_at": now().astimezone(UTC).isoformat().replace("+00:00", "Z"),
         }
-        _publish_json(spend_path, receipt)
+        target = spend_path
+        if upper_bound_receipt is not None:
+            for field, expected in (
+                ("run_name", run_name),
+                ("decision_digest", pod_receipt["decision_digest"]),
+                ("authorization_digest", pod_receipt["authorization_digest"]),
+                ("stage", pod_receipt["stage"]),
+                ("pod_receipt_digest", _payload_digest(pod_receipt)),
+                ("termination_receipt_digest", _payload_digest(termination_receipt)),
+            ):
+                if upper_bound_receipt.get(field) != expected:
+                    raise LifecycleError("spend_receipt_provenance_mismatch")
+            receipt["supersedes_spend_receipt_digest"] = _payload_digest(upper_bound_receipt)
+            receipt["previous_actual_spend_usd"] = upper_bound_receipt.get("actual_spend_usd")
+            receipt["reconciliation_evidence"] = "provider_exact_billing_after_upper_bound"
+            target = correction_path
+        _publish_json(target, receipt)
         return receipt
     finally:
         os.close(descriptor)

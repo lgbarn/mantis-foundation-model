@@ -145,6 +145,23 @@ def test_snapshot_emits_fresh_planner_inputs_and_receipt_provenance(
 ) -> None:
     paths = _inputs(tmp_path)
     _write_reconciled_receipts(paths["state"])
+    spend_path = paths["state"] / "receipts" / "spend" / "pod-old.json"
+    base_spend = json.loads(spend_path.read_text())
+    base_spend["actual_spend_is_upper_bound"] = True
+    base_spend["reconciliation_evidence"] = "reserved_spend_upper_bound_after_provider_absence"
+    spend_path.write_text(json.dumps(base_spend))
+    correction = {
+        **base_spend,
+        "actual_spend_usd": "0.25",
+        "previous_actual_spend_usd": base_spend["actual_spend_usd"],
+        "reconciliation_evidence": "provider_exact_billing_after_upper_bound",
+        "supersedes_spend_receipt_digest": hashlib.sha256(
+            json.dumps(base_spend, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    }
+    correction_dir = paths["state"] / "receipts" / "spend-corrections"
+    correction_dir.mkdir()
+    (correction_dir / "pod-old.json").write_text(json.dumps(correction))
     monkeypatch.setenv("RUNPOD_API_KEY", "fixture-secret")
     output = tmp_path / "snapshot"
 
@@ -175,8 +192,8 @@ def test_snapshot_emits_fresh_planner_inputs_and_receipt_provenance(
     ]
     assert inventory["volumes"][0]["free_bytes"] == 30_000_000_000
     assert inventory["live_pods"] == []
-    assert ledger["actual_spend_usd"] == "2.75"
-    assert ledger["bucket_actual_spend_usd"]["qualification"] == "2.75"
+    assert ledger["actual_spend_usd"] == "0.25"
+    assert ledger["bucket_actual_spend_usd"]["qualification"] == "0.25"
     assert ledger["active_reservations"] == []
     assert ledger["consumed_authorization_digests"] == ["c" * 64]
     assert provenance["provider_checks"] == {
