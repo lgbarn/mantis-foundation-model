@@ -355,6 +355,11 @@ def _parser() -> argparse.ArgumentParser:
     workload_supervise.add_argument("--runpodctl-binary", required=True, type=Path)
     workload_supervise.add_argument("--aws-binary", default="aws", type=Path)
     workload_supervise.add_argument("--preflight", type=Path)
+    workload_replicate = subparsers.add_parser("runpod-replicate-workload")
+    workload_replicate.add_argument("--manifest", required=True, type=Path)
+    workload_replicate.add_argument("--decision", required=True, type=Path)
+    workload_replicate.add_argument("--local", required=True, type=Path)
+    workload_replicate.add_argument("--aws-binary", default="aws", type=Path)
     workload_seal = subparsers.add_parser("runpod-seal-workload")
     workload_seal.add_argument("--spec", required=True, type=Path)
     workload_seal.add_argument("--output-root", required=True, type=Path)
@@ -640,6 +645,51 @@ def main() -> None:
                 now=lambda: datetime.now(UTC),
                 sleep=time.sleep,
             )
+        elif args.command == "runpod-replicate-workload":
+            manifest = validate_workload_manifest(args.manifest)
+            decision = _load_json_object(args.decision)
+            workload = decision.get("workload")
+            if (
+                decision.get("allowed") is not True
+                or decision.get("run_name") != manifest["run_id"]
+                or not isinstance(workload, dict)
+                or workload.get("manifest_digest") != manifest["manifest_digest"]
+            ):
+                raise WorkloadError("replication decision does not match workload")
+            environment = workload.get("environment")
+            if not isinstance(environment, dict) or not isinstance(
+                environment.get("MANTIS_WORKLOAD_MANIFEST"), str
+            ):
+                raise WorkloadError("bound Pod manifest path is missing")
+            local_digest = decision.get("local_digest")
+            if not isinstance(local_digest, str):
+                raise LifecycleError("invalid_launch_decision:local_digest")
+            state_root, rest_adapter = _live_adapter(
+                args.local, expected_local_digest=local_digest
+            )
+            local = load_local_config(args.local)
+            io = RunpodS3WorkloadIO(
+                adapter=AwsCliS3TransferAdapter(
+                    aws_binary=args.aws_binary,
+                    datacenter_id=str(decision.get("datacenter_id", "")),
+                    volume_id=str(decision.get("volume_id", "")),
+                    access_key_id=os.environ.get(local.secrets.s3_access_key_id_env, ""),
+                    secret_access_key=os.environ.get(
+                        local.secrets.s3_secret_access_key_env, ""
+                    ),
+                ),
+                manifest_path=args.manifest,
+                pod_manifest_path=environment["MANTIS_WORKLOAD_MANIFEST"],
+                provider=rest_adapter,
+                state_root=state_root,
+            )
+            io.replicate(manifest)
+            result = {
+                "status": "replicated",
+                "run_id": manifest["run_id"],
+                "controller": manifest["artifacts"]["controller"],
+                "backup": manifest["artifacts"]["backup"],
+            }
         elif args.command == "runpod-seal-workload":
             result = {
                 "manifest": str(
