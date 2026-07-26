@@ -154,6 +154,13 @@ short-lived authorization. `frozen-screen-seal-paid` creates the content-address
 workload manifest and bound decision directly from the same config and approved
 decision; no workload JSON is hand-authored.
 
+For a prepared `windows.npy` larger than RunPod's 500 MB single-object limit,
+create `windows.npy.gz` with `gzip -1 -k` and include the `.gz` file instead of
+the uncompressed file in the transfer bundle. The generated paid command
+atomically expands it before the pinned workload starts; the unchanged input
+manifest then verifies the original uncompressed size and SHA-256. Compression
+is transport-only and does not change the accepted input or scientific source.
+
 `runpod-provider-snapshot` is the required live read-only boundary before both
 planning calls. It uses the pinned official `runpodctl` for account balance,
 current spend, live Pods, GPU/datacenter availability, and network-volume

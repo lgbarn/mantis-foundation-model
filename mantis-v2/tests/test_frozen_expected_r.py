@@ -859,6 +859,10 @@ def test_paid_planning_inputs_are_config_driven_and_l40s_bounded(
     assert intent["gpu_type"] == "NVIDIA L40S"
     assert intent["gpu_count"] == 1
     assert intent["maximum_duration_seconds"] == 5 * 3600
+    assert (
+        "gzip -dc /workspace/mantis/inputs/digest/input/windows.npy.gz" in result["exact_command"]
+    )
+    assert "mv /workspace/mantis/inputs/digest/input/.windows.npy.tmp" in result["exact_command"]
     assert "frozen-screen-paid-workload" in result["exact_command"]
     assert (
         _parser()

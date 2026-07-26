@@ -11,12 +11,14 @@ from mantis_v2.runpod_s3 import AwsCliS3TransferAdapter, RunpodS3Error
 class Runner:
     def __init__(self) -> None:
         self.calls: list[tuple[list[str], dict[str, str]]] = []
+        self.timeouts: list[int] = []
         self.responses: list[subprocess.CompletedProcess[str]] = []
 
     def __call__(
-        self, args: list[str], environment: dict[str, str]
+        self, args: list[str], environment: dict[str, str], timeout_seconds: int
     ) -> subprocess.CompletedProcess[str]:
         self.calls.append((args, environment))
+        self.timeouts.append(timeout_seconds)
         return self.responses.pop(0)
 
 
@@ -54,7 +56,36 @@ def test_s3_adapter_heads_and_uploads_without_secrets_in_argv(tmp_path: Path) ->
         assert environment["AWS_ACCESS_KEY_ID"] == "access-secret"
         assert environment["AWS_SECRET_ACCESS_KEY"] == "secret-secret"
         assert environment["AWS_DEFAULT_REGION"] == "US-GA-2"
+        assert environment["AWS_MAX_ATTEMPTS"] == "10"
+        assert environment["AWS_RETRY_MODE"] == "standard"
         assert "https://s3api-us-ga-2.runpod.io" in args
+
+
+def test_s3_adapter_uses_multipart_cli_for_large_files(tmp_path: Path) -> None:
+    runner = Runner()
+    source = tmp_path / "large.bin"
+    source.touch()
+    with source.open("r+b") as handle:
+        handle.truncate(1_509_478_528)
+    runner.responses.extend(
+        (
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess(
+                [], 0, json.dumps({"ContentLength": source.stat().st_size}), ""
+            ),
+        )
+    )
+
+    _adapter(runner).put_file("transfer/incoming/large.bin", source)
+
+    upload_args = runner.calls[0][0]
+    assert upload_args[:3] == ["/usr/local/bin/aws", "s3", "cp"]
+    assert upload_args[3] == str(source)
+    assert upload_args[4] == "s3://volume-123/transfer/incoming/large.bin"
+    assert "--no-progress" in upload_args
+    assert upload_args[upload_args.index("--cli-read-timeout") + 1] == "840"
+    assert runner.timeouts[0] == 840
+    assert runner.calls[1][0][1:3] == ["s3api", "head-object"]
 
 
 def test_s3_adapter_distinguishes_absent_object_from_provider_failure() -> None:
