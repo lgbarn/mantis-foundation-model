@@ -18,6 +18,7 @@ from mantis_v2.runpod_s3_workload import RunpodS3WorkloadIO
 from mantis_v2.runpod_workload import (
     WorkloadError,
     _bounded_call,
+    _load_manifest_document,
     bind_workload_decision,
     execute_workload_manifest,
     seal_workload_manifest,
@@ -409,6 +410,22 @@ def test_launch_manifest_is_complete_content_addressed_and_idempotent(tmp_path: 
     assert manifest["monitor"]["poll_seconds"] == 30
     assert manifest["monitor"]["first_heartbeat_seconds"] == 600
     assert manifest["monitor"]["miss_limit"] == 4
+
+
+def test_bound_pod_manifest_copy_does_not_require_controller_digest_directory(
+    tmp_path: Path,
+) -> None:
+    controller_path = seal_workload_manifest(_spec(tmp_path), tmp_path / "sealed")
+    pod_path = tmp_path / "workspace" / "mantis" / "control" / "frozen" / "launch-manifest.json"
+    pod_path.parent.mkdir(parents=True)
+    pod_path.write_bytes(controller_path.read_bytes())
+
+    with pytest.raises(WorkloadError, match="path does not match"):
+        _load_manifest_document(pod_path)
+
+    assert _load_manifest_document(pod_path, path_role="pod")["manifest_digest"] == (
+        controller_path.parent.name
+    )
 
 
 def test_official_frozen_manifest_runs_embed_and_compare_with_one_retry(tmp_path: Path) -> None:
@@ -1071,14 +1088,23 @@ def test_pod_executor_revalidates_then_immediately_runs_and_signs_heartbeats(
         return Process()
 
     validation_order: list[str] = []
-    monkeypatch.setattr("mantis_v2.runpod_workload._load_manifest_document", lambda _path: manifest)
+
+    def load_manifest(_path: Path, *, path_role: str = "controller") -> dict:
+        validation_order.append(f"load:{path_role}")
+        return manifest
+
+    monkeypatch.setattr(
+        "mantis_v2.runpod_workload._load_manifest_document",
+        load_manifest,
+    )
     monkeypatch.setattr(
         "mantis_v2.runpod_workload._promote_pod_input_bundle",
         lambda _manifest: validation_order.append("promote"),
     )
     monkeypatch.setattr(
         "mantis_v2.runpod_workload.validate_workload_manifest",
-        lambda path, path_role="controller": validation_order.append("validate") or manifest,
+        lambda path, path_role="controller": validation_order.append(f"validate:{path_role}")
+        or manifest,
     )
 
     result = execute_workload_manifest(
@@ -1110,6 +1136,6 @@ def test_pod_executor_revalidates_then_immediately_runs_and_signs_heartbeats(
     assert "NVIDIA A40" in diagnostics["nvidia_smi_stdout"]
     assert diagnostics["tensorboard_process_id"] == "76"
     assert "token" not in json.dumps(launched, default=str)
-    assert validation_order == ["promote", "validate"]
+    assert validation_order == ["load:pod", "promote", "validate:pod"]
     parsed = _parser().parse_args(["workload-execute", "--manifest", str(manifest_path)])
     assert parsed.manifest == manifest_path

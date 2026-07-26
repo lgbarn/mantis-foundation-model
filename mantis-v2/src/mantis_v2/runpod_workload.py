@@ -607,7 +607,9 @@ def seal_workload_manifest(spec: Mapping[str, Any], output_root: str | Path) -> 
     return path
 
 
-def _load_manifest_document(path: str | Path) -> dict[str, Any]:
+def _load_manifest_document(
+    path: str | Path, *, path_role: Literal["controller", "pod"] = "controller"
+) -> dict[str, Any]:
     try:
         manifest = json.loads(Path(path).read_text())
     except (OSError, json.JSONDecodeError) as exc:
@@ -617,7 +619,7 @@ def _load_manifest_document(path: str | Path) -> dict[str, Any]:
     core = {key: value for key, value in manifest.items() if key != "manifest_digest"}
     if manifest.get("manifest_digest") != _digest(core):
         raise WorkloadError("launch manifest digest mismatch")
-    if Path(path).parent.name != manifest["manifest_digest"]:
+    if path_role == "controller" and Path(path).parent.name != manifest["manifest_digest"]:
         raise WorkloadError("launch manifest path does not match its digest")
     return manifest
 
@@ -625,7 +627,7 @@ def _load_manifest_document(path: str | Path) -> dict[str, Any]:
 def validate_workload_manifest(
     path: str | Path, *, path_role: Literal["controller", "pod"] = "controller"
 ) -> dict[str, Any]:
-    manifest = _load_manifest_document(path)
+    manifest = _load_manifest_document(path, path_role=path_role)
     core = {key: value for key, value in manifest.items() if key != "manifest_digest"}
     _validate_core(core, now=datetime.now(UTC), path_role=path_role)
     return manifest
@@ -838,7 +840,7 @@ def execute_workload_manifest(
     sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
     """Revalidate one staged manifest inside the Pod and run training immediately."""
-    envelope = _load_manifest_document(manifest_path)
+    envelope = _load_manifest_document(manifest_path, path_role="pod")
     _promote_pod_input_bundle(envelope)
     manifest = validate_workload_manifest(manifest_path, path_role="pod")
     environment = dict(os.environ if environ is None else environ)
