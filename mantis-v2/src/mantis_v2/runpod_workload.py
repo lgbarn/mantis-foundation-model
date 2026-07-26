@@ -18,7 +18,7 @@ from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from mantis_v2.foundation_matrix import FoundationMatrixError, validate_planned_cell
 from mantis_v2.monitoring import tensorboard_command
@@ -73,6 +73,8 @@ _KEYS = {
     "runpodctl",
 }
 _BOOTSTRAP_KEYS = _KEYS | {"bootstrap"}
+_FROZEN_KEYS = _KEYS | {"workload_kind"}
+_FROZEN_BOOTSTRAP_KEYS = _FROZEN_KEYS | {"bootstrap"}
 _OFFICIAL_RUNPOD_TEMPLATE_ID = "runpod-torch-v280"
 _OFFICIAL_RUNPOD_IMAGE_REF = (
     "runpod/pytorch@sha256:0a360022e8de4375af99430f84e8b38951acc397252163a37ceac7204d01be35"
@@ -149,8 +151,14 @@ def _decimal(value: object, field: str, *, positive: bool = True) -> Decimal:
     return parsed
 
 
-def _validate_core(core: dict[str, Any], *, now: datetime, path_role: str) -> None:
-    if set(core) != _KEYS and set(core) != _BOOTSTRAP_KEYS:
+def _validate_core(
+    core: dict[str, Any], *, now: datetime, path_role: Literal["controller", "pod"]
+) -> None:
+    is_frozen = core.get("workload_kind") == "frozen_expected_r"
+    accepted_keys = (
+        (_FROZEN_KEYS, _FROZEN_BOOTSTRAP_KEYS) if is_frozen else (_KEYS, _BOOTSTRAP_KEYS)
+    )
+    if all(set(core) != keys for keys in accepted_keys):
         raise WorkloadError("workload manifest keys mismatch")
     if core["schema_version"] != 1:
         raise WorkloadError("unsupported workload manifest schema")
@@ -179,6 +187,8 @@ def _validate_core(core: dict[str, Any], *, now: datetime, path_role: str) -> No
     if identities.get("lock_sha256") != lock_record["sha256"]:
         raise WorkloadError("image self-check dependency lock mismatch")
     scope = check_payload["scope"]
+    if is_frozen and scope != "official_bootstrap":
+        raise WorkloadError("frozen screening requires the official RunPod template")
     if scope == "official_bootstrap":
         bootstrap = _exact(
             core.get("bootstrap"),
@@ -227,20 +237,25 @@ def _validate_core(core: dict[str, Any], *, now: datetime, path_role: str) -> No
     base_record = _file_record(
         core["matrix_base_config"], "matrix_base_config", path_role=path_role
     )
-    try:
-        plan_payload = json.loads(Path(plan_record[f"{path_role}_path"]).read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        raise WorkloadError("matrix plan is invalid") from exc
-    plan_digest = plan_payload.get("plan_digest") if isinstance(plan_payload, dict) else None
-    if not isinstance(plan_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", plan_digest):
-        raise WorkloadError("matrix plan digest is invalid")
-    for role in ("controller", "pod"):
-        plan_path = Path(str(plan_record[f"{role}_path"]))
-        base_path = Path(str(base_record[f"{role}_path"]))
-        if plan_path.parent.name != plan_digest:
-            raise WorkloadError("matrix plan path does not preserve its digest")
-        if base_path != plan_path.parent / "base-config.toml":
-            raise WorkloadError("matrix base config is not colocated with the matrix plan")
+    if is_frozen:
+        from mantis_v2.frozen_expected_r import FrozenExpectedRConfig
+
+        FrozenExpectedRConfig.from_json(Path(str(base_record[f"{path_role}_path"])))
+    if not is_frozen:
+        try:
+            plan_payload = json.loads(Path(plan_record[f"{path_role}_path"]).read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise WorkloadError("matrix plan is invalid") from exc
+        plan_digest = plan_payload.get("plan_digest") if isinstance(plan_payload, dict) else None
+        if not isinstance(plan_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", plan_digest):
+            raise WorkloadError("matrix plan digest is invalid")
+        for role in ("controller", "pod"):
+            plan_path = Path(str(plan_record[f"{role}_path"]))
+            base_path = Path(str(base_record[f"{role}_path"]))
+            if plan_path.parent.name != plan_digest:
+                raise WorkloadError("matrix plan path does not preserve its digest")
+            if base_path != plan_path.parent / "base-config.toml":
+                raise WorkloadError("matrix base config is not colocated with the matrix plan")
     dataset_record = _file_record(core["dataset_manifest"], "dataset_manifest", path_role=path_role)
     if experiment.get("data", {}).get("corpus_manifest_sha256") != dataset_record["sha256"]:
         raise WorkloadError("dataset manifest differs from experiment config")
@@ -287,6 +302,19 @@ def _validate_core(core: dict[str, Any], *, now: datetime, path_role: str) -> No
         or bundled_dataset.size != dataset_record["size"]
     ):
         raise WorkloadError("dataset manifest is not an exact input bundle member")
+    if is_frozen:
+        config_pod_path = Path(str(base_record["pod_path"]))
+        if not config_pod_path.is_relative_to(expected_input_root):
+            raise WorkloadError("frozen config is not bound to the input bundle")
+        bundled_config = dataset_entries.get(
+            config_pod_path.relative_to(expected_input_root).as_posix()
+        )
+        if (
+            bundled_config is None
+            or bundled_config.sha256 != base_record["sha256"]
+            or bundled_config.size != base_record["size"]
+        ):
+            raise WorkloadError("frozen config is not an exact input bundle member")
     checkpoint = _exact(
         core["foundation_checkpoint"],
         {"repository", "revision", "sha256"},
@@ -307,26 +335,40 @@ def _validate_core(core: dict[str, Any], *, now: datetime, path_role: str) -> No
     ):
         raise WorkloadError("foundation checkpoint differs from experiment config")
     command = core["start_command"]
-    if (
-        not isinstance(command, list)
-        or len(command) != 8
-        or any(not isinstance(item, str) or not item for item in command)
-        or command[:5] != ["uv", "run", "mantis-v2", "foundation-matrix-cell", "--plan"]
-        or command[6] != "--cell-id"
-    ):
-        raise WorkloadError("start_command must be the exact argv matrix-cell entrypoint")
-    try:
-        if Path(command[5]).resolve() != Path(str(plan_record["pod_path"])).resolve():
-            raise WorkloadError("start_command plan path does not match matrix_plan")
-        planned = validate_planned_cell(
-            plan_record[f"{path_role}_path"],
-            command[7],
-            config_record[f"{path_role}_path"],
+    if is_frozen:
+        if (
+            not isinstance(command, list)
+            or len(command) != 3
+            or command[:2] != ["bash", "-lc"]
+            or not isinstance(command[2], str)
+        ):
+            raise WorkloadError("frozen start_command must be one shell command")
+        from mantis_v2.frozen_expected_r import validate_paid_runner_contract
+
+        validate_paid_runner_contract(
+            Path(str(plan_record[f"{path_role}_path"])), core, path_role=path_role
         )
-    except FoundationMatrixError as exc:
-        raise WorkloadError("start_command is not bound to a valid matrix cell") from exc
-    if planned["run_name"] != core["run_id"]:
-        raise WorkloadError("run_id does not match the planned matrix cell")
+    else:
+        if (
+            not isinstance(command, list)
+            or len(command) != 8
+            or any(not isinstance(item, str) or not item for item in command)
+            or command[:5] != ["uv", "run", "mantis-v2", "foundation-matrix-cell", "--plan"]
+            or command[6] != "--cell-id"
+        ):
+            raise WorkloadError("start_command must be the exact argv matrix-cell entrypoint")
+        try:
+            if Path(command[5]).resolve() != Path(str(plan_record["pod_path"])).resolve():
+                raise WorkloadError("start_command plan path does not match matrix_plan")
+            planned = validate_planned_cell(
+                plan_record[f"{path_role}_path"],
+                command[7],
+                config_record[f"{path_role}_path"],
+            )
+        except FoundationMatrixError as exc:
+            raise WorkloadError("start_command is not bound to a valid matrix cell") from exc
+        if planned["run_name"] != core["run_id"]:
+            raise WorkloadError("run_id does not match the planned matrix cell")
     artifacts = _exact(core["artifacts"], {"pod", "controller", "backup"}, "artifacts")
     artifact_paths = [Path(_text(artifacts[key], f"artifacts.{key}")) for key in artifacts]
     if any(not path.is_absolute() for path in artifact_paths) or len(set(artifact_paths)) != 3:
@@ -358,7 +400,11 @@ def _validate_core(core: dict[str, Any], *, now: datetime, path_role: str) -> No
         },
         "monitor",
     )
-    _text(monitor["tensorboard"], "monitor.tensorboard")
+    if is_frozen:
+        if monitor["tensorboard"] is not None:
+            raise WorkloadError("TensorBoard must be disabled for frozen screening")
+    else:
+        _text(monitor["tensorboard"], "monitor.tensorboard")
     heartbeat_path = Path(_text(monitor["heartbeat"], "monitor.heartbeat"))
     if heartbeat_path != expected_pod_artifacts / "heartbeat.json":
         raise WorkloadError("monitor.heartbeat must be inside artifacts.pod")
@@ -561,8 +607,8 @@ def seal_workload_manifest(spec: Mapping[str, Any], output_root: str | Path) -> 
     return path
 
 
-def validate_workload_manifest(
-    path: str | Path, *, path_role: str = "controller"
+def _load_manifest_document(
+    path: str | Path, *, path_role: Literal["controller", "pod"] = "controller"
 ) -> dict[str, Any]:
     try:
         manifest = json.loads(Path(path).read_text())
@@ -573,10 +619,45 @@ def validate_workload_manifest(
     core = {key: value for key, value in manifest.items() if key != "manifest_digest"}
     if manifest.get("manifest_digest") != _digest(core):
         raise WorkloadError("launch manifest digest mismatch")
-    _validate_core(core, now=datetime.now(UTC), path_role=path_role)
-    if Path(path).parent.name != manifest["manifest_digest"]:
+    if path_role == "controller" and Path(path).parent.name != manifest["manifest_digest"]:
         raise WorkloadError("launch manifest path does not match its digest")
     return manifest
+
+
+def validate_workload_manifest(
+    path: str | Path, *, path_role: Literal["controller", "pod"] = "controller"
+) -> dict[str, Any]:
+    manifest = _load_manifest_document(path, path_role=path_role)
+    core = {key: value for key, value in manifest.items() if key != "manifest_digest"}
+    _validate_core(core, now=datetime.now(UTC), path_role=path_role)
+    return manifest
+
+
+def _promote_pod_input_bundle(manifest: Mapping[str, Any]) -> None:
+    """Verify the staged bundle envelope, then promote before validating its members."""
+    input_bundle = _exact(
+        manifest.get("input_bundle"),
+        {"manifest", "bundle_digest", "incoming_root", "final_parent"},
+        "input_bundle",
+    )
+    bundle_record = _file_record(input_bundle["manifest"], "input_bundle.manifest", path_role="pod")
+    try:
+        bundle = load_bundle_manifest(Path(str(bundle_record["pod_path"])))
+    except TransferBundleError as exc:
+        raise WorkloadError("input bundle manifest is invalid") from exc
+    bundle_digest = _sha(input_bundle["bundle_digest"], "input_bundle.bundle_digest")
+    incoming_root = Path(_text(input_bundle["incoming_root"], "input_bundle.incoming_root"))
+    final_parent = Path(_text(input_bundle["final_parent"], "input_bundle.final_parent"))
+    if (
+        bundle.bundle_digest != bundle_digest
+        or incoming_root != Path(f"/workspace/mantis/transfer/incoming/{bundle_digest}/files")
+        or final_parent != Path("/workspace/mantis/inputs")
+    ):
+        raise WorkloadError("input bundle paths or identity are invalid")
+    try:
+        verify_and_promote(incoming_root, final_parent, bundle)
+    except TransferBundleError as exc:
+        raise WorkloadError("staged input bundle failed verification") from exc
 
 
 def _deployment_receipt(manifest: Mapping[str, Any], *, path_role: str) -> dict[str, Any]:
@@ -598,6 +679,7 @@ def _bound_workload(
     )
     environment = {
         "MANTIS_RUN_ID": str(manifest["run_id"]),
+        "MANTIS_WORKLOAD_DIGEST": str(manifest["manifest_digest"]),
         "MANTIS_WORKLOAD_MANIFEST": str(pod_path),
         "HF_HOME": str(input_root / "cache" / "huggingface"),
         "HF_HUB_OFFLINE": "1",
@@ -759,8 +841,14 @@ def execute_workload_manifest(
     sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
     """Revalidate one staged manifest inside the Pod and run training immediately."""
-    manifest = validate_workload_manifest(manifest_path, path_role="pod")
     environment = dict(os.environ if environ is None else environ)
+    envelope = _load_manifest_document(manifest_path, path_role="pod")
+    if envelope.get("manifest_digest") != _text(
+        environment.get("MANTIS_WORKLOAD_DIGEST"), "MANTIS_WORKLOAD_DIGEST"
+    ) or envelope.get("run_id") != _text(environment.get("MANTIS_RUN_ID"), "MANTIS_RUN_ID"):
+        raise WorkloadError("Pod manifest decision-bound identity mismatch")
+    _promote_pod_input_bundle(envelope)
+    manifest = validate_workload_manifest(manifest_path, path_role="pod")
     pod_id = _text(environment.get("RUNPOD_POD_ID"), "RUNPOD_POD_ID")
     token_record = manifest["monitor"]["token"]
     token_path = Path(str(token_record["pod_path"]))
@@ -779,27 +867,22 @@ def execute_workload_manifest(
     if runtime_check.get("passed") is not True or runtime_check.get("scope") != "runtime_cuda":
         raise WorkloadError("in-Pod CUDA self-check did not pass")
     _replace_json(artifact_root / "runtime-image-self-check.json", runtime_check)
-    input_bundle = manifest["input_bundle"]
-    try:
-        verify_and_promote(
-            Path(str(input_bundle["incoming_root"])),
-            Path(str(input_bundle["final_parent"])),
-            load_bundle_manifest(Path(str(input_bundle["manifest"]["pod_path"]))),
-        )
-    except TransferBundleError as exc:
-        raise WorkloadError("staged input bundle failed verification") from exc
     stdout_path = artifact_root / "launcher.stdout.log"
     diagnostics_path = artifact_root / "runtime-diagnostics.json"
     command = [str(item) for item in manifest["start_command"]]
     with stdout_path.open("ab", buffering=0) as output:
-        tensorboard = service_factory(
-            list(tensorboard_command(artifact_root)),
-            stdout=output,
-            stderr=subprocess.STDOUT,
-            env=environment,
-            start_new_session=True,
+        tensorboard = (
+            None
+            if manifest.get("workload_kind") == "frozen_expected_r"
+            else service_factory(
+                list(tensorboard_command(artifact_root)),
+                stdout=output,
+                stderr=subprocess.STDOUT,
+                env=environment,
+                start_new_session=True,
+            )
         )
-        if tensorboard.poll() is not None:
+        if tensorboard is not None and tensorboard.poll() is not None:
             raise WorkloadError("TensorBoard failed before training started")
         try:
             process = process_factory(
@@ -816,7 +899,7 @@ def execute_workload_manifest(
             )
             while True:
                 return_code = process.poll()
-                tensorboard_return_code = tensorboard.poll()
+                tensorboard_return_code = tensorboard.poll() if tensorboard is not None else None
                 if return_code is None and tensorboard_return_code is not None:
                     process.terminate()
                     process.wait(timeout=10)
@@ -835,7 +918,9 @@ def execute_workload_manifest(
                         "run_id": manifest["run_id"],
                         "pod_id": pod_id,
                         "process_id": str(process.pid),
-                        "tensorboard_process_id": str(tensorboard.pid),
+                        "tensorboard_process_id": (
+                            str(tensorboard.pid) if tensorboard is not None else None
+                        ),
                         "tensorboard_return_code": tensorboard_return_code,
                         "process_return_code": return_code,
                         "gpu_allocation": gpu,
@@ -877,8 +962,9 @@ def execute_workload_manifest(
                 progress += 1
                 sleep(float(manifest["monitor"]["poll_seconds"]))
         finally:
-            tensorboard.terminate()
-            tensorboard.wait(timeout=10)
+            if tensorboard is not None:
+                tensorboard.terminate()
+                tensorboard.wait(timeout=10)
 
 
 def sign_heartbeat(payload: Mapping[str, Any], token: str) -> dict[str, Any]:

@@ -5,12 +5,17 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import shlex
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
@@ -86,6 +91,9 @@ class _ComparisonProgress:
 _SOURCE_REVISION = "0c94f8ceb9f1d1421dd292ed917090df8c31605b"
 _HUB_REVISION = "99fe0f548960e272fbfa4b82fd9b5b5956779dfd"
 _WEIGHTS_SHA256 = "49d46d9a49cccdc87c46f4e0088fa52c0a6ef7eb4c13de5cc9815426b7b17ab1"
+_OFFICIAL_IMAGE = (
+    "runpod/pytorch@sha256:0a360022e8de4375af99430f84e8b38951acc397252163a37ceac7204d01be35"
+)
 _INITIAL_SCREEN = (
     "initial_screen",
     "2023-07-01",
@@ -364,12 +372,21 @@ def compare_frozen_artifacts(
         )
     if comparison_device == "cuda" and cpu_exception:
         raise FrozenExpectedRError("CPU exception is only valid for a CPU comparison")
-    if output.exists() or output.with_suffix(output.suffix + ".tmp").exists():
-        raise FrozenExpectedRError(f"comparison output already exists: {output}")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    progress = _ComparisonProgress(
-        progress_path or output.with_name(f"{output.stem}.progress.json")
+    effective_progress_path = progress_path or output.with_name(f"{output.stem}.progress.json")
+    completed = _validated_completed_comparison(
+        input_manifest_path,
+        embedding_manifest_path,
+        output,
+        config,
+        comparison_device,
+        effective_progress_path,
     )
+    if completed is not None:
+        return completed
+    if output.with_suffix(output.suffix + ".tmp").exists():
+        raise FrozenExpectedRError(f"partial comparison output exists: {output}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    progress = _ComparisonProgress(effective_progress_path)
     progress.path.parent.mkdir(parents=True, exist_ok=True)
     progress.write("loading")
     try:
@@ -385,15 +402,523 @@ def compare_frozen_artifacts(
             comparison_device=comparison_device,
             progress=progress,
         )
+        result["provenance"] = _comparison_provenance(
+            input_manifest_path, embedding_manifest_path, config
+        )
         result["comparison_backend"]["cpu_exception"] = cpu_exception or None
         result.pop("artifact_sha256", None)
         result["artifact_sha256"] = _json_digest(result)
     except Exception:
         progress.write("failed", terminal_state="failed")
         raise
-    _atomic_json(output, result)
     progress.write("complete", terminal_state="complete")
+    _atomic_json(output, result)
     return result
+
+
+def _comparison_provenance(
+    input_manifest_path: Path,
+    embedding_manifest_path: Path,
+    config: FrozenExpectedRConfig,
+) -> dict[str, Any]:
+    try:
+        input_manifest = json.loads(input_manifest_path.read_text())
+        embedding_manifest = json.loads(embedding_manifest_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FrozenExpectedRError("comparison provenance is unreadable") from exc
+    if not isinstance(input_manifest, dict) or not isinstance(embedding_manifest, dict):
+        raise FrozenExpectedRError("comparison provenance must be an object")
+    return {
+        "input_manifest_sha256": input_manifest.get("manifest_sha256"),
+        "embedding_artifact_sha256": embedding_manifest.get("artifact_sha256"),
+        "config_sha256": config.digest,
+        "weights_sha256": config.weights_sha256,
+        "precision": embedding_manifest.get("precision"),
+        "parity_sha256": _json_digest(embedding_manifest.get("bf16_parity")),
+    }
+
+
+def _validated_completed_comparison(
+    input_manifest_path: Path,
+    embedding_manifest_path: Path,
+    output: Path,
+    config: FrozenExpectedRConfig,
+    comparison_device: Literal["cpu", "cuda"],
+    progress_path: Path | None = None,
+) -> dict[str, Any] | None:
+    if not output.exists():
+        return None
+    try:
+        result = json.loads(output.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FrozenExpectedRError("completed comparison is unreadable") from exc
+    if not isinstance(result, dict):
+        raise FrozenExpectedRError("completed comparison must be an object")
+    unsigned = dict(result)
+    digest = unsigned.pop("artifact_sha256", None)
+    if digest != _json_digest(unsigned):
+        raise FrozenExpectedRError("completed comparison digest mismatch")
+    expected = _comparison_provenance(input_manifest_path, embedding_manifest_path, config)
+    backend = result.get("comparison_backend", {})
+    if (
+        result.get("provenance") != expected
+        or result.get("config_sha256") != config.digest
+        or not isinstance(backend, dict)
+        or backend.get("device") != comparison_device
+        or result.get("status") not in {"passed", "stopped"}
+        or result.get("selected") not in {"raw", "mantis", "stop"}
+    ):
+        raise FrozenExpectedRError("completed comparison provenance mismatch")
+    if progress_path is not None:
+        try:
+            progress = json.loads(progress_path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise FrozenExpectedRError("completed comparison progress is unreadable") from exc
+        if not isinstance(progress, dict) or progress.get("terminal_state") != "complete":
+            raise FrozenExpectedRError("completed comparison progress is incomplete")
+    return result
+
+
+def run_paid_frozen_screen(
+    config_path: Path,
+    input_manifest_path: Path,
+    embedding_output: Path,
+    comparison_output: Path,
+    progress_output: Path,
+) -> dict[str, Any]:
+    """Resume frozen embedding, then run or validate the immutable CUDA comparison."""
+    config = FrozenExpectedRConfig.from_json(config_path)
+    if comparison_output.with_suffix(comparison_output.suffix + ".tmp").exists():
+        raise FrozenExpectedRError(f"partial comparison output exists: {comparison_output}")
+    embedding = FrozenMantisEmbedder(config).embed(input_manifest_path, embedding_output)
+    if embedding.get("status") != "complete":
+        raise FrozenExpectedRError("paid embedding did not complete")
+    selection = compare_frozen_artifacts(
+        input_manifest_path,
+        embedding_output / "manifest.json",
+        comparison_output,
+        config,
+        comparison_device="cuda",
+        progress_path=progress_output,
+    )
+    return {
+        "embedding_status": "complete",
+        "selection_status": selection["status"],
+    }
+
+
+_FOCUSED_CHECKS = {
+    "causality_next_fill": (
+        "mantis-v2/tests/test_expected_r_screen.py::test_candidate_timestamps_are_causal_and_long_trail_matches_oracle",
+    ),
+    "label_replay_parity": (
+        "mantis-v2/tests/test_expected_r_screen.py::test_short_stop_and_target_use_next_open_and_costs",
+        "mantis-v2/tests/test_expected_r_screen.py::test_active_trail_precedes_same_bar_target_contact",
+    ),
+    "topstep_accounting": (
+        "mantis-v2/tests/test_expected_r_screen.py::test_default_costs_match_one_mnq_contract",
+        "mantis-v2/tests/test_expected_r_screen.py::test_session_exit_uses_last_completed_bar_before_cutoff",
+    ),
+    "artifact_resume": (
+        "mantis-v2/tests/test_frozen_expected_r.py::test_atomic_embedding_resume_skips_complete_shards",
+        "mantis-v2/tests/test_frozen_expected_r.py::test_completed_embedding_rejects_changed_config_and_modified_shard",
+    ),
+}
+
+
+def write_focused_check_receipt(
+    output: Path,
+    *,
+    runner: Callable[[list[str]], int] | None = None,
+) -> dict[str, Any]:
+    """Run the four bounded public checks and publish their exact receipt."""
+    if output.exists() or output.with_suffix(output.suffix + ".tmp").exists():
+        raise FrozenExpectedRError("focused check receipt already exists")
+    command = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-q",
+        *(node for nodes in _FOCUSED_CHECKS.values() for node in nodes),
+    ]
+    started = time.monotonic()
+    return_code = (
+        runner(command) if runner is not None else subprocess.run(command, check=False).returncode
+    )
+    duration = time.monotonic() - started
+    if return_code != 0:
+        raise FrozenExpectedRError("focused preflight checks failed")
+    if duration >= 60:
+        raise FrozenExpectedRError("focused preflight checks exceeded 60 seconds")
+    payload = {
+        "schema_version": 1,
+        "checks": {name: True for name in _FOCUSED_CHECKS},
+        "node_ids": {name: list(nodes) for name, nodes in _FOCUSED_CHECKS.items()},
+        "duration_seconds": duration,
+        "producer_source_sha256": source_digest(Path(__file__).resolve().parents[3]),
+    }
+    payload["receipt_sha256"] = _json_digest(payload)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_json(output, payload)
+    return payload
+
+
+def _paid_control_config(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FrozenExpectedRError("paid control config is unreadable") from exc
+    required = {
+        "schema_version",
+        "run_id",
+        "source_revision",
+        "frozen_config",
+        "input_manifest",
+        "input_bundle_manifest",
+        "dependency_lock",
+        "source_archive",
+        "official_bootstrap_receipt",
+        "spend_ledger",
+        "authorization",
+        "heartbeat_token",
+        "pod_paths",
+        "artifacts",
+        "provider",
+        "runpodctl",
+    }
+    if not isinstance(value, dict) or set(value) != required or value.get("schema_version") != 1:
+        raise FrozenExpectedRError("paid control config keys mismatch")
+    nested = {
+        "pod_paths": {
+            "authorization",
+            "dependency_lock",
+            "frozen_config",
+            "heartbeat_token",
+            "input_bundle_manifest",
+            "input_manifest",
+            "official_bootstrap_receipt",
+            "preflight",
+            "source_archive",
+            "spend_ledger",
+            "workload_experiment",
+        },
+        "artifacts": {"controller", "backup"},
+        "provider": {
+            "budget_usd",
+            "datacenter_id",
+            "deadline_hours",
+            "hourly_rate_usd",
+            "ram_gb",
+            "storage_usd_per_gb_hour",
+            "vcpu",
+            "volume_id",
+            "volume_size_gb",
+        },
+        "runpodctl": {"version", "source_commit", "binary_sha256"},
+    }
+    for section, keys in nested.items():
+        if not isinstance(value[section], dict) or set(value[section]) != keys:
+            raise FrozenExpectedRError(f"paid control config {section} keys mismatch")
+    run_id = value["run_id"]
+    source_revision = value["source_revision"]
+    if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id):
+        raise FrozenExpectedRError("paid control run_id is invalid")
+    if not isinstance(source_revision, str) or not re.fullmatch(r"[0-9a-f]{40}", source_revision):
+        raise FrozenExpectedRError("paid control source_revision is invalid")
+    for pod_path in value["pod_paths"].values():
+        parsed = Path(str(pod_path))
+        if not parsed.is_absolute() or ".." in parsed.parts:
+            raise FrozenExpectedRError("paid control Pod path is invalid")
+    return value
+
+
+def _dual_file_record(controller: Path, pod: str) -> dict[str, Any]:
+    if not controller.is_file() or not Path(pod).is_absolute():
+        raise FrozenExpectedRError("paid control file path is invalid")
+    return {
+        "controller_path": str(controller.resolve()),
+        "pod_path": pod,
+        "sha256": sha256_file(controller),
+        "size": controller.stat().st_size,
+    }
+
+
+def write_paid_planning_inputs(config_path: Path, output: Path) -> dict[str, Any]:
+    """Create checks, preflight, and zero-cost RunPod planning inputs from one config."""
+    control = _paid_control_config(config_path)
+    output.mkdir(parents=True, exist_ok=False)
+    checks_path = output / "focused-checks.json"
+    checks = write_focused_check_receipt(checks_path)
+    paths = control["pod_paths"]
+    artifacts = control["artifacts"]
+    provider = control["provider"]
+    if (
+        not isinstance(paths, dict)
+        or not isinstance(artifacts, dict)
+        or not isinstance(provider, dict)
+    ):
+        raise FrozenExpectedRError("paid control config sections must be objects")
+    run_id = str(control["run_id"])
+    pod_root = f"/workspace/mantis/runs/{run_id}"
+    exact_command = shlex.join(
+        [
+            "uv",
+            "run",
+            "mantis-v2",
+            "frozen-screen-paid-workload",
+            "--config",
+            str(paths["frozen_config"]),
+            "--input",
+            str(paths["input_manifest"]),
+            "--embedding-output",
+            f"{pod_root}/embed",
+            "--comparison-output",
+            f"{pod_root}/selection.json",
+            "--progress-output",
+            f"{pod_root}/selection.progress.json",
+        ]
+    )
+    duration = min(
+        int(float(provider["deadline_hours"]) * 3600),
+        int(float(provider["budget_usd"]) / float(provider["hourly_rate_usd"]) * 3600),
+        6 * 3600,
+    )
+    preflight_path = output / "preflight.json"
+    write_paid_preflight(
+        Path(str(control["input_manifest"])),
+        Path(pod_root),
+        preflight_path,
+        exact_command=exact_command,
+        hourly_rate_usd=float(provider["hourly_rate_usd"]),
+        budget_usd=float(provider["budget_usd"]),
+        deadline_hours=duration / 3600,
+        check_duration_seconds=float(checks["duration_seconds"]),
+        checks={name: True for name in _FOCUSED_CHECKS},
+    )
+    frozen = FrozenExpectedRConfig.from_json(Path(str(control["frozen_config"])))
+    experiment_toml = output / "experiment.toml"
+    experiment_toml.write_text(
+        "\n".join(
+            (
+                "schema_version = 1",
+                "",
+                "[experiment]",
+                f'name = "{run_id}"',
+                'model_family = "mantis-v2"',
+                'stage = "qualification"',
+                f"seed = {frozen.seed}",
+                f'definition_sha256 = "{sha256_file(preflight_path)}"',
+                "sealed_holdout = false",
+                "",
+            )
+        )
+    )
+    intent = {
+        "schema_version": 1,
+        "intent_id": run_id,
+        "stage": "qualification",
+        "run_name": run_id,
+        "gpu_type": "NVIDIA L40S",
+        "datacenter_id": provider["datacenter_id"],
+        "gpu_count": 1,
+        "vcpu": provider["vcpu"],
+        "ram_gb": provider["ram_gb"],
+        "container_disk_gb": 50,
+        "image_ref": _OFFICIAL_IMAGE,
+        "template_id": "runpod-torch-v280",
+        "registry_auth_id": "",
+        "volume_id": provider["volume_id"],
+        "volume_size_gb": provider["volume_size_gb"],
+        "volume_mount_path": "/workspace",
+        "ports": ["22/tcp"],
+        "maximum_duration_seconds": duration,
+    }
+    intent_path = output / "intent.json"
+    _atomic_json(intent_path, intent)
+    workload_experiment = {
+        "evaluation": {"allow_holdout": False},
+        "data": {
+            "holdout_start": "2026-01-01T00:00:00+00:00",
+            "corpus_manifest_sha256": sha256_file(Path(str(control["input_manifest"]))),
+            "root": str(Path(str(paths["input_manifest"])).parent),
+            "corpus_manifest_path": paths["input_manifest"],
+        },
+        "model": {
+            "hub_model": frozen.hub_model,
+            "hub_revision": frozen.hub_revision,
+            "weights_sha256": frozen.weights_sha256,
+        },
+        "run": {"artifact_root": "/workspace/mantis/runs"},
+    }
+    workload_experiment_path = output / "workload-experiment.json"
+    _atomic_json(workload_experiment_path, workload_experiment)
+    result = {
+        "schema_version": 1,
+        "focused_checks": str(checks_path),
+        "preflight": str(preflight_path),
+        "experiment": str(experiment_toml),
+        "intent": str(intent_path),
+        "workload_experiment": str(workload_experiment_path),
+        "exact_command": exact_command,
+        "maximum_duration_seconds": duration,
+    }
+    _atomic_json(output / "planning-inputs.json", result)
+    return result
+
+
+def seal_paid_frozen_workload(
+    config_path: Path,
+    planning_root: Path,
+    decision_path: Path,
+    manifest_root: Path,
+    pod_manifest_path: Path,
+    bound_decision_path: Path,
+    *,
+    evaluated_at: datetime,
+) -> dict[str, Any]:
+    """Seal and bind the frozen workload without an operator-authored workload spec."""
+    from mantis_v2.runpod_config import load_launch_authorization, load_spend_ledger
+    from mantis_v2.runpod_workload import bind_workload_decision, seal_workload_manifest
+    from mantis_v2.transfer_bundle import load_bundle_manifest
+
+    control = _paid_control_config(config_path)
+    planning = json.loads((planning_root / "planning-inputs.json").read_text())
+    decision = json.loads(decision_path.read_text())
+    if not isinstance(planning, dict) or not isinstance(decision, dict):
+        raise FrozenExpectedRError("paid planning or decision input is invalid")
+    if decision.get("allowed") is not True:
+        raise FrozenExpectedRError("paid launch decision is not authorized")
+    paths = control["pod_paths"]
+    artifacts = control["artifacts"]
+    provider = control["provider"]
+    bundle_path = Path(str(control["input_bundle_manifest"]))
+    bundle = load_bundle_manifest(bundle_path)
+    expected_input_root = Path("/workspace/mantis/inputs") / bundle.bundle_digest
+    input_pod_path = Path(str(paths["input_manifest"]))
+    config_pod_path = Path(str(paths["frozen_config"]))
+    if not input_pod_path.is_relative_to(expected_input_root) or not config_pod_path.is_relative_to(
+        expected_input_root
+    ):
+        raise FrozenExpectedRError("frozen input paths must be inside the promoted bundle")
+    authorization_path = Path(str(control["authorization"]))
+    ledger_path = Path(str(control["spend_ledger"]))
+    authorization = load_launch_authorization(authorization_path)
+    ledger = load_spend_ledger(ledger_path)
+    preflight_path = planning_root / "preflight.json"
+    workload_experiment_path = planning_root / "workload-experiment.json"
+    run_id = str(control["run_id"])
+    pod_root = f"/workspace/mantis/runs/{run_id}"
+    exact_command = str(planning["exact_command"])
+    maximum_duration = int(planning["maximum_duration_seconds"])
+    compute_rate = Decimal(str(decision["observed_price_usd_per_gpu_hour"]))
+    storage_rate = Decimal(str(provider["storage_usd_per_gb_hour"]))
+    storage_gb = int(provider["volume_size_gb"])
+    startup = int(decision["startup_allowance_seconds"])
+    calculated_maximum = (
+        (compute_rate + storage_rate * Decimal(storage_gb))
+        * Decimal(maximum_duration + startup + 120)
+        / Decimal(3600)
+    )
+    maximum_cell = max(calculated_maximum, Decimal(str(decision["projected_spend_usd"])))
+    shutdown_reserve = compute_rate / Decimal(6) + storage_rate * Decimal(storage_gb) / Decimal(
+        3600
+    )
+    auth_record = _dual_file_record(authorization_path, str(paths["authorization"]))
+    core = {
+        "schema_version": 1,
+        "workload_kind": "frozen_expected_r",
+        "run_id": run_id,
+        "source_revision": control["source_revision"],
+        "dependency_lock": _dual_file_record(
+            Path(str(control["dependency_lock"])), str(paths["dependency_lock"])
+        ),
+        "image": {
+            "ref": decision["image_ref"],
+            "self_check": _dual_file_record(
+                Path(str(control["official_bootstrap_receipt"])),
+                str(paths["official_bootstrap_receipt"]),
+            ),
+        },
+        "bootstrap": {
+            "source_archive": _dual_file_record(
+                Path(str(control["source_archive"])), str(paths["source_archive"])
+            ),
+            "project_root": f"/workspace/mantis/runtime/{control['source_revision']}",
+            "venv_path": "/opt/mantis/venv",
+            "uv_version": "0.9.0",
+        },
+        "experiment_config": _dual_file_record(
+            workload_experiment_path, str(paths["workload_experiment"])
+        ),
+        "matrix_plan": _dual_file_record(preflight_path, str(paths["preflight"])),
+        "matrix_base_config": _dual_file_record(
+            Path(str(control["frozen_config"])), str(paths["frozen_config"])
+        ),
+        "input_bundle": {
+            "manifest": _dual_file_record(bundle_path, str(paths["input_bundle_manifest"])),
+            "bundle_digest": bundle.bundle_digest,
+            "incoming_root": f"/workspace/mantis/transfer/incoming/{bundle.bundle_digest}/files",
+            "final_parent": "/workspace/mantis/inputs",
+        },
+        "dataset_manifest": _dual_file_record(
+            Path(str(control["input_manifest"])), str(paths["input_manifest"])
+        ),
+        "spend_ledger": _dual_file_record(ledger_path, str(paths["spend_ledger"])),
+        "foundation_checkpoint": {
+            "repository": "paris-noah/MantisV2",
+            "revision": _HUB_REVISION,
+            "sha256": _WEIGHTS_SHA256,
+        },
+        "start_command": ["bash", "-lc", f"{exact_command} || {exact_command}"],
+        "artifacts": {
+            "pod": pod_root,
+            "controller": str(Path(str(artifacts["controller"])).resolve()),
+            "backup": str(Path(str(artifacts["backup"])).resolve()),
+        },
+        "resume": {"enabled": True, "same_run_only": True, "provenance_required": True},
+        "monitor": {
+            "tensorboard": None,
+            "heartbeat": f"{pod_root}/heartbeat.json",
+            "poll_seconds": 30,
+            "first_heartbeat_seconds": startup,
+            "miss_limit": 4,
+            "token": _dual_file_record(
+                Path(str(control["heartbeat_token"])), str(paths["heartbeat_token"])
+            ),
+        },
+        "maximum_duration_seconds": maximum_duration,
+        "quoted_rates": {
+            "compute_usd_per_hour": str(compute_rate),
+            "storage_usd_per_gb_hour": str(storage_rate),
+            "storage_gb": storage_gb,
+        },
+        "budget_guard": {
+            "stage": "qualification",
+            "reconciled_spend_usd": str(ledger.actual_spend_usd),
+            "unbilled_live_accrual_usd": str(ledger.reserved_spend_usd),
+            "stage_reconciled_spend_usd": str(ledger.bucket_actual_spend_usd["qualification"]),
+            "next_cell_maximum_usd": str(maximum_cell),
+            "shutdown_reserve_usd": str(shutdown_reserve),
+        },
+        "authorization": {
+            **auth_record,
+            "expires_at": authorization.expires_at.isoformat().replace("+00:00", "Z"),
+            "autopay_disabled": authorization.autopay_disabled,
+            "ordinary_launch_cutoff_usd": str(authorization.ordinary_launch_cutoff_usd),
+            "campaign_ceiling_usd": str(authorization.campaign_ceiling_usd),
+            "recovery_authorized": authorization.recovery_authorized,
+        },
+        "runpodctl": dict(control["runpodctl"]),
+    }
+    manifest = seal_workload_manifest(core, manifest_root)
+    bound = bind_workload_decision(
+        manifest_path=manifest,
+        decision=decision,
+        pod_manifest_path=pod_manifest_path,
+        output_path=bound_decision_path,
+        evaluated_at=evaluated_at,
+    )
+    return {"manifest": str(manifest), "bound_decision": str(bound)}
 
 
 def write_paid_preflight(
@@ -465,7 +990,10 @@ def write_paid_preflight(
 
 
 def validate_paid_runner_contract(
-    receipt_path: Path, workload_manifest: dict[str, Any]
+    receipt_path: Path,
+    workload_manifest: dict[str, Any],
+    *,
+    path_role: Literal["controller", "pod"] = "controller",
 ) -> dict[str, Any]:
     """Bind the frozen-screen preflight to the existing paid workload supervisor."""
     try:
@@ -479,7 +1007,14 @@ def validate_paid_runner_contract(
     if receipt_digest != _json_digest(unsigned) or receipt.get("ready") is not True:
         raise FrozenExpectedRError("paid preflight receipt digest mismatch")
     input_record = receipt.get("input_manifest", {})
-    input_path = Path(str(input_record.get("path", "")))
+    staged_input = workload_manifest.get("dataset_manifest", {})
+    input_path = Path(
+        str(
+            staged_input.get(f"{path_role}_path", input_record.get("path", ""))
+            if isinstance(staged_input, dict)
+            else input_record.get("path", "")
+        )
+    )
     if (
         not input_path.is_file()
         or input_path.stat().st_size != input_record.get("size")
@@ -525,7 +1060,7 @@ def validate_paid_runner_contract(
         return False
 
     bundle = workload_manifest.get("input_bundle", {}).get("manifest", {})
-    bundle_path = Path(str(bundle.get("controller_path", "")))
+    bundle_path = Path(str(bundle.get(f"{path_role}_path", "")))
     try:
         bundle_payload = json.loads(bundle_path.read_text())
     except (OSError, json.JSONDecodeError) as exc:

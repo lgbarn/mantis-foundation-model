@@ -87,6 +87,30 @@ Classify the repository into one state:
 Do not infer state from filenames alone. Confirm manifests, process state, and
 run identity.
 
+## Operate the frozen expected-R paid screen
+
+Read the machine-local control config and the emitted
+`planning-inputs.json`; do not assemble launch JSON by hand. The only supported
+sequence is `frozen-screen-prepare` -> `transfer-bundle` ->
+`frozen-screen-plan-paid` -> unapproved `runpod-plan` -> exact short-lived
+authorization -> authorized `runpod-plan` -> `transfer-stage-runpod` ->
+`frozen-screen-seal-paid` -> `frozen-screen-run`. The first plan is intentionally
+denied and exists to produce the authorization subject. Do not reuse its output
+as an approved decision.
+
+Before `frozen-screen-run`, require one L40S, one GPU, current staged-bundle
+evidence, a 30-second monitor, maximum duration no greater than six hours or
+the rate-derived `$10` limit, and zero live Pods. Once started, inspect only the
+supervisor ledger, heartbeat, and replicated run artifacts. Do not start a
+duplicate, edit the config/input/manifest/decision, or run a separate compare.
+The one built-in retry owns recovery: it verifies completed atomic embedding
+shards and a complete immutable comparison; partial or mismatched comparison
+state fails closed. The supervisor must replicate `embed/`, `selection.json`,
+and `selection.progress.json`, terminate the exact Pod, verify absence, and
+record billing reconciliation. If any of those terminal receipts is missing,
+the screen is not complete. This stage never opens holdout, simulates Topstep,
+runs PPO/fine-tuning, audits accepted Parquet, or starts TensorBoard.
+
 ## Protect active and resumable runs
 
 During an active or resumable run, never:

@@ -103,32 +103,61 @@ this order with unique external artifact paths:
 
 ```bash
 just frozen-screen-prepare /path/to/NQ_3min.parquet /external/frozen-screen-v1/input
-just frozen-screen-preflight \
-  /external/frozen-screen-v1/input/manifest.json \
-  /network-volume/frozen-screen-v1/embed \
-  /external/frozen-screen-v1/focused-checks.json \
-  "uv run mantis-v2 frozen-screen-embed --config /workspace/mantis/mantis-v2/configs/frozen-expected-r-v1.json --input /workspace/input/manifest.json --output /workspace/output/embed" \
-  HOURLY_RATE DEADLINE_HOURS /external/frozen-screen-v1/preflight.json
+just transfer-bundle /path/to/frozen-input-transfer.toml
+just frozen-screen-plan-paid \
+  /path/to/frozen-paid-control.json /external/frozen-screen-v1/control
+just runpod-plan \
+  infra/runpod/configs/platform-v1.toml /path/to/runpod-local.toml \
+  /external/frozen-screen-v1/control/experiment.toml \
+  /external/frozen-screen-v1/control/intent.json CURRENT_INVENTORY.json \
+  CURRENT_LEDGER.json EVALUATED_AT /external/frozen-screen-v1/unapproved-decision.json
+# Create the short-lived authorization for the emitted subject digest, then:
+just runpod-plan-authorized \
+  infra/runpod/configs/platform-v1.toml /path/to/runpod-local.toml \
+  /external/frozen-screen-v1/control/experiment.toml \
+  /external/frozen-screen-v1/control/intent.json CURRENT_INVENTORY.json \
+  CURRENT_LEDGER.json AUTHORIZATION.json EVALUATED_AT \
+  /external/frozen-screen-v1/approved-decision.json
+just transfer-stage-runpod \
+  /path/to/frozen-input-transfer.toml /path/to/runpod-local.toml \
+  /external/frozen-screen-v1/approved-decision.json
+just frozen-screen-seal-paid \
+  /path/to/frozen-paid-control.json /external/frozen-screen-v1/control \
+  /external/frozen-screen-v1/approved-decision.json \
+  /external/frozen-screen-v1/manifests \
+  /workspace/mantis/control/frozen/launch-manifest.json \
+  /external/frozen-screen-v1/bound-decision.json EVALUATED_AT
 just frozen-screen-run \
-  /external/frozen-screen-v1/preflight.json \
-  /external/frozen-screen-v1/launch-manifest.json \
+  /external/frozen-screen-v1/control/preflight.json \
+  /external/frozen-screen-v1/manifests/MANIFEST_DIGEST/launch-manifest.json \
   /external/frozen-screen-v1/bound-decision.json \
   /path/to/runpod-local.toml /path/to/runpodctl
-just frozen-screen-compare \
-  /external/frozen-screen-v1/input/manifest.json \
-  /external/frozen-screen-v1/embed/manifest.json \
-  /external/frozen-screen-v1/selection.json \
-  mantis-v2/configs/frozen-expected-r-v1.json cuda
 ```
+
+Copy `configs/frozen-paid-control.example.json` outside git and replace every
+machine/provider placeholder. The transfer TOML must stage the prepared input,
+the frozen config, and the pinned offline Hugging Face cache under the bundle
+paths recorded in that control config. `frozen-screen-plan-paid` runs the four
+focused checks itself and emits the preflight receipt plus the experiment and
+L40S intent; operators do not hand-author those JSON files. The first zero-cost
+plan emits the exact authorization subject. The second plan consumes its
+short-lived authorization. `frozen-screen-seal-paid` creates the content-addressed
+workload manifest and bound decision directly from the same config and approved
+decision; no workload JSON is hand-authored.
 
 The preflight receipt requires the four focused checks to pass in under 60
 seconds, one L40S, a maximum $10 budget, a deadline no longer than six hours or
 the rate-derived spend limit, a 30-second health interval, one provenance-safe
 resume, and termination after success or a second failure. `frozen-screen-run`
 is the only supported paid route: it verifies that the staged bundle contains
-the receipted input, the workload command retries the exact embed command only
-once, and the existing RunPod supervisor enforces milestones, deadline, budget,
-termination, artifact replication, and billing reconciliation. The embedder verifies
+the receipted input, the workload command retries the exact combined embed and
+CUDA comparison command only once, and the existing RunPod supervisor enforces
+milestones, deadline, budget, termination, artifact replication, and billing
+reconciliation. Completed atomic embedding shards resume. A completed immutable
+comparison is identity-validated and returned; partial, modified, or mismatched
+comparison state fails closed. Both `embed/manifest.json` and
+`selection.json`/`selection.progress.json` replicate from the same Pod artifact
+root before termination. The embedder verifies
 the pinned official revision and weights, uses native MantisV2 preprocessing,
 transformer layer 2 and combined CLS/mean pooling, then performs fixed-fixture
 BF16/FP32 parity. Failed parity uses FP32. Each feature/metadata shard is atomic;
