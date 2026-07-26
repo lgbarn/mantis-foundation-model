@@ -269,8 +269,8 @@ def test_committed_h100_qualification_inputs_are_coherent(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
     platform = load_platform_config(ROOT / "infra/runpod/configs/platform-v1.toml")
-    assert platform.budget.qualification_usd == 15
-    assert platform.budget.production_usd == 95
+    assert platform.budget.qualification_usd == 20
+    assert platform.budget.production_usd == 90
     assert (
         platform.budget.storage_usd
         + platform.budget.qualification_usd
