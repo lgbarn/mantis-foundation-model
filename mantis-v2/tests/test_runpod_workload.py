@@ -622,7 +622,9 @@ def test_official_template_bootstrap_is_hash_bound_and_uses_no_registry_auth(
     assert "/start.sh" in workload["docker_args"]
     assert "sha256sum -c -" in workload["docker_args"]
     assert "uv sync --frozen --no-dev" in workload["docker_args"]
-    assert "exec uv run mantis-v2" in workload["docker_args"]
+    assert "uv run mantis-v2" in workload["docker_args"]
+    assert "bootstrap.log" in workload["docker_args"]
+    assert "bootstrap_exit_status" in workload["docker_args"]
     assert "/uv " not in workload["docker_args"]
     assert workload["environment"]["MANTIS_BASE_IMAGE"] == manifest["image"]["ref"]
     assert workload["environment"]["MANTIS_LOCK_PATH"].endswith("/uv.lock")

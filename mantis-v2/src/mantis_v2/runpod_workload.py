@@ -695,6 +695,8 @@ def _bound_workload(
         source_sha256 = str(archive["sha256"])
         source_path = str(archive["pod_path"])
         uv_version = str(bootstrap["uv_version"])
+        artifact_root = str(manifest["artifacts"]["pod"])
+        bootstrap_log = f"{artifact_root}/bootstrap.log"
         environment.update(
             {
                 "MANTIS_BASE_IMAGE": str(manifest["image"]["ref"]),
@@ -710,7 +712,13 @@ def _bound_workload(
         )
         temporary = f"{project_root}.partial"
         shell = (
-            "set -euo pipefail; /start.sh & "
+            "set -euo pipefail; "
+            f"artifact_root={shlex.quote(artifact_root)}; "
+            f"bootstrap_log={shlex.quote(bootstrap_log)}; "
+            'mkdir -p "$artifact_root"; exec >>"$bootstrap_log" 2>&1; '
+            "trap 'status=$?; printf \"bootstrap_exit_status=%s\\n\" \"$status\"; "
+            "exit \"$status\"' EXIT; "
+            "/start.sh & "
             f"archive={shlex.quote(source_path)}; project={shlex.quote(project_root)}; "
             f"expected={shlex.quote(source_sha256)}; temporary={shlex.quote(temporary)}; "
             'printf "%s  %s\\n" "$expected" "$archive" | sha256sum -c -; '
@@ -720,7 +728,7 @@ def _bound_workload(
             'rm -rf "$project"; mv "$temporary" "$project"; '
             'cd "$project"; '
             "uv sync --frozen --no-dev; "
-            f"exec uv run mantis-v2 workload-execute --manifest {shlex.quote(str(pod_path))}"
+            f"uv run mantis-v2 workload-execute --manifest {shlex.quote(str(pod_path))}"
         )
         docker_args = f"bash -lc {shlex.quote(shell)}"
     else:
