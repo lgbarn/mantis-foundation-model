@@ -66,6 +66,9 @@ frozen-screen-seal-paid control_config planning_root decision manifest_root pod_
 frozen-screen-run preflight manifest decision local runpodctl_binary aws_binary="aws":
     uv run mantis-v2 runpod-supervise-workload --preflight {{quote(preflight)}} --manifest {{quote(manifest)}} --decision {{quote(decision)}} --local {{quote(local)}} --runpodctl-binary {{quote(runpodctl_binary)}} --aws-binary {{quote(aws_binary)}}
 
+runpod-replicate-workload manifest decision local aws_binary="aws":
+    uv run mantis-v2 runpod-replicate-workload --manifest {{quote(manifest)}} --decision {{quote(decision)}} --local {{quote(local)}} --aws-binary {{quote(aws_binary)}}
+
 verify-upstream:
     uv run mantis-v2 verify-upstream --config mantis-v2/configs/nextleg.toml
 

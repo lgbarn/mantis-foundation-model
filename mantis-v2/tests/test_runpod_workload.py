@@ -1186,3 +1186,16 @@ def test_pod_executor_revalidates_then_immediately_runs_and_signs_heartbeats(
     assert validation_order == ["load:pod", "promote", "validate:pod"]
     parsed = _parser().parse_args(["workload-execute", "--manifest", str(manifest_path)])
     assert parsed.manifest == manifest_path
+    replicated = _parser().parse_args(
+        [
+            "runpod-replicate-workload",
+            "--manifest",
+            str(manifest_path),
+            "--decision",
+            "decision.json",
+            "--local",
+            "local.toml",
+        ]
+    )
+    assert replicated.command == "runpod-replicate-workload"
+    assert replicated.manifest == manifest_path
