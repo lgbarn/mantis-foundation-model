@@ -106,17 +106,26 @@ just frozen-screen-prepare /path/to/NQ_3min.parquet /external/frozen-screen-v1/i
 just transfer-bundle /path/to/frozen-input-transfer.toml
 just frozen-screen-plan-paid \
   /path/to/frozen-paid-control.json /external/frozen-screen-v1/control
+just runpod-provider-snapshot \
+  infra/runpod/configs/platform-v1.toml /path/to/runpod-local.toml \
+  /path/to/frozen-paid-control.json \
+  /external/frozen-screen-v1/control/intent.json /path/to/runpodctl \
+  /external/frozen-screen-v1/provider-snapshot
 just runpod-plan \
   infra/runpod/configs/platform-v1.toml /path/to/runpod-local.toml \
   /external/frozen-screen-v1/control/experiment.toml \
-  /external/frozen-screen-v1/control/intent.json CURRENT_INVENTORY.json \
-  CURRENT_LEDGER.json EVALUATED_AT /external/frozen-screen-v1/unapproved-decision.json
+  /external/frozen-screen-v1/control/intent.json \
+  /external/frozen-screen-v1/provider-snapshot/inventory.json \
+  /external/frozen-screen-v1/provider-snapshot/spend-ledger.json EVALUATED_AT \
+  /external/frozen-screen-v1/unapproved-decision.json
 # Create the short-lived authorization for the emitted subject digest, then:
 just runpod-plan-authorized \
   infra/runpod/configs/platform-v1.toml /path/to/runpod-local.toml \
   /external/frozen-screen-v1/control/experiment.toml \
-  /external/frozen-screen-v1/control/intent.json CURRENT_INVENTORY.json \
-  CURRENT_LEDGER.json AUTHORIZATION.json EVALUATED_AT \
+  /external/frozen-screen-v1/control/intent.json \
+  /external/frozen-screen-v1/provider-snapshot/inventory.json \
+  /external/frozen-screen-v1/provider-snapshot/spend-ledger.json \
+  AUTHORIZATION.json EVALUATED_AT \
   /external/frozen-screen-v1/approved-decision.json
 just transfer-stage-runpod \
   /path/to/frozen-input-transfer.toml /path/to/runpod-local.toml \
@@ -144,6 +153,19 @@ plan emits the exact authorization subject. The second plan consumes its
 short-lived authorization. `frozen-screen-seal-paid` creates the content-addressed
 workload manifest and bound decision directly from the same config and approved
 decision; no workload JSON is hand-authored.
+
+`runpod-provider-snapshot` is the required live read-only boundary before both
+planning calls. It uses the pinned official `runpodctl` for account balance,
+current spend, live Pods, GPU/datacenter availability, and network-volume
+identity. It requires zero live Pods and permits current spend only through the
+configured persistent-volume storage ceiling, rebuilds
+the campaign ledger only from completed local lifecycle spend receipts, and
+writes planner-compatible inventory and ledger JSON plus `provenance.json`.
+Because this pinned CLI does not report offer price or free volume bytes, the
+snapshot records the reviewed control price and the platform minimum-free-byte
+policy as explicit conservative bindings. The command fails rather than emit a
+partial snapshot when provider, volume, binary, controller, or receipt evidence
+does not reconcile.
 
 The preflight receipt requires the four focused checks to pass in under 60
 seconds, one L40S, a maximum $10 budget, a deadline no longer than six hours or
